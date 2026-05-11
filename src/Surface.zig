@@ -5361,6 +5361,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {},
         ),
 
+        .toggle_quadrant_zoom => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .toggle_quadrant_zoom,
+            {},
+        ),
+
         .toggle_readonly => {
             self.readonly = !self.readonly;
             _ = try self.rt_app.performAction(

@@ -525,6 +525,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Toggle the zoom state of the current split.",
         }},
 
+        .toggle_quadrant_zoom => comptime &.{.{
+            .action = .toggle_quadrant_zoom,
+            .title = "Toggle Quadrant Zoom",
+            .description = "Toggle the zoom state of the current quadrant.",
+        }},
+
         .toggle_readonly => comptime &.{.{
             .action = .toggle_readonly,
             .title = "Toggle Read-Only Mode",

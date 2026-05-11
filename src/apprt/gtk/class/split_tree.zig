@@ -194,6 +194,7 @@ pub const SplitTree = extern struct {
             .init("equalize", actionEqualize, null),
             .init("zoom", actionZoom, null),
             .init("close-split", actionCloseSplit, null),
+            .init("zoom-quadrant", actionZoomQuadrant, null),
         };
 
         _ = ext.actions.addAsGroup(Self, self, "split-tree", &actions);
@@ -335,17 +336,45 @@ pub const SplitTree = extern struct {
     pub fn goto(self: *Self, to: Surface.Tree.Goto) bool {
         const tree = self.getTree() orelse return false;
         const active = self.getActiveSurfaceHandle() orelse return false;
-        const target = if (tree.goto(
-            Application.default().allocator(),
-            active,
-            to,
-        )) |handle_|
-            handle_ orelse return false
-        else |err| switch (err) {
-            // Nothing we can do in this scenario. This is highly unlikely
-            // since split trees don't use that much memory. The application
-            // is probably about to crash in other ways.
-            error.OutOfMemory => return false,
+        const active_surface = tree.nodes[active.idx()].leaf;
+        const alloc = Application.default().allocator();
+
+        const target = target: {
+            if (tree.quadrant_zoomed) |quadrant| {
+                if (active != quadrant and tree.quadrant(active) != quadrant) {
+                    tree.zoom(null);
+                    self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+                    self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+                    return false;
+                }
+
+                const handle = tree.gotoBounded(
+                    alloc,
+                    quadrant,
+                    active,
+                    to,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return false,
+                } orelse {
+                    active_surface.setBellRinging(true);
+                    return true;
+                };
+
+                break :target handle;
+            }
+
+            break :target if (tree.goto(
+                alloc,
+                active,
+                to,
+            )) |handle_|
+                handle_ orelse return false
+            else |err| switch (err) {
+                // Nothing we can do in this scenario. This is highly unlikely
+                // since split trees don't use that much memory. The application
+                // is probably about to crash in other ways.
+                error.OutOfMemory => return false,
+            };
         };
 
         // If we aren't changing targets then we did nothing.
@@ -370,8 +399,10 @@ pub const SplitTree = extern struct {
             defer config_obj.unref();
             const config = config_obj.get();
 
-            if (!config.@"split-preserve-zoom".navigation) {
-                tree.zoomed = null;
+            if (tree.quadrant_zoomed) |quadrant| {
+                tree.zoomed = quadrant;
+            } else if (!config.@"split-preserve-zoom".navigation) {
+                tree.zoom(null);
             } else {
                 tree.zoom(target);
             }
@@ -673,15 +704,24 @@ pub const SplitTree = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const tree = self.getTree() orelse return;
-        if (tree.zoomed != null) {
-            tree.zoomed = null;
-        } else {
-            const active = self.getActiveSurfaceHandle() orelse return;
-            if (tree.zoomed == active) return;
-            tree.zoom(active);
-        }
+        const active = self.getActiveSurfaceHandle() orelse return;
+        tree.toggleSplitZoom(active);
 
         self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+        self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+    }
+
+    pub fn actionZoomQuadrant(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const tree = self.getTree() orelse return;
+        const active = self.getActiveSurfaceHandle() orelse return;
+        if (!tree.toggleQuadrantZoom(active)) return;
+
+        self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+        self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
     }
 
     pub fn actionCloseSplit(
@@ -753,6 +793,17 @@ pub const SplitTree = extern struct {
         const old_tree = self.getTree() orelse return;
         const next_focus: ?*Surface = next_focus: {
             const alloc = Application.default().allocator();
+            if (old_tree.quadrant_zoomed) |quadrant| {
+                if (handle == quadrant or old_tree.quadrant(handle) == quadrant) {
+                    const next_handle: ?Surface.Tree.Node.Handle =
+                        (old_tree.gotoBounded(alloc, quadrant, handle, .previous) catch null) orelse
+                        (old_tree.gotoBounded(alloc, quadrant, handle, .next) catch null);
+                    if (next_handle) |next| {
+                        if (next != handle) break :next_focus old_tree.nodes[next.idx()].leaf;
+                    }
+                }
+            }
+
             const next_handle: Surface.Tree.Node.Handle =
                 (old_tree.goto(alloc, handle, .previous) catch null) orelse
                 (old_tree.goto(alloc, handle, .next) catch null) orelse

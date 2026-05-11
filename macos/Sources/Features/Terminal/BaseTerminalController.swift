@@ -200,6 +200,11 @@ class BaseTerminalController: NSWindowController,
             object: nil)
         center.addObserver(
             self,
+            selector: #selector(ghosttyDidToggleQuadrantZoom(_:)),
+            name: Ghostty.Notification.didToggleQuadrantZoom,
+            object: nil)
+        center.addObserver(
+            self,
             selector: #selector(ghosttyDidResizeSplit(_:)),
             name: Ghostty.Notification.didResizeSplit,
             object: nil)
@@ -445,6 +450,19 @@ class BaseTerminalController: NSWindowController,
     private func findNextFocusTargetAfterClosing(node: SplitTree<Ghostty.SurfaceView>.Node) -> Ghostty.SurfaceView? {
         guard let root = surfaceTree.root else { return nil }
 
+        if let quadrantZoomed = surfaceTree.quadrantZoomed,
+           quadrantZoomed.contains(node) {
+            if quadrantZoomed.leftmostLeaf() == node.leftmostLeaf() {
+                if let target = surfaceTree.focusTarget(for: .next, from: node, within: quadrantZoomed),
+                   target !== node.leftmostLeaf() {
+                    return target
+                }
+            } else if let target = surfaceTree.focusTarget(for: .previous, from: node, within: quadrantZoomed),
+                      target !== node.leftmostLeaf() {
+                return target
+            }
+        }
+
         // If we're the leftmost, then we move to the next surface after closing.
         // Otherwise, we move to the previous.
         if root.leftmostLeaf() == node.leftmostLeaf() {
@@ -654,17 +672,47 @@ class BaseTerminalController: NSWindowController,
         guard let targetNode = surfaceTree.root?.node(view: target) else { return }
 
         // Find the next surface to focus
-        guard let nextSurface = surfaceTree.focusTarget(for: direction.toSplitTreeFocusDirection(), from: targetNode) else {
-            return
+        let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = direction.toSplitTreeFocusDirection()
+        let nextSurface: Ghostty.SurfaceView
+        if let zoomedQuadrant = surfaceTree.quadrantZoomed {
+            guard zoomedQuadrant.contains(targetNode) else {
+                surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
+                return
+            }
+
+            guard let next = surfaceTree.focusTarget(
+                for: focusDirection,
+                from: targetNode,
+                within: zoomedQuadrant
+            ) else {
+                NotificationCenter.default.post(
+                    name: .ghosttyBellDidRing,
+                    object: target
+                )
+                return
+            }
+            nextSurface = next
+        } else {
+            guard let next = surfaceTree.focusTarget(for: focusDirection, from: targetNode) else {
+                return
+            }
+            nextSurface = next
         }
 
         if surfaceTree.zoomed != nil {
-            if derivedConfig.splitPreserveZoom.contains(.navigation) {
+            if let zoomedQuadrant = surfaceTree.quadrantZoomed {
                 surfaceTree = SplitTree(
                     root: surfaceTree.root,
-                    zoomed: surfaceTree.root?.node(view: nextSurface))
+                    zoomed: zoomedQuadrant,
+                    quadrantZoomed: zoomedQuadrant)
+            } else if derivedConfig.splitPreserveZoom.contains(.navigation) {
+                let nextNode = surfaceTree.root?.node(view: nextSurface)
+                surfaceTree = SplitTree(
+                    root: surfaceTree.root,
+                    zoomed: nextNode,
+                    quadrantZoomed: nil)
             } else {
-                surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil)
+                surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
             }
         }
 
@@ -681,14 +729,20 @@ class BaseTerminalController: NSWindowController,
 
         // Toggle the zoomed state
         if surfaceTree.zoomed == targetNode {
-            // Already zoomed, unzoom it
-            surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil)
+            // Already zoomed; restore the quadrant layer if one exists.
+            surfaceTree = SplitTree(
+                root: surfaceTree.root,
+                zoomed: surfaceTree.quadrantZoomed,
+                quadrantZoomed: surfaceTree.quadrantZoomed)
         } else {
             // We require that the split tree have splits
             guard surfaceTree.isSplit else { return }
 
             // Not zoomed or different node zoomed, zoom this node
-            surfaceTree = SplitTree(root: surfaceTree.root, zoomed: targetNode)
+            surfaceTree = SplitTree(
+                root: surfaceTree.root,
+                zoomed: targetNode,
+                quadrantZoomed: surfaceTree.quadrantZoomed)
         }
 
         // Move focus to our window. Importantly this ensures that if we click the
@@ -697,6 +751,31 @@ class BaseTerminalController: NSWindowController,
 
         // Ensure focus stays on the target surface. We lose focus when we do
         // this so we need to grab it again.
+        DispatchQueue.main.async {
+            Ghostty.moveFocus(to: target)
+        }
+    }
+
+    @objc private func ghosttyDidToggleQuadrantZoom(_ notification: Notification) {
+        // The target must be within our tree
+        guard let target = notification.object as? Ghostty.SurfaceView else { return }
+        guard let targetNode = surfaceTree.root?.node(view: target) else { return }
+
+        // We require that the split tree have splits
+        guard surfaceTree.isSplit else { return }
+        guard let quadrantNode = surfaceTree.quadrant(containing: targetNode) else { return }
+
+        if surfaceTree.zoomed != nil || surfaceTree.quadrantZoomed != nil {
+            surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
+        } else {
+            surfaceTree = SplitTree(
+                root: surfaceTree.root,
+                zoomed: quadrantNode,
+                quadrantZoomed: quadrantNode)
+        }
+
+        window?.makeKeyAndOrderFront(nil)
+
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: target)
         }
@@ -1358,6 +1437,11 @@ class BaseTerminalController: NSWindowController,
     @IBAction func splitZoom(_ sender: Any) {
         guard let surface = focusedSurface?.surface else { return }
         ghostty.splitToggleZoom(surface: surface)
+    }
+
+    @IBAction func quadrantZoom(_ sender: Any) {
+        guard let surface = focusedSurface?.surface else { return }
+        ghostty.splitToggleQuadrantZoom(surface: surface)
     }
 
     @IBAction func splitMoveFocusPrevious(_ sender: Any) {

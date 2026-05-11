@@ -373,6 +373,9 @@ extension Ghostty.Notification {
     /// Notification sent to toggle split maximize/unmaximize.
     static let didToggleSplitZoom = Notification.Name("com.mitchellh.ghostty.didToggleSplitZoom")
 
+    /// Notification sent to toggle quadrant maximize/unmaximize.
+    static let didToggleQuadrantZoom = Notification.Name("com.mitchellh.ghostty.didToggleQuadrantZoom")
+
     /// Notification
     static let didReceiveInitialWindowFrame = Notification.Name("com.mitchellh.ghostty.didReceiveInitialWindowFrame")
     static let FrameKey = "com.mitchellh.ghostty.frame"

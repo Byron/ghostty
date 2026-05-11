@@ -10,6 +10,10 @@ struct SplitTree<ViewType: NSView & Codable & Identifiable> {
     /// size of the view area where the splits are shown.
     let zoomed: Node?
 
+    /// The node that is currently zoomed as a quadrant. This is the lower zoom
+    /// layer beneath `zoomed`; `zoomed` remains the effective rendered node.
+    let quadrantZoomed: Node?
+
     /// A single node in the tree is either a leaf node (a view) or a split (has a
     /// left/right or top/bottom).
     indirect enum Node: Codable {
@@ -100,6 +104,12 @@ extension SplitTree {
         if case .split = root { true } else { false }
     }
 
+    init(root: Node?, zoomed: Node?) {
+        self.root = root
+        self.zoomed = zoomed
+        self.quadrantZoomed = nil
+    }
+
     init() {
         self.init(root: nil, zoomed: nil)
     }
@@ -121,12 +131,28 @@ extension SplitTree {
     }
 
     /// Insert a new view at the given view point by creating a split in the given direction.
-    /// This will always reset the zoomed state of the tree.
+    /// This resets the zoomed state unless the insertion is inside a zoomed quadrant.
     func inserting(view: ViewType, at: ViewType, direction: NewDirection) throws -> Self {
         guard let root else { throw SplitError.viewNotFound }
+        let oldTarget = root.node(view: at)
+        let newRoot = try root.inserting(view: view, at: at, direction: direction)
+        if let quadrantZoomed,
+           let oldTarget,
+           quadrantZoomed.contains(oldTarget),
+           let newTarget = newRoot.node(view: at) {
+            let newTree = Self(root: newRoot, zoomed: nil)
+            if let newQuadrant = newTree.quadrant(containing: newTarget) {
+                return .init(
+                    root: newRoot,
+                    zoomed: newQuadrant,
+                    quadrantZoomed: newQuadrant)
+            }
+        }
+
         return .init(
-            root: try root.inserting(view: view, at: at, direction: direction),
-            zoomed: nil)
+            root: newRoot,
+            zoomed: nil,
+            quadrantZoomed: nil)
     }
     /// Find a node containing a view with the specified ID.
     /// - Parameter id: The ID of the view to find
@@ -143,16 +169,33 @@ extension SplitTree {
 
         // If we're removing the root itself, return an empty tree
         if root == target {
-            return .init(root: nil, zoomed: nil)
+            return .init(root: nil, zoomed: nil, quadrantZoomed: nil)
         }
 
         // Otherwise, try to remove from the tree
         let newRoot = root.remove(target)
+        guard let newRoot else {
+            return .init(root: nil, zoomed: nil, quadrantZoomed: nil)
+        }
+
+        if let quadrantZoomed {
+            let remainingNodes = quadrantZoomed.leaves().compactMap { newRoot.node(view: $0) }
+            let newTree = Self(root: newRoot, zoomed: nil)
+            if let remainingNode = remainingNodes.first {
+                let newQuadrant = newTree.quadrant(containing: remainingNode) ?? remainingNode
+                return .init(
+                    root: newRoot,
+                    zoomed: newQuadrant,
+                    quadrantZoomed: newQuadrant)
+            }
+
+            return .init(root: newRoot, zoomed: nil, quadrantZoomed: nil)
+        }
 
         // Update zoomed if it was the removed node
         let newZoomed = (zoomed == target) ? nil : zoomed
 
-        return .init(root: newRoot, zoomed: newZoomed)
+        return .init(root: newRoot, zoomed: newZoomed, quadrantZoomed: nil)
     }
 
     /// Replace a node in the tree with a new node.
@@ -169,18 +212,26 @@ extension SplitTree {
 
         // Update zoomed if it was the replaced node
         let newZoomed = (zoomed == node) ? newNode : zoomed
+        let newQuadrantZoomed = (quadrantZoomed == node) ? newNode : quadrantZoomed
 
-        return .init(root: newRoot, zoomed: newZoomed)
+        return .init(root: newRoot, zoomed: newZoomed, quadrantZoomed: newQuadrantZoomed)
     }
 
     /// Find the next view to focus based on the current focused node and direction
     func focusTarget(for direction: FocusDirection, from currentNode: Node) -> ViewType? {
+        focusTarget(for: direction, from: currentNode, within: nil)
+    }
+
+    /// Find the next view to focus, optionally constrained to a subtree.
+    func focusTarget(for direction: FocusDirection, from currentNode: Node, within subtree: Node?) -> ViewType? {
         guard let root else { return nil }
+        let focusRoot = subtree ?? root
+        guard focusRoot.contains(currentNode) else { return nil }
 
         switch direction {
         case .previous:
             // For previous, we traverse in order and find the previous leaf from our leftmost
-            let allLeaves = root.leaves()
+            let allLeaves = focusRoot.leaves()
             let currentView = currentNode.leftmostLeaf()
             guard let currentIndex = allLeaves.firstIndex(where: { $0 === currentView }) else {
                 // Shouldn't be possible leftmostLeaf can't return something that doesn't exist!
@@ -191,7 +242,7 @@ extension SplitTree {
 
         case .next:
             // For previous, we traverse in order and find the next leaf from our rightmost
-            let allLeaves = root.leaves()
+            let allLeaves = focusRoot.leaves()
             let currentView = currentNode.rightmostLeaf()
             guard let currentIndex = allLeaves.firstIndex(where: { $0 === currentView }) else {
                 return nil
@@ -201,7 +252,7 @@ extension SplitTree {
 
         case .spatial(let spatialDirection):
             // Get spatial representation and find best candidate
-            let spatial = root.spatial()
+            let spatial = focusRoot.spatial()
             let nodes = spatial.slots(in: spatialDirection, from: currentNode)
 
             // If we have no nodes in the direction specified then we don't do
@@ -236,7 +287,7 @@ extension SplitTree {
     func equalized() -> Self {
         guard let root else { return self }
         let newRoot = root.equalize()
-        return .init(root: newRoot, zoomed: zoomed)
+        return .init(root: newRoot, zoomed: zoomed, quadrantZoomed: quadrantZoomed)
     }
 
     /// Resize a node in the tree by the given pixel amount in the specified direction.
@@ -329,7 +380,45 @@ extension SplitTree {
 
         // Replace the split node with the new one
         let newRoot = try root.replacingNode(at: splitPath, with: .split(newSplit))
-        return .init(root: newRoot, zoomed: nil)
+        return .init(root: newRoot, zoomed: nil, quadrantZoomed: nil)
+    }
+
+    /// Returns the 2x2 quadrant cell containing a node. The quadrant is the subtree
+    /// reached as soon as the path from the root has crossed both a horizontal and
+    /// a vertical split.
+    func quadrant(containing target: Node) -> Node? {
+        guard let root else { return nil }
+
+        func search(
+            current: Node,
+            seenHorizontal: Bool,
+            seenVertical: Bool
+        ) -> Node? {
+            guard case .split(let split) = current else { return nil }
+
+            let child: Node
+            if split.left.contains(target) {
+                child = split.left
+            } else if split.right.contains(target) {
+                child = split.right
+            } else {
+                return nil
+            }
+
+            let newSeenHorizontal = seenHorizontal || split.direction == .horizontal
+            let newSeenVertical = seenVertical || split.direction == .vertical
+            if newSeenHorizontal && newSeenVertical && !(seenHorizontal && seenVertical) {
+                return child
+            }
+
+            return search(
+                current: child,
+                seenHorizontal: newSeenHorizontal,
+                seenVertical: newSeenVertical
+            )
+        }
+
+        return search(current: root, seenHorizontal: false, seenVertical: false)
     }
 
     /// Returns the total bounds of the split hierarchy using NSView bounds.
@@ -348,6 +437,7 @@ private enum CodingKeys: String, CodingKey {
     case version
     case root
     case zoomed
+    case quadrantZoomed
 
     static let currentVersion: Int = 1
 }
@@ -377,6 +467,13 @@ extension SplitTree: Codable {
         } else {
             self.zoomed = nil
         }
+
+        if let quadrantZoomedPath = try container.decodeIfPresent(Path.self, forKey: .quadrantZoomed),
+           let root = self.root {
+            self.quadrantZoomed = root.node(at: quadrantZoomedPath)
+        } else {
+            self.quadrantZoomed = nil
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -392,6 +489,10 @@ extension SplitTree: Codable {
         // map it on decode back to the correct node in root.
         if let zoomed, let path = root?.path(to: zoomed) {
             try container.encode(path, forKey: .zoomed)
+        }
+
+        if let quadrantZoomed, let path = root?.path(to: quadrantZoomed) {
+            try container.encode(path, forKey: .quadrantZoomed)
         }
     }
 }
@@ -419,6 +520,11 @@ extension SplitTree.Node {
 
             return split.right.find(id: id)
         }
+    }
+
+    /// Returns true if this node contains the target node.
+    func contains(_ target: Node) -> Bool {
+        path(to: target) != nil
     }
 
     /// Returns the node in the tree that contains the given view.
@@ -1376,15 +1482,18 @@ extension SplitTree {
     struct StructuralIdentity: Hashable {
         private let root: Node?
         private let zoomed: Node?
+        private let quadrantZoomed: Node?
 
         init(_ tree: SplitTree) {
             self.root = tree.root
             self.zoomed = tree.zoomed
+            self.quadrantZoomed = tree.quadrantZoomed
         }
 
         static func == (lhs: Self, rhs: Self) -> Bool {
             areNodesStructurallyEqual(lhs.root, rhs.root) &&
-            areNodesStructurallyEqual(lhs.zoomed, rhs.zoomed)
+            areNodesStructurallyEqual(lhs.zoomed, rhs.zoomed) &&
+            areNodesStructurallyEqual(lhs.quadrantZoomed, rhs.quadrantZoomed)
         }
 
         func hash(into hasher: inout Hasher) {
@@ -1395,6 +1504,10 @@ extension SplitTree {
             hasher.combine(1) // Zoomed marker
             if let zoomed = zoomed {
                 zoomed.hashStructure(into: &hasher)
+            }
+            hasher.combine(2) // Quadrant zoom marker
+            if let quadrantZoomed = quadrantZoomed {
+                quadrantZoomed.hashStructure(into: &hasher)
             }
         }
 

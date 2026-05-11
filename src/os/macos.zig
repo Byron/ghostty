@@ -18,9 +18,8 @@ pub fn isAtLeastVersion(major: i64, minor: i64, patch: i64) bool {
 
 pub const AppSupportDirError = Allocator.Error || error{AppleAPIFailed};
 
-/// Return the path to the application support directory for Ghostty
-/// with the given sub path joined. This allocates the result using the
-/// given allocator.
+/// Return the path to the application support directory for Ghostty with the
+/// given sub path joined. This allocates the result using the given allocator.
 pub fn appSupportDir(
     alloc: Allocator,
     sub_path: []const u8,
@@ -28,7 +27,7 @@ pub fn appSupportDir(
     return try commonDir(
         alloc,
         .NSApplicationSupportDirectory,
-        &.{ build_config.bundle_id, sub_path },
+        &.{ bundleIdentifier(), sub_path },
     );
 }
 
@@ -43,8 +42,22 @@ pub fn cacheDir(
     return try commonDir(
         alloc,
         .NSCachesDirectory,
-        &.{ build_config.bundle_id, sub_path },
+        &.{ bundleIdentifier(), sub_path },
     );
+}
+
+fn bundleIdentifier() []const u8 {
+    const NSBundle = objc.getClass("NSBundle") orelse return build_config.bundle_id;
+    const bundle = NSBundle.msgSend(objc.Object, objc.sel("mainBundle"), .{});
+    if (bundle.value == null) return build_config.bundle_id;
+
+    const identifier = bundle.msgSend(objc.Object, objc.sel("bundleIdentifier"), .{});
+    if (identifier.value == null) return build_config.bundle_id;
+
+    const c_str = identifier.getProperty(?[*:0]const u8, "UTF8String") orelse
+        return build_config.bundle_id;
+    const result = std.mem.sliceTo(c_str, 0);
+    return if (result.len > 0) result else build_config.bundle_id;
 }
 
 pub const SetQosClassError = error{

@@ -663,6 +663,12 @@ pub const Action = union(enum) {
     /// reflect this by displaying an icon indicating the zoomed state.
     toggle_split_zoom,
 
+    /// Zoom in or out of the current quadrant.
+    ///
+    /// A quadrant is a 2x2 cell formed by crossing one horizontal and one
+    /// vertical split. It may contain multiple nested splits.
+    toggle_quadrant_zoom,
+
     /// Toggle read-only mode for the current surface.
     ///
     /// When a surface is in read-only mode:
@@ -1458,6 +1464,7 @@ pub const Action = union(enum) {
             .goto_split,
             .goto_window,
             .toggle_split_zoom,
+            .toggle_quadrant_zoom,
             .toggle_readonly,
             .resize_split,
             .equalize_splits,

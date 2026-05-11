@@ -223,6 +223,13 @@ extension Ghostty {
             }
         }
 
+        func splitToggleQuadrantZoom(surface: ghostty_surface_t) {
+            let action = "toggle_quadrant_zoom"
+            if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
+                logger.warning("action failed action=\(action)")
+            }
+        }
+
         func toggleFullscreen(surface: ghostty_surface_t) {
             let action = "toggle_fullscreen"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
@@ -638,6 +645,9 @@ extension Ghostty {
 
             case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM:
                 return toggleSplitZoom(app, target: target)
+
+            case GHOSTTY_ACTION_TOGGLE_QUADRANT_ZOOM:
+                return toggleQuadrantZoom(app, target: target)
 
             case GHOSTTY_ACTION_INSPECTOR:
                 controlInspector(app, target: target, mode: action.action.inspector)
@@ -1489,6 +1499,36 @@ extension Ghostty {
 
                 NotificationCenter.default.post(
                     name: Notification.didToggleSplitZoom,
+                    object: surfaceView
+                )
+                return true
+
+            default:
+                assertionFailure()
+                return false
+            }
+        }
+
+        private static func toggleQuadrantZoom(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s) -> Bool {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("toggle quadrant zoom does nothing with an app target")
+                return false
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return false }
+                guard let surfaceView = self.surfaceView(from: surface) else { return false }
+                guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
+
+                // If the window has no splits, the action is not performable
+                guard controller.surfaceTree.isSplit else { return false }
+                guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }
+                guard controller.surfaceTree.quadrant(containing: targetNode) != nil else { return false }
+
+                NotificationCenter.default.post(
+                    name: Notification.didToggleQuadrantZoom,
                     object: surfaceView
                 )
                 return true

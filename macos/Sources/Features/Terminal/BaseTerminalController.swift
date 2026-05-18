@@ -90,13 +90,17 @@ class BaseTerminalController: NSWindowController,
     private var bellStateCancellable: AnyCancellable?
 
     /// An override title for the tab/window set by the user via prompt_tab_title.
-    /// When set, this takes precedence over the computed title from the terminal.
+    /// When set, this is shown alongside the computed title from the terminal.
     var titleOverride: String? {
         didSet { applyTitleToWindow() }
     }
 
-    /// The last computed title from the focused surface (without the override).
-    private var lastComputedTitle: String = "👻"
+    /// The last title from the focused surface, before applying tab overrides
+    /// or bell indicators.
+    private var lastSurfaceTitle: String = "👻"
+
+    /// Whether the last title source had an active bell.
+    private var lastTitleBell: Bool = false
 
     /// The time that undo/redo operations that contain running ptys are valid for.
     var undoExpiration: Duration {
@@ -910,16 +914,25 @@ class BaseTerminalController: NSWindowController,
         // closed surfaces.
         if let titleSurface = focusedSurface ?? lastFocusedSurface,
            surfaceTree.contains(titleSurface) {
+            // Apply the current surface title immediately on focus change.
+            // The publisher below keeps future shell/title changes in sync.
+            titleDidChange(to: titleSurface.title, bell: titleSurface.bell)
+
             // If we have a surface, we want to listen for title changes.
             titleSurface.$title
                 .combineLatest(titleSurface.$bell)
-                .map { [weak self] in self?.computeTitle(title: $0, bell: $1) ?? "" }
-                .sink { [weak self] in self?.titleDidChange(to: $0) }
+                .sink { [weak self] in self?.titleDidChange(to: $0, bell: $1) }
                 .store(in: &focusedSurfaceCancellables)
         } else {
             // There is no surface to listen to titles for.
-            titleDidChange(to: "👻")
+            titleDidChange(to: "👻", bell: false)
         }
+    }
+
+    static func composeTitle(tabOverride: String?, terminalTitle: String) -> String {
+        guard let tabOverride else { return terminalTitle }
+        guard !terminalTitle.isEmpty else { return tabOverride }
+        return "\(tabOverride) - \(terminalTitle)"
     }
 
     private func computeTitle(title: String, bell: Bool) -> String {
@@ -931,22 +944,22 @@ class BaseTerminalController: NSWindowController,
         return result
     }
 
-    private func titleDidChange(to: String) {
-        lastComputedTitle = to
+    private func titleDidChange(to title: String, bell: Bool) {
+        lastSurfaceTitle = title
+        lastTitleBell = bell
         applyTitleToWindow()
     }
 
     private func applyTitleToWindow() {
         guard let window else { return }
 
-        if let titleOverride {
-            window.title = computeTitle(
-                title: titleOverride,
-                bell: focusedSurface?.bell ?? false)
-            return
-        }
-
-        window.title = lastComputedTitle
+        let title = computeTitle(
+            title: Self.composeTitle(
+                tabOverride: titleOverride,
+                terminalTitle: lastSurfaceTitle),
+            bell: lastTitleBell)
+        guard window.title != title else { return }
+        window.title = title
     }
 
     func pwdDidChange(to: URL?) {

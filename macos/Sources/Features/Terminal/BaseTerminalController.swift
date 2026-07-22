@@ -100,6 +100,9 @@ class BaseTerminalController: NSWindowController,
     /// Cancellable for clipboard confirmation requests from surfaces in this controller.
     private var clipboardConfirmationCancellable: AnyCancellable?
 
+    /// Cancellable for title and command state across all surfaces in this controller.
+    private var titleStateCancellable: AnyCancellable?
+
     /// An override title for the tab/window set by the user via prompt_tab_title.
     /// When set, this is shown alongside the computed title from the terminal.
     var titleOverride: String? {
@@ -109,6 +112,9 @@ class BaseTerminalController: NSWindowController,
     /// The last title from the focused surface, before applying tab overrides
     /// or bell indicators.
     private var lastSurfaceTitle: String = "👻"
+
+    /// Last focused surface, retained for transient nil focus during view updates.
+    private weak var lastFocusedSurface: Ghostty.SurfaceView?
 
     /// Whether the last title source had an active bell.
     private var lastTitleBell: Bool = false
@@ -160,6 +166,7 @@ class BaseTerminalController: NSWindowController,
         // Setup our bell state for the window
         setupBellNotificationPublisher()
         setupClipboardConfirmationPublisher()
+        setupTitlePublisher()
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -958,37 +965,48 @@ class BaseTerminalController: NSWindowController,
     // MARK: TerminalViewDelegate
 
     func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
-        let lastFocusedSurface = focusedSurface
+        if let focusedSurface { lastFocusedSurface = focusedSurface }
         focusedSurface = to
 
         // Important to cancel any prior subscriptions
         focusedSurfaceCancellables = []
 
-        // Setup our title listener. If we have a focused surface we always use that.
-        // Otherwise, we try to use our last focused surface. In either case, we only
-        // want to care if the surface is in the tree so we don't listen to titles of
-        // closed surfaces.
-        if let titleSurface = focusedSurface ?? lastFocusedSurface,
-           surfaceTree.contains(titleSurface) {
-            // Apply the current surface title immediately on focus change.
-            // The publisher below keeps future shell/title changes in sync.
-            titleDidChange(to: titleSurface.title, bell: titleSurface.bell)
-
-            // If we have a surface, we want to listen for title changes.
-            titleSurface.$title
-                .combineLatest(titleSurface.$bell)
-                .sink { [weak self] in self?.titleDidChange(to: $0, bell: $1) }
+        // Bell state remains tied to focus even when the title comes from a busy pane.
+        if let bellSurface = focusedSurface ?? lastFocusedSurface,
+           surfaceTree.contains(bellSurface) {
+            lastTitleBell = bellSurface.bell
+            bellSurface.$bell
+                .sink { [weak self] bell in
+                    self?.lastTitleBell = bell
+                    self?.applyTitleToWindow()
+                }
                 .store(in: &focusedSurfaceCancellables)
         } else {
-            // There is no surface to listen to titles for.
-            titleDidChange(to: "👻", bell: false)
+            lastTitleBell = false
         }
+
+        updateTitleSource()
+    }
+
+    static func selectTitleSurfaces<Surface: AnyObject>(
+        active: Surface?,
+        ordered: [Surface],
+        isRunning: (Surface) -> Bool
+    ) -> [Surface] {
+        let running = ordered.filter(isRunning)
+        guard !running.isEmpty else { return active.map { [$0] } ?? [] }
+        guard let active, isRunning(active) else { return running }
+        return [active] + running.filter { $0 !== active }
     }
 
     static func composeTitle(tabOverride: String?, terminalTitle: String) -> String {
         guard let tabOverride else { return terminalTitle }
         guard !terminalTitle.isEmpty else { return tabOverride }
         return "\(tabOverride) - \(terminalTitle)"
+    }
+
+    static func combineTitles(_ titles: [String]) -> String {
+        titles.joined(separator: ", ")
     }
 
     private func computeTitle(title: String, bell: Bool) -> String {
@@ -1000,9 +1018,17 @@ class BaseTerminalController: NSWindowController,
         return result
     }
 
-    private func titleDidChange(to title: String, bell: Bool) {
-        lastSurfaceTitle = title
-        lastTitleBell = bell
+    private func updateTitleSource() {
+        let surfaces = Array(surfaceTree)
+        let active = (focusedSurface ?? lastFocusedSurface)
+            .flatMap { surfaces.contains($0) ? $0 : nil }
+        let sources = Self.selectTitleSurfaces(
+            active: active,
+            ordered: surfaces,
+            isRunning: \.commandRunning)
+        lastSurfaceTitle = sources.isEmpty
+            ? "👻"
+            : Self.combineTitles(sources.map(\.title))
         applyTitleToWindow()
     }
 
@@ -1786,6 +1812,19 @@ extension BaseTerminalController {
 // MARK: Combine Methods
 
 extension BaseTerminalController {
+    private func setupTitlePublisher() {
+        let titleChanges = surfaceValuesPublisher(valueKeyPath: \.title, publisherKeyPath: \.$title)
+            .map { _ in () }
+        let commandChanges = surfaceValuesPublisher(
+            valueKeyPath: \.commandRunning,
+            publisherKeyPath: \.$commandRunning)
+            .map { _ in () }
+
+        titleStateCancellable = Publishers.Merge(titleChanges, commandChanges)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.updateTitleSource() }
+    }
+
     /// Publishes an app-wide notification whenever this terminal window's aggregate
     /// bell state changes.
     private func setupBellNotificationPublisher() {

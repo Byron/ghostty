@@ -116,6 +116,12 @@ extension Ghostty {
             }
         }
 
+        /// True while shell integration reports a command is running.
+        @Published private(set) var commandRunning: Bool = false
+
+        func commandDidStart() { commandRunning = true }
+        func commandDidFinish() { commandRunning = false }
+
         // An initial size to request for a window. This will only affect
         // then the view is moved to a new window.
         var initialSize: NSSize?

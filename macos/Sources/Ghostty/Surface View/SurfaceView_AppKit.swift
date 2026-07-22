@@ -108,6 +108,12 @@ extension Ghostty {
         /// True when the bell is active. This is set inactive on focus or event.
         @Published private(set) var bell: Bool = false
 
+        /// True while shell integration reports a command is running.
+        @Published private(set) var commandRunning: Bool = false
+
+        func commandDidStart() { commandRunning = true }
+        func commandDidFinish() { commandRunning = false }
+
         // An initial size to request for a window. This will only affect
         // then the view is moved to a new window.
         var initialSize: NSSize?

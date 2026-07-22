@@ -766,6 +766,7 @@ pub const Application = extern struct {
             .toggle_split_zoom => return Action.toggleSplitZoom(target),
             .toggle_quadrant_zoom => return Action.toggleQuadrantZoom(target),
             .show_on_screen_keyboard => return Action.showOnScreenKeyboard(target),
+            .command_started => return Action.commandStarted(target),
             .command_finished => return Action.commandFinished(target, value),
             .readonly => return Action.setReadonly(target, value),
 
@@ -2834,6 +2835,13 @@ const Action = struct {
             .surface => |surface| {
                 return surface.rt_surface.gobj().commandFinished(value);
             },
+        }
+    }
+
+    pub fn commandStarted(target: apprt.Target) bool {
+        switch (target) {
+            .app => return false,
+            .surface => |surface| return surface.rt_surface.gobj().commandStarted(),
         }
     }
 

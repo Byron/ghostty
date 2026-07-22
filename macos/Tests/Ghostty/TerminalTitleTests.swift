@@ -3,6 +3,14 @@ import Testing
 
 @Suite
 struct TerminalTitleTests {
+    private final class Surface {
+        let running: Bool
+
+        init(running: Bool) {
+            self.running = running
+        }
+    }
+
     @Test func tabOverrideComposesWithTerminalTitle() {
         #expect(BaseTerminalController.composeTitle(
             tabOverride: "Tab",
@@ -19,5 +27,53 @@ struct TerminalTitleTests {
         #expect(BaseTerminalController.composeTitle(
             tabOverride: nil,
             terminalTitle: "Terminal") == "Terminal")
+    }
+
+    @Test func busyTitlesAreCombined() {
+        #expect(BaseTerminalController.combineTitles(["one", "two"]) == "one, two")
+    }
+
+    @Test func focusedRunningSurfaceComesFirst() {
+        let first = Surface(running: true)
+        let focused = Surface(running: true)
+        let last = Surface(running: true)
+
+        let result = BaseTerminalController.selectTitleSurfaces(
+            active: focused,
+            ordered: [first, focused, last],
+            isRunning: \.running)
+
+        #expect(result.count == 3)
+        #expect(result[0] === focused)
+        #expect(result[1] === first)
+        #expect(result[2] === last)
+    }
+
+    @Test func runningSurfacesKeepLayoutOrderWhenFocusedSurfaceIsIdle() {
+        let focused = Surface(running: false)
+        let first = Surface(running: true)
+        let second = Surface(running: true)
+
+        let result = BaseTerminalController.selectTitleSurfaces(
+            active: focused,
+            ordered: [focused, first, second],
+            isRunning: \.running)
+
+        #expect(result.count == 2)
+        #expect(result[0] === first)
+        #expect(result[1] === second)
+    }
+
+    @Test func focusedSurfaceWinsWhenAllSurfacesAreIdle() {
+        let focused = Surface(running: false)
+        let other = Surface(running: false)
+
+        let result = BaseTerminalController.selectTitleSurfaces(
+            active: focused,
+            ordered: [other, focused],
+            isRunning: \.running)
+
+        #expect(result.count == 1)
+        #expect(result[0] === focused)
     }
 }

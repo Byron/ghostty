@@ -1127,6 +1127,13 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 
         .start_command => {
             self.command_timer = try .now();
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .command_started,
+                {},
+            ) catch |err| {
+                log.warn("apprt failed to notify command start={}", .{err});
+            };
         },
 
         .stop_command => |v| timer: {

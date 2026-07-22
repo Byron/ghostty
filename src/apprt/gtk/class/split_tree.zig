@@ -55,6 +55,23 @@ pub const SplitTree = extern struct {
             );
         };
 
+        /// Changes whenever the inputs to the tab title change.
+        pub const @"title-generation" = struct {
+            pub const name = "title-generation";
+            const impl = gobject.ext.defineProperty(
+                name,
+                Self,
+                u64,
+                .{
+                    .accessor = gobject.ext.typedAccessor(
+                        Self,
+                        u64,
+                        .{ .getter = getTitleGeneration },
+                    ),
+                },
+            );
+        };
+
         pub const @"has-surfaces" = struct {
             pub const name = "has-surfaces";
             const impl = gobject.ext.defineProperty(
@@ -168,6 +185,8 @@ pub const SplitTree = extern struct {
         /// Used to store state about a pending surface close for the
         /// close dialog.
         pending_close: ?Surface.Tree.Node.Handle,
+
+        title_generation: u64 = 0,
 
         pub var offset: c_int = 0;
     };
@@ -461,6 +480,27 @@ pub const SplitTree = extern struct {
                 self,
                 .{ .detail = "mapped" },
             );
+            _ = gobject.Object.signals.notify.connect(
+                surface,
+                *Self,
+                propSurfaceTitle,
+                self,
+                .{ .detail = "command-running" },
+            );
+            _ = gobject.Object.signals.notify.connect(
+                surface,
+                *Self,
+                propSurfaceTitle,
+                self,
+                .{ .detail = "title" },
+            );
+            _ = gobject.Object.signals.notify.connect(
+                surface,
+                *Self,
+                propSurfaceTitle,
+                self,
+                .{ .detail = "title-override" },
+            );
         }
     }
 
@@ -489,6 +529,15 @@ pub const SplitTree = extern struct {
         const tree = self.getTree() orelse return null;
         const handle = self.getActiveSurfaceHandle() orelse return null;
         return tree.nodes[handle.idx()].leaf;
+    }
+
+    pub fn getTitleGeneration(self: *Self) u64 {
+        return self.private().title_generation;
+    }
+
+    fn titleChanged(self: *Self) void {
+        self.private().title_generation +%= 1;
+        self.as(gobject.Object).notifyByPspec(properties.@"title-generation".impl.param_spec);
     }
 
     fn getActiveSurfaceHandle(self: *Self) ?Surface.Tree.Node.Handle {
@@ -845,6 +894,15 @@ pub const SplitTree = extern struct {
 
         // Our active surface probably changed
         self.as(gobject.Object).notifyByPspec(properties.@"active-surface".impl.param_spec);
+        self.titleChanged();
+    }
+
+    fn propSurfaceTitle(
+        _: *Surface,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        self.titleChanged();
     }
 
     fn propSurfaceMapped(
@@ -877,6 +935,7 @@ pub const SplitTree = extern struct {
         defer self.as(gobject.Object).thawNotify();
         self.as(gobject.Object).notifyByPspec(properties.@"has-surfaces".impl.param_spec);
         self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+        self.titleChanged();
 
         // If we were planning a rebuild or focus restore, always remove
         // that so we can start from a clean slate.
@@ -943,6 +1002,7 @@ pub const SplitTree = extern struct {
 
         // Our active surface may have changed
         self.as(gobject.Object).notifyByPspec(properties.@"active-surface".impl.param_spec);
+        self.titleChanged();
 
         return 0;
     }
@@ -1111,6 +1171,7 @@ pub const SplitTree = extern struct {
             // Properties
             gobject.ext.registerProperties(class, &.{
                 properties.@"active-surface".impl,
+                properties.@"title-generation".impl,
                 properties.@"has-surfaces".impl,
                 properties.@"is-zoomed".impl,
                 properties.tree.impl,

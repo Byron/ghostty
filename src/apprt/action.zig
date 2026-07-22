@@ -361,6 +361,9 @@ pub const Action = union(Key) {
     /// resized to take up the entire window and may contain multiple splits.
     toggle_quadrant_zoom,
 
+    /// A shell-integrated command has started running.
+    command_started,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -433,6 +436,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         toggle_quadrant_zoom,
+        command_started,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

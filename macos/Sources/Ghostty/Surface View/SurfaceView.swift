@@ -48,6 +48,9 @@ extension Ghostty {
         // Maintain whether our window has focus (is key) or not
         @State private var windowFocus: Bool = true
 
+        // Briefly show the working directory when this surface gains focus.
+        @State private var showFocusedWorkingDirectory: Bool = false
+
         #if canImport(AppKit)
         // Observe SecureInput to detect when its enabled
         @ObservedObject private var secureInput = SecureInput.shared
@@ -79,6 +82,9 @@ extension Ghostty {
                         .focusedValue(\.ghosttySurfaceView, surfaceView)
                         .focusedValue(\.ghosttySurfaceCellSize, surfaceView.cellSize)
                     #if canImport(AppKit)
+                        .onAppear {
+                            windowFocus = surfaceView.window?.isKeyWindow ?? true
+                        }
                         .onReceive(pubBecomeKey) { notification in
                             guard let window = notification.object as? NSWindow else { return }
                             guard let surfaceWindow = surfaceView.window else { return }
@@ -119,10 +125,34 @@ extension Ghostty {
                 }
 
 #if canImport(AppKit)
-                // Readonly indicator badge
-                if surfaceView.readonly {
-                    ReadonlyBadge {
+                SurfaceStatusBadges(
+                    readonly: surfaceView.readonly,
+                    workingDirectory: WorkingDirectoryBadge.presentation(
+                        pwd: surfaceView.pwd,
+                        isFocusedSurface: isFocusedSurface,
+                        windowFocus: windowFocus,
+                        showFocusedSurface: showFocusedWorkingDirectory
+                    ),
+                    onDisableReadonly: {
                         surfaceView.toggleReadonly(nil)
+                    }
+                )
+                .zIndex(1)
+                .task(id: isFocusedSurface && windowFocus) {
+                    guard isFocusedSurface && windowFocus else {
+                        showFocusedWorkingDirectory = false
+                        return
+                    }
+
+                    showFocusedWorkingDirectory = true
+                    do {
+                        try await Task.sleep(for: .seconds(1))
+                    } catch {
+                        return
+                    }
+
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        showFocusedWorkingDirectory = false
                     }
                 }
 
@@ -1043,6 +1073,90 @@ extension Ghostty {
         }
     }
 
+    // MARK: Surface Status Badges
+
+    struct SurfaceStatusBadges: View {
+        let readonly: Bool
+        let workingDirectory: WorkingDirectoryBadge.Presentation?
+        let onDisableReadonly: () -> Void
+
+        var body: some View {
+            VStack(alignment: .trailing, spacing: 6) {
+                if readonly {
+                    ReadonlyBadge(onDisable: onDisableReadonly)
+                }
+
+                if let workingDirectory {
+                    WorkingDirectoryBadge(presentation: workingDirectory)
+                        .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .padding(8)
+        }
+    }
+
+    struct WorkingDirectoryBadge: View {
+        enum Style: Equatable {
+            case normal
+            case focused
+        }
+
+        struct Presentation: Equatable {
+            let name: String
+            let style: Style
+        }
+
+        let presentation: Presentation
+
+        static func presentation(
+            pwd: String?,
+            isFocusedSurface: Bool,
+            windowFocus: Bool,
+            showFocusedSurface: Bool = false
+        ) -> Presentation? {
+            guard let pwd, !pwd.isEmpty else { return nil }
+            if windowFocus && isFocusedSurface && !showFocusedSurface { return nil }
+
+            let path = FilePath(pwd)
+            return .init(
+                name: path.lastComponent?.string ?? path.string,
+                style: isFocusedSurface ? .focused : .normal
+            )
+        }
+
+        var body: some View {
+            let focused = presentation.style == .focused
+
+            Text(presentation.name)
+                .font(.system(size: 12, weight: focused ? .semibold : .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(background(focused: focused))
+                .foregroundStyle(focused ? Color.accentColor : Color.secondary)
+                .allowsHitTesting(false)
+                .accessibilityLabel(
+                    focused
+                        ? "Focused terminal working directory: \(presentation.name)"
+                        : "Terminal working directory: \(presentation.name)"
+                )
+        }
+
+        private func background(focused: Bool) -> some View {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.regularMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(
+                            focused ? Color.accentColor : Color.secondary.opacity(0.35),
+                            lineWidth: focused ? 2 : 1
+                        )
+                )
+        }
+    }
+
     // MARK: Readonly Badge
 
     /// A badge overlay that indicates a surface is in readonly mode.
@@ -1055,31 +1169,22 @@ extension Ghostty {
         private let badgeColor = Color(hue: 0.08, saturation: 0.5, brightness: 0.8)
 
         var body: some View {
-            VStack {
-                HStack {
-                    Spacer()
-
-                    HStack(spacing: 5) {
-                        Image(systemName: "eye.fill")
-                            .font(.system(size: 12))
-                        Text("Read-only")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(badgeBackground)
-                    .foregroundStyle(badgeColor)
-                    .onTapGesture {
-                        showingPopover = true
-                    }
-                    .backport.pointerStyle(.link)
-                    .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                        ReadonlyPopoverView(onDisable: onDisable, isPresented: $showingPopover)
-                    }
-                }
-                .padding(8)
-
-                Spacer()
+            HStack(spacing: 5) {
+                Image(systemName: "eye.fill")
+                    .font(.system(size: 12))
+                Text("Read-only")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(badgeBackground)
+            .foregroundStyle(badgeColor)
+            .onTapGesture {
+                showingPopover = true
+            }
+            .backport.pointerStyle(.link)
+            .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                ReadonlyPopoverView(onDisable: onDisable, isPresented: $showingPopover)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Read-only terminal")

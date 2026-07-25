@@ -37,6 +37,15 @@ class BaseTerminalController: NSWindowController,
     private static let surfaceControllers =
         NSMapTable<Ghostty.SurfaceView, BaseTerminalController>.weakToWeakObjects()
 
+    struct ActivityTransition {
+        private var wasActive: Bool?
+
+        mutating func stopped(_ isActive: Bool) -> Bool {
+            defer { wasActive = isActive }
+            return wasActive == true && !isActive
+        }
+    }
+
     /// The app instance that this terminal view will represent.
     let ghostty: Ghostty.App
 
@@ -103,6 +112,9 @@ class BaseTerminalController: NSWindowController,
     /// Cancellable for title and command state across all surfaces in this controller.
     private var titleStateCancellable: AnyCancellable?
 
+    /// Cancellable for aggregate command and progress activity across all surfaces.
+    private var activityStateCancellable: AnyCancellable?
+
     /// An override title for the tab/window set by the user via prompt_tab_title.
     /// When set, this is shown alongside the computed title from the terminal.
     var titleOverride: String? {
@@ -167,6 +179,7 @@ class BaseTerminalController: NSWindowController,
         setupBellNotificationPublisher()
         setupClipboardConfirmationPublisher()
         setupTitlePublisher()
+        setupActivityPublisher()
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -190,7 +203,6 @@ class BaseTerminalController: NSWindowController,
             selector: #selector(ghosttyMaximizeDidToggle(_:)),
             name: .ghosttyMaximizeDidToggle,
             object: nil)
-
         // Splits
         center.addObserver(
             self,
@@ -1818,6 +1830,50 @@ extension BaseTerminalController {
 // MARK: Combine Methods
 
 extension BaseTerminalController {
+    private func setupActivityPublisher() {
+        activityStateCancellable = $surfaceTree
+            .map { tree -> AnyPublisher<Bool, Never> in
+                let surfaces = Array(tree)
+                guard !surfaces.isEmpty else {
+                    return Just(false).eraseToAnyPublisher()
+                }
+
+                let initial = Dictionary(uniqueKeysWithValues: surfaces.map {
+                    ($0.id, $0.commandRunning || $0.progressReport != nil)
+                })
+                let updates = Publishers.MergeMany(surfaces.map { surface in
+                    Publishers.CombineLatest(surface.$commandRunning, surface.$progressReport)
+                        .map { (surface.id, $0 || $1 != nil) }
+                        .eraseToAnyPublisher()
+                })
+
+                return updates
+                    .scan(initial) { state, update in
+                        var state = state
+                        state[update.0] = update.1
+                        return state
+                    }
+                    .prepend(initial)
+                    .map { $0.values.contains(true) }
+                    .eraseToAnyPublisher()
+            }
+            .switchToLatest()
+            .removeDuplicates()
+            .scan((transition: ActivityTransition(), isActive: false, stopped: false)) { state, isActive in
+                var transition = state.transition
+                let stopped = transition.stopped(isActive)
+                return (transition, isActive, stopped)
+            }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard let window = self?.window as? TerminalWindow else { return }
+                window.setTabActivity(state.isActive)
+                if state.stopped {
+                    window.flashActivityStopped()
+                }
+            }
+    }
+
     private func setupTitlePublisher() {
         let titleChanges = surfaceValuesPublisher(valueKeyPath: \.title, publisherKeyPath: \.$title)
             .map { _ in () }
@@ -1880,4 +1936,5 @@ extension Notification.Name {
     /// Terminal window aggregate bell state changed.
     static let terminalWindowBellDidChangeNotification = Notification.Name("com.mitchellh.ghostty.terminalWindowBellDidChange")
     static let terminalWindowHasBellKey = terminalWindowBellDidChangeNotification.rawValue + ".hasBell"
+
 }

@@ -76,4 +76,20 @@ struct TerminalTitleTests {
         #expect(result.count == 1)
         #expect(result[0] === focused)
     }
+
+    @Test func activityStopIsOnlyAnActiveToIdleTransition() {
+        var transition = BaseTerminalController.ActivityTransition()
+
+        let initialIdle = transition.stopped(false)
+        let started = transition.stopped(true)
+        let remainedActive = transition.stopped(true)
+        let stopped = transition.stopped(false)
+        let remainedIdle = transition.stopped(false)
+
+        #expect(!initialIdle)
+        #expect(!started)
+        #expect(!remainedActive)
+        #expect(stopped)
+        #expect(!remainedIdle)
+    }
 }

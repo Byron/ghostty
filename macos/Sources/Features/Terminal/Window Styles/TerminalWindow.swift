@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 import GhosttyKit
 
@@ -127,6 +128,9 @@ class TerminalWindow: NSWindow {
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
+
+    /// Whether any surface in this tab is active.
+    private var tabActivity = false
 
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig = .init()
@@ -297,12 +301,15 @@ class TerminalWindow: NSWindow {
 
     override func becomeKey() {
         super.becomeKey()
+        cancelActivityStoppedFlash()
+        updateTabActivityIndicator()
         resetZoomTabButton.contentTintColor = .controlAccentColor
         updateZoomedTabTintsForTabGroup()
     }
 
     override func resignKey() {
         super.resignKey()
+        updateTabActivityIndicator()
         resetZoomTabButton.contentTintColor = .secondaryLabelColor
         updateZoomedTabTintsForTabGroup()
         tabTitleEditor.finishEditing(commit: true)
@@ -541,6 +548,35 @@ class TerminalWindow: NSWindow {
 
     // MARK: Title Text
 
+    func setTabActivity(_ isActive: Bool) {
+        tabActivity = isActive
+        updateTabActivityIndicator()
+    }
+
+    private func updateTabActivityIndicator() {
+        tab.attributedTitle = attributedTitle
+    }
+
+    func flashActivityStopped() {
+        guard let selectedWindow = tabGroup?.selectedWindow, selectedWindow !== self else { return }
+        guard let tabButton = nativeTabButton else { return }
+
+        TabActivityStoppedFlashView.install(in: tabButton)
+            .flash(color: tabColor.displayColor ?? .controlAccentColor)
+    }
+
+    private func cancelActivityStoppedFlash() {
+        guard let tabButton = nativeTabButton else { return }
+        TabActivityStoppedFlashView.remove(from: tabButton)
+    }
+
+    private var nativeTabButton: NSView? {
+        let tabBarOwner = tabGroup?.selectedWindow ?? self
+        let windows = tabBarOwner.tabbedWindows ?? tabBarOwner.tabGroup?.windows ?? [tabBarOwner]
+        guard let index = windows.firstIndex(of: self) else { return nil }
+        return tabBarOwner.tabButtonsInVisualOrder()[safe: index]
+    }
+
     override var title: String {
         didSet {
             // Whenever we change the window title we must also update our
@@ -580,12 +616,15 @@ class TerminalWindow: NSWindow {
 
     // Return a styled representation of our title property.
     var attributedTitle: NSAttributedString? {
-        guard let titlebarFont = titlebarFont else { return nil }
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: titlebarFont,
-            .foregroundColor: isKeyWindow ? NSColor.labelColor : NSColor.secondaryLabelColor,
-        ]
+        var attributes: [NSAttributedString.Key: Any] = [:]
+        if let titlebarFont {
+            attributes[.font] = titlebarFont
+            attributes[.foregroundColor] = isKeyWindow ? NSColor.labelColor : NSColor.secondaryLabelColor
+        }
+        if tabActivity && (tabGroup?.selectedWindow ?? self) !== self {
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        }
+        guard !attributes.isEmpty else { return nil }
         return NSAttributedString(string: title, attributes: attributes)
     }
 
@@ -845,6 +884,88 @@ private struct TabColorIndicatorView: View {
                 .fill(Color.clear)
                 .frame(width: 6, height: 6)
                 .hidden()
+        }
+    }
+}
+
+private final class TabActivityStoppedFlashView: NSView {
+    private static let duration: TimeInterval = 1.2
+    private static let viewIdentifier = NSUserInterfaceItemIdentifier(
+        "com.mitchellh.ghostty.activityStoppedFlash")
+    private static let tabBackgroundIdentifier = NSUserInterfaceItemIdentifier("_backgroundView")
+
+    private var color = NSColor.clear
+    private var isFlashing = false
+
+    static func install(in tabButton: NSView) -> TabActivityStoppedFlashView {
+        if let view = existing(in: tabButton) {
+            view.frame = tabButton.bounds
+            return view
+        }
+
+        let view = TabActivityStoppedFlashView(frame: tabButton.bounds)
+        view.identifier = viewIdentifier
+        view.autoresizingMask = [.width, .height]
+
+        let relativeView = tabButton.subviews.first { $0 is ZoomedTabTintView }
+            ?? tabButton.subviews.first { $0.identifier == tabBackgroundIdentifier }
+        tabButton.addSubview(
+            view,
+            positioned: relativeView == nil ? .below : .above,
+            relativeTo: relativeView)
+        return view
+    }
+
+    static func remove(from tabButton: NSView) {
+        existing(in: tabButton)?.removeFromSuperview()
+    }
+
+    private static func existing(in tabButton: NSView) -> TabActivityStoppedFlashView? {
+        tabButton.subviews.first { $0.identifier == viewIdentifier } as? TabActivityStoppedFlashView
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.opacity = 0
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 2, dy: 2),
+            xRadius: 6,
+            yRadius: 6)
+        color.setFill()
+        path.fill()
+    }
+
+    func flash(color: NSColor) {
+        guard !isFlashing else { return }
+        isFlashing = true
+        self.color = color
+        needsDisplay = true
+
+        let animation = CAKeyframeAnimation(keyPath: "opacity")
+        animation.values = [0, 1, 0]
+        animation.keyTimes = [0, NSNumber(value: 1.0 / 6.0), 1]
+        animation.timingFunctions = [
+            CAMediaTimingFunction(name: .easeOut),
+            CAMediaTimingFunction(name: .easeInEaseOut),
+        ]
+        animation.duration = Self.duration
+        layer?.add(animation, forKey: "activityStoppedFlash")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration) { [weak self] in
+            self?.isFlashing = false
         }
     }
 }

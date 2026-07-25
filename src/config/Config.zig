@@ -2830,8 +2830,7 @@ keybind: Keybinds = .{},
 ///    every screen on macOS has a menu bar, but this is the screen that
 ///    contains the primary menu bar.
 ///
-/// The default value is `main` because this is the recommended screen
-/// by the operating system.
+/// The default value is `mouse` on macOS and `main` on other platforms.
 ///
 /// On macOS, `macos-menu-bar` uses the screen containing the menu bar.
 /// On Linux/Wayland, `macos-menu-bar` is treated as equivalent to `main`.
@@ -2840,7 +2839,7 @@ keybind: Keybinds = .{},
 /// Ghostty uses the compositor-reported primary output when available and
 /// falls back to the first monitor reported by GDK if no primary output can
 /// be resolved.
-@"quick-terminal-screen": QuickTerminalScreen = .main,
+@"quick-terminal-screen": QuickTerminalScreen = if (builtin.os.tag == .macos) .mouse else .main,
 
 /// Duration (in seconds) of the quick terminal enter and exit animation.
 /// Set it to 0 to disable animation completely. This can be changed at

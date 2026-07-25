@@ -756,6 +756,8 @@ class BaseTerminalController: NSWindowController,
                 quadrantZoomed: surfaceTree.quadrantZoomed)
         }
 
+        let shouldHighlight = !surfaceTree.isExclusivelyShowing(targetNode)
+
         // Move focus to our window. Importantly this ensures that if we click the
         // reset zoom button in a tab bar of an unfocused tab that we become focused.
         window?.makeKeyAndOrderFront(nil)
@@ -764,6 +766,7 @@ class BaseTerminalController: NSWindowController,
         // this so we need to grab it again.
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: target)
+            if shouldHighlight { target.highlightZoom() }
         }
     }
 
@@ -785,10 +788,13 @@ class BaseTerminalController: NSWindowController,
                 quadrantZoomed: quadrantNode)
         }
 
+        let shouldHighlight = !surfaceTree.isExclusivelyShowing(targetNode)
+
         window?.makeKeyAndOrderFront(nil)
 
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: target)
+            if shouldHighlight { target.highlightZoom() }
         }
     }
 

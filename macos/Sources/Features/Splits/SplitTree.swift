@@ -104,6 +104,10 @@ extension SplitTree {
         if case .split = root { true } else { false }
     }
 
+    func isExclusivelyShowing(_ node: Node) -> Bool {
+        (zoomed ?? root) == node
+    }
+
     init(root: Node?, zoomed: Node?) {
         self.root = root
         self.zoomed = zoomed

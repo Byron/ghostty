@@ -92,4 +92,18 @@ struct TerminalTitleTests {
         #expect(stopped)
         #expect(!remainedIdle)
     }
+
+    @Test func activityCanStopMoreThanOnce() {
+        var transition = BaseTerminalController.ActivityTransition()
+
+        let firstStart = transition.stopped(true)
+        let firstStop = transition.stopped(false)
+        let secondStart = transition.stopped(true)
+        let secondStop = transition.stopped(false)
+
+        #expect(!firstStart)
+        #expect(firstStop)
+        #expect(!secondStart)
+        #expect(secondStop)
+    }
 }

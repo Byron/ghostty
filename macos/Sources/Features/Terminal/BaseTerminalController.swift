@@ -1698,8 +1698,8 @@ extension BaseTerminalController {
                     ($0.id, $0.commandRunning || $0.progressReport != nil)
                 })
                 let updates = Publishers.MergeMany(surfaces.map { surface in
-                    Publishers.CombineLatest(surface.$commandRunning, surface.$progressReport)
-                        .map { (surface.id, $0 || $1 != nil) }
+                    surface.activityPublisher
+                        .map { (surface.id, $0) }
                         .eraseToAnyPublisher()
                 })
 

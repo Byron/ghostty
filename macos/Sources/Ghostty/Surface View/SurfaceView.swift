@@ -52,6 +52,13 @@ extension Ghostty {
         @State private var showFocusedWorkingDirectory: Bool = false
         @State private var focusedWorkingDirectoryPosition: CGPoint?
 
+        // Activity presentation for this individual pane.
+        @State private var paneActivity: Bool = false
+        @State private var paneActivityTransition = BaseTerminalController.ActivityTransition()
+        @State private var paneActivityFlashID: Int = 0
+        @State private var paneActivityFlashOpacity: Double = 0
+        @State private var paneActivityIsFlashing: Bool = false
+
         #if canImport(AppKit)
         // Observe SecureInput to detect when its enabled
         @ObservedObject private var secureInput = SecureInput.shared
@@ -64,6 +71,14 @@ extension Ghostty {
             surfaceFocus || lastFocusedSurface?.value === surfaceView
         }
 
+        private var workingDirectoryPresentation: WorkingDirectoryBadge.Presentation? {
+            WorkingDirectoryBadge.presentation(
+                pwd: surfaceView.pwd,
+                isFocusedSurface: isFocusedSurface,
+                windowFocus: windowFocus,
+                showFocusedSurface: showFocusedWorkingDirectory
+            )
+        }
         var body: some View {
             let center = NotificationCenter.default
 
@@ -128,20 +143,54 @@ extension Ghostty {
 #if canImport(AppKit)
                 SurfaceStatusBadges(
                     readonly: surfaceView.readonly,
-                    workingDirectory: WorkingDirectoryBadge.presentation(
-                        pwd: surfaceView.pwd,
-                        isFocusedSurface: isFocusedSurface,
-                        windowFocus: windowFocus,
-                        showFocusedSurface: showFocusedWorkingDirectory
-                    ),
+                    workingDirectory: workingDirectoryPresentation,
                     workingDirectoryPosition: isFocusedSurface && windowFocus
                         ? focusedWorkingDirectoryPosition
                         : nil,
+                    workingDirectoryActivity: paneActivity,
+                    workingDirectoryFlashOpacity: paneActivityFlashOpacity,
                     onDisableReadonly: {
                         surfaceView.toggleReadonly(nil)
                     }
                 )
                 .zIndex(1)
+                .onReceive(surfaceView.activityPublisher) { isActive in
+                    let stopped = paneActivityTransition.stopped(isActive)
+                    paneActivity = isActive
+
+                    guard
+                        !paneActivityIsFlashing,
+                        let presentation = workingDirectoryPresentation,
+                        WorkingDirectoryBadge.showsActivityIndicator(
+                            isActive: stopped,
+                            presentation: presentation)
+                    else { return }
+
+                    paneActivityIsFlashing = true
+                    paneActivityFlashID += 1
+                }
+                .task(id: paneActivityFlashID) {
+                    guard paneActivityFlashID > 0 else { return }
+                    defer {
+                        paneActivityFlashID = 0
+                        paneActivityFlashOpacity = 0
+                        paneActivityIsFlashing = false
+                    }
+
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        paneActivityFlashOpacity = 1
+                    }
+                    do {
+                        try await Task.sleep(for: .milliseconds(200))
+                    } catch {
+                        return
+                    }
+
+                    withAnimation(.easeInOut(duration: 1.0)) {
+                        paneActivityFlashOpacity = 0
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                }
                 .task(id: isFocusedSurface && windowFocus) {
                     guard isFocusedSurface && windowFocus else {
                         showFocusedWorkingDirectory = false
@@ -1128,6 +1177,8 @@ extension Ghostty {
         let readonly: Bool
         let workingDirectory: WorkingDirectoryBadge.Presentation?
         let workingDirectoryPosition: CGPoint?
+        let workingDirectoryActivity: Bool
+        let workingDirectoryFlashOpacity: Double
         let onDisableReadonly: () -> Void
 
         var body: some View {
@@ -1138,7 +1189,10 @@ extension Ghostty {
                     }
 
                     if workingDirectoryPosition == nil, let workingDirectory {
-                        WorkingDirectoryBadge(presentation: workingDirectory)
+                        WorkingDirectoryBadge(
+                            presentation: workingDirectory,
+                            isActive: workingDirectoryActivity,
+                            flashOpacity: workingDirectoryFlashOpacity)
                             .transition(.opacity)
                     }
                 }
@@ -1147,7 +1201,10 @@ extension Ghostty {
 
                 if let workingDirectoryPosition, let workingDirectory {
                     GeometryReader { _ in
-                        WorkingDirectoryBadge(presentation: workingDirectory)
+                        WorkingDirectoryBadge(
+                            presentation: workingDirectory,
+                            isActive: workingDirectoryActivity,
+                            flashOpacity: workingDirectoryFlashOpacity)
                             .position(
                                 x: workingDirectoryPosition.x,
                                 y: workingDirectoryPosition.y
@@ -1171,6 +1228,18 @@ extension Ghostty {
         }
 
         let presentation: Presentation
+        let isActive: Bool
+        let flashOpacity: Double
+
+        init(
+            presentation: Presentation,
+            isActive: Bool = false,
+            flashOpacity: Double = 0
+        ) {
+            self.presentation = presentation
+            self.isActive = isActive
+            self.flashOpacity = flashOpacity
+        }
 
         static func presentation(
             pwd: String?,
@@ -1192,6 +1261,13 @@ extension Ghostty {
             let weight: NSFont.Weight = presentation.style == .focused ? .semibold : .medium
             let font = NSFont.systemFont(ofSize: 12, weight: weight)
             return ceil((presentation.name as NSString).size(withAttributes: [.font: font]).width) + 16
+        }
+
+        static func showsActivityIndicator(
+            isActive: Bool,
+            presentation: Presentation
+        ) -> Bool {
+            isActive && presentation.style == .normal
         }
 
         static func cursorMoved(
@@ -1223,33 +1299,44 @@ extension Ghostty {
 
         var body: some View {
             let focused = presentation.style == .focused
+            let showsActivity = Self.showsActivityIndicator(
+                isActive: isActive,
+                presentation: presentation)
+            let accessibilityLabel = focused
+                ? "Focused terminal working directory: \(presentation.name)"
+                : "Terminal working directory: \(presentation.name)" +
+                    (showsActivity ? ", activity in progress" : "")
 
             Text(presentation.name)
-                .font(.system(size: 12, weight: focused ? .semibold : .medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .underline(showsActivity)
+                .font(.system(size: 12, weight: focused ? .semibold : .medium))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(background(focused: focused))
                 .foregroundStyle(focused ? Color.white : Color.secondary)
                 .allowsHitTesting(false)
-                .accessibilityLabel(
-                    focused
-                        ? "Focused terminal working directory: \(presentation.name)"
-                        : "Terminal working directory: \(presentation.name)"
-                )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(accessibilityLabel)
         }
 
         private func background(focused: Bool) -> some View {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(focused ? AnyShapeStyle(Color.black) : AnyShapeStyle(.regularMaterial))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(
-                            focused ? Color.accentColor : Color.secondary.opacity(0.35),
-                            lineWidth: 1
-                        )
-                )
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(focused ? AnyShapeStyle(Color.black) : AnyShapeStyle(.regularMaterial))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(
+                                focused ? Color.accentColor : Color.secondary.opacity(0.35),
+                                lineWidth: 1
+                            )
+                    )
+
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.accentColor)
+                    .opacity(focused ? 0 : flashOpacity)
+            }
         }
     }
 

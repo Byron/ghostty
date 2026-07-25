@@ -69,6 +69,15 @@ import Testing
         )?.style == .normal)
     }
 
+    @Test func activityIndicatorOnlyShowsForActiveUnfocusedSurface() {
+        let inactive = Badge.Presentation(name: "project", style: .normal)
+        let focused = Badge.Presentation(name: "project", style: .focused)
+
+        #expect(Badge.showsActivityIndicator(isActive: true, presentation: inactive))
+        #expect(!Badge.showsActivityIndicator(isActive: false, presentation: inactive))
+        #expect(!Badge.showsActivityIndicator(isActive: true, presentation: focused))
+    }
+
     @Test func badgeIsFiveCellsToTheRightOfTheCursor() {
         #expect(Badge.cursorAdjacentX(
             containerWidth: 300,

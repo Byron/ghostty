@@ -52,6 +52,11 @@ extension Ghostty {
         /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
         @Published private(set) var highlighted: Bool = false
 
+        /// True while a zoom change should briefly identify this surface.
+        @Published private(set) var zoomHighlighted: Bool = false
+
+        private var zoomHighlightTask: Task<Void, Never>?
+
         /// A message sent from `ghostty_surface_t` when a child process exited
         @Published private(set) var childExitedMessage: ChildExitedMessage?
 
@@ -93,6 +98,17 @@ extension Ghostty {
             highlighted = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 self?.highlighted = false
+            }
+        }
+
+        /// Briefly identifies this surface after a multi-pane zoom change.
+        func highlightZoom() {
+            zoomHighlightTask?.cancel()
+            zoomHighlighted = true
+            zoomHighlightTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+                self?.zoomHighlighted = false
             }
         }
 

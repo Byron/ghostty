@@ -122,6 +122,13 @@ extension Ghostty {
         func commandDidStart() { commandRunning = true }
         func commandDidFinish() { commandRunning = false }
 
+        var activityPublisher: AnyPublisher<Bool, Never> {
+            Publishers.CombineLatest($commandRunning, $progressReport)
+                .map { $0 || $1 != nil }
+                .removeDuplicates()
+                .eraseToAnyPublisher()
+        }
+
         // An initial size to request for a window. This will only affect
         // then the view is moved to a new window.
         var initialSize: NSSize?

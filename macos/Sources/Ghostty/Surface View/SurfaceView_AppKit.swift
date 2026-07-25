@@ -667,12 +667,14 @@ extension Ghostty {
                 withTimeInterval: 0.075,
                 repeats: false
             ) { [weak self] _ in
+                guard let self else { return }
+
                 // Set the title if it wasn't manually set.
-                guard self?.titleFromTerminal == nil else {
-                    self?.titleFromTerminal = title
+                guard titleFromTerminal == nil else {
+                    titleFromTerminal = title
                     return
                 }
-                self?.title = title
+                self.title = title
             }
         }
 

@@ -70,6 +70,28 @@ struct ZoomedTabTintTests {
         #expect(SurfaceZoomState.from(zoomedTree) == .panelInQuadrant)
     }
 
+    @Test func exclusiveZoomTargetDetection() throws {
+        let (tree, view1, _) = try makeQuadrantTree()
+        let targetNode = try #require(tree.root?.node(view: view1))
+        let quadrant = try #require(tree.quadrant(containing: targetNode))
+
+        let panelZoom = SplitTree(root: tree.root, zoomed: targetNode, quadrantZoomed: quadrant)
+        let quadrantZoom = SplitTree(root: tree.root, zoomed: quadrant, quadrantZoomed: quadrant)
+        let singleView = try #require(tree.root?.rightmostLeaf())
+        let singleTarget = try #require(tree.root?.node(view: singleView))
+        let singleQuadrant = try #require(tree.quadrant(containing: singleTarget))
+        let singleQuadrantZoom = SplitTree(
+            root: tree.root,
+            zoomed: singleQuadrant,
+            quadrantZoomed: singleQuadrant)
+
+        #expect(panelZoom.isExclusivelyShowing(targetNode))
+        #expect(!quadrantZoom.isExclusivelyShowing(targetNode))
+        #expect(singleQuadrant == singleTarget)
+        #expect(singleQuadrantZoom.isExclusivelyShowing(singleTarget))
+        #expect(!tree.isExclusivelyShowing(targetNode))
+    }
+
     private func expectColor(
         _ actual: NSColor,
         equals expected: NSColor,

@@ -74,8 +74,8 @@ extension Ghostty.Action {
         }
     }
 
-    struct ProgressReport {
-        enum State {
+    struct ProgressReport: Equatable {
+        enum State: Equatable {
             case remove
             case set
             case error

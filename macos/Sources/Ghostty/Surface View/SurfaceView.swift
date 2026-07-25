@@ -50,6 +50,7 @@ extension Ghostty {
 
         // Briefly show the working directory when this surface gains focus.
         @State private var showFocusedWorkingDirectory: Bool = false
+        @State private var focusedWorkingDirectoryPosition: CGPoint?
 
         #if canImport(AppKit)
         // Observe SecureInput to detect when its enabled
@@ -133,6 +134,9 @@ extension Ghostty {
                         windowFocus: windowFocus,
                         showFocusedSurface: showFocusedWorkingDirectory
                     ),
+                    workingDirectoryPosition: isFocusedSurface && windowFocus
+                        ? focusedWorkingDirectoryPosition
+                        : nil,
                     onDisableReadonly: {
                         surfaceView.toggleReadonly(nil)
                     }
@@ -141,12 +145,41 @@ extension Ghostty {
                 .task(id: isFocusedSurface && windowFocus) {
                     guard isFocusedSurface && windowFocus else {
                         showFocusedWorkingDirectory = false
+                        focusedWorkingDirectoryPosition = nil
                         return
                     }
 
-                    showFocusedWorkingDirectory = true
+                    let presentation = WorkingDirectoryBadge.presentation(
+                        pwd: surfaceView.pwd,
+                        isFocusedSurface: true,
+                        windowFocus: true,
+                        showFocusedSurface: true
+                    )
+                    let labelWidth = presentation.map {
+                        WorkingDirectoryBadge.width(for: $0)
+                    }
+                    let initialPosition = labelWidth.flatMap {
+                        surfaceView.workingDirectoryLabelPosition(labelWidth: $0)
+                    }
+                    focusedWorkingDirectoryPosition = initialPosition
+                    withAnimation(.easeIn(duration: 0.15)) {
+                        showFocusedWorkingDirectory = true
+                    }
                     do {
-                        try await Task.sleep(for: .seconds(1))
+                        if let initialPosition, let labelWidth {
+                            if try await WorkingDirectoryBadge.cursorMoved(
+                                from: initialPosition,
+                                currentPosition: {
+                                    surfaceView.workingDirectoryLabelPosition(labelWidth: labelWidth)
+                                }
+                            ) {
+                                showFocusedWorkingDirectory = false
+                                focusedWorkingDirectoryPosition = nil
+                                return
+                            }
+                        } else {
+                            try await Task.sleep(for: .seconds(2))
+                        }
                     } catch {
                         return
                     }
@@ -1078,21 +1111,35 @@ extension Ghostty {
     struct SurfaceStatusBadges: View {
         let readonly: Bool
         let workingDirectory: WorkingDirectoryBadge.Presentation?
+        let workingDirectoryPosition: CGPoint?
         let onDisableReadonly: () -> Void
 
         var body: some View {
-            VStack(alignment: .trailing, spacing: 6) {
-                if readonly {
-                    ReadonlyBadge(onDisable: onDisableReadonly)
-                }
+            ZStack {
+                VStack(alignment: .trailing, spacing: 6) {
+                    if readonly {
+                        ReadonlyBadge(onDisable: onDisableReadonly)
+                    }
 
-                if let workingDirectory {
-                    WorkingDirectoryBadge(presentation: workingDirectory)
-                        .transition(.opacity)
+                    if workingDirectoryPosition == nil, let workingDirectory {
+                        WorkingDirectoryBadge(presentation: workingDirectory)
+                            .transition(.opacity)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+
+                if let workingDirectoryPosition, let workingDirectory {
+                    GeometryReader { _ in
+                        WorkingDirectoryBadge(presentation: workingDirectory)
+                            .position(
+                                x: workingDirectoryPosition.x,
+                                y: workingDirectoryPosition.y
+                            )
+                    }
+                    .transition(.opacity)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .padding(8)
         }
     }
 
@@ -1125,6 +1172,39 @@ extension Ghostty {
             )
         }
 
+        static func width(for presentation: Presentation) -> CGFloat {
+            let weight: NSFont.Weight = presentation.style == .focused ? .semibold : .medium
+            let font = NSFont.systemFont(ofSize: 12, weight: weight)
+            return ceil((presentation.name as NSString).size(withAttributes: [.font: font]).width) + 16
+        }
+
+        static func cursorMoved(
+            from initialPosition: CGPoint,
+            currentPosition: () -> CGPoint?
+        ) async throws -> Bool {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(2))
+            while clock.now < deadline {
+                try await clock.sleep(for: .milliseconds(16))
+                if currentPosition() != initialPosition { return true }
+            }
+            return false
+        }
+
+        static func cursorAdjacentX(
+            containerWidth: CGFloat,
+            cursorCenterX: CGFloat,
+            labelWidth: CGFloat,
+            cellWidth: CGFloat
+        ) -> CGFloat? {
+            let offset = cellWidth * 5 + (cellWidth + labelWidth) / 2
+            let right = cursorCenterX + offset
+            if right + labelWidth / 2 <= containerWidth - 8 { return right }
+
+            let left = cursorCenterX - offset
+            return left - labelWidth / 2 >= 8 ? left : nil
+        }
+
         var body: some View {
             let focused = presentation.style == .focused
 
@@ -1135,7 +1215,7 @@ extension Ghostty {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(background(focused: focused))
-                .foregroundStyle(focused ? Color.accentColor : Color.secondary)
+                .foregroundStyle(focused ? Color.white : Color.secondary)
                 .allowsHitTesting(false)
                 .accessibilityLabel(
                     focused
@@ -1146,12 +1226,12 @@ extension Ghostty {
 
         private func background(focused: Bool) -> some View {
             RoundedRectangle(cornerRadius: 6)
-                .fill(.regularMaterial)
+                .fill(focused ? AnyShapeStyle(Color.black) : AnyShapeStyle(.regularMaterial))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
                         .strokeBorder(
                             focused ? Color.accentColor : Color.secondary.opacity(0.35),
-                            lineWidth: focused ? 2 : 1
+                            lineWidth: 1
                         )
                 )
         }

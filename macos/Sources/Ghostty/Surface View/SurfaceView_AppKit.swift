@@ -194,6 +194,36 @@ extension Ghostty {
         /// of the SwiftUI view hierarchy, for example when changing splits
         var scrollbar: Ghostty.Action.Scrollbar?
 
+        /// The working-directory badge position on the visible terminal cursor row.
+        func workingDirectoryLabelPosition(labelWidth: CGFloat) -> CGPoint? {
+            guard let surface, let scrollbar, cellSize.width > 0 else { return nil }
+
+            // The terminal cursor is outside the viewport while viewing scrollback.
+            let bottomOffset = scrollbar.total - min(scrollbar.total, scrollbar.len)
+            guard scrollbar.offset >= bottomOffset else { return nil }
+
+            var x: Double = 0
+            var y: Double = 0
+            var width: Double = 0
+            var height: Double = 0
+            ghostty_surface_ime_point(surface, &x, &y, &width, &height)
+
+            let centerY = CGFloat(y - height / 2)
+            guard centerY.isFinite, centerY >= 0, centerY <= bounds.height else { return nil }
+
+            guard let centerX = WorkingDirectoryBadge.cursorAdjacentX(
+                containerWidth: bounds.width,
+                cursorCenterX: CGFloat(x),
+                labelWidth: labelWidth,
+                cellWidth: cellSize.width
+            ) else { return nil }
+
+            return CGPoint(
+                x: centerX,
+                y: centerY
+            )
+        }
+
         // Notification identifiers associated with this surface
         var notificationIdentifiers: Set<String> = []
 

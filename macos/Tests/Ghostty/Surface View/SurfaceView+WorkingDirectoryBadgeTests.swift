@@ -68,4 +68,29 @@ import Testing
             windowFocus: false
         )?.style == .normal)
     }
+
+    @Test func badgeIsFiveCellsToTheRightOfTheCursor() {
+        #expect(Badge.cursorAdjacentX(
+            containerWidth: 300,
+            cursorCenterX: 50,
+            labelWidth: 100,
+            cellWidth: 10
+        ) == 155)
+    }
+
+    @Test func badgeMovesLeftWhenItDoesNotFitToTheRight() {
+        #expect(Badge.cursorAdjacentX(
+            containerWidth: 200,
+            cursorCenterX: 150,
+            labelWidth: 60,
+            cellWidth: 10,
+        ) == 65)
+    }
+
+    @Test func detectsCursorMovement() async throws {
+        #expect(try await Badge.cursorMoved(
+            from: .zero,
+            currentPosition: { CGPoint(x: 1, y: 0) }
+        ))
+    }
 }

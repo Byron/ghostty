@@ -564,13 +564,13 @@ extension Ghostty {
         }
 
         var quickTerminalScreen: QuickTerminalScreen {
-            guard let config = self.config else { return .main }
+            guard let config = self.config else { return .mouse }
             var v: UnsafePointer<Int8>?
             let key = "quick-terminal-screen"
-            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return .main }
-            guard let ptr = v else { return .main }
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return .mouse }
+            guard let ptr = v else { return .mouse }
             let str = String(cString: ptr)
-            return QuickTerminalScreen(fromGhosttyConfig: str) ?? .main
+            return QuickTerminalScreen(fromGhosttyConfig: str) ?? .mouse
         }
 
         var quickTerminalAnimationDuration: Double {

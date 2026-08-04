@@ -117,8 +117,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// True if the window is focused
         focused: bool,
 
-        /// True if the window is visible.
-        visible: bool,
+        /// True if the surface is visible.
+        visible: std.atomic.Value(bool),
 
         /// Flag to indicate that our focus state changed for custom
         /// shaders to update their state.
@@ -710,7 +710,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .grid_metrics = font_critical.metrics,
                 .size = options.size,
                 .focused = true,
-                .visible = true,
+                .visible = .init(true),
                 .scrollbar = .zero,
                 .scrollbar_dirty = false,
                 .last_bottom_node = null,
@@ -1104,7 +1104,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Must be called on the render thread.
         pub fn setVisible(self: *Self, visible: bool) void {
-            self.visible = visible;
+            self.visible.store(visible, .release);
             self.syncDisplayLink(null, null);
 
             // When we're hidden, release our GPU resources if GPU
@@ -1199,7 +1199,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             const should_run =
                 // Non-visible windows never vsync
-                self.visible and
+                self.visible.load(.acquire) and
                 // Only vsync if we have cell changes or animation
                 (self.cells_rebuilt or self.animationWake() != null);
 
@@ -1641,6 +1641,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             sync: bool,
         ) !bool {
+            if (!self.visible.load(.acquire)) return false;
+
             // After the graphics API is complete (so we defer) we want to
             // update our scrollbar state.
             defer if (self.scrollbar_dirty) {

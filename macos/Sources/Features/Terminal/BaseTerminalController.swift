@@ -1303,6 +1303,8 @@ class BaseTerminalController: NSWindowController,
         // Everything beyond here is setting up the window
         guard let window else { return }
 
+        syncSurfaceTreeOcclusionState()
+
         // We always initialize our fullscreen style to native if we can because
         // initialization sets up some state (i.e. observers). If its set already
         // somehow we don't do this.
@@ -1313,6 +1315,15 @@ class BaseTerminalController: NSWindowController,
 
         // Set our update overlay state
         updateOverlayIsVisible = defaultUpdateOverlayVisibility()
+    }
+
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+
+        // AppKit settles presentation and native-tab visibility asynchronously.
+        DispatchQueue.main.async {
+            self.syncSurfaceTreeOcclusionState()
+        }
     }
 
     func defaultUpdateOverlayVisibility() -> Bool {
@@ -1408,6 +1419,7 @@ class BaseTerminalController: NSWindowController,
         // Sync on the next runloop so split focus has settled first.
         DispatchQueue.main.async {
             self.syncFocusToSurfaceTree()
+            self.syncSurfaceTreeOcclusionState()
         }
     }
 
@@ -1415,6 +1427,11 @@ class BaseTerminalController: NSWindowController,
         // Becoming/losing key means we have to notify our surface(s) that we have focus
         // so things like cursors blink, pty events are sent, etc.
         self.syncFocusToSurfaceTree()
+
+        // Native tab selection updates occlusion after the key-window change.
+        DispatchQueue.main.async {
+            self.syncSurfaceTreeOcclusionState()
+        }
     }
 
     func windowDidChangeOcclusionState(_ notification: Notification) {

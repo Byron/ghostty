@@ -130,7 +130,9 @@ extension Ghostty {
                 .ghosttySurfaceView(surfaceView)
 
                 // Progress report
-                if let progressReport = surfaceView.progressReport, progressReport.state != .remove {
+                if let progressReport = surfaceView.progressReport,
+                   progressReport.state != .remove,
+                   surfaceView.isWindowVisible == true {
                     VStack(spacing: 0) {
                         SurfaceProgressBar(report: progressReport)
                         Spacer()

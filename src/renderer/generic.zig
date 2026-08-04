@@ -115,6 +115,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// True if the window is focused
         focused: bool,
 
+        /// True if the surface is visible.
+        visible: std.atomic.Value(bool) = .init(true),
+
         /// Flag to indicate that our focus state changed for custom
         /// shaders to update their state.
         custom_shader_focused_changed: bool = false,
@@ -1051,6 +1054,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Must be called on the render thread.
         pub fn setVisible(self: *Self, visible: bool) void {
+            self.visible.store(visible, .release);
+
             // If we're not visible, then we want to stop the display link
             // because it is a waste of resources and we can move to pure
             // change-driven updates.
@@ -1459,6 +1464,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // data we access while we're in the middle of drawing.
             self.draw_mutex.lock();
             defer self.draw_mutex.unlock();
+
+            if (!self.visible.load(.acquire)) return;
 
             // After the graphics API is complete (so we defer) we want to
             // update our scrollbar state.

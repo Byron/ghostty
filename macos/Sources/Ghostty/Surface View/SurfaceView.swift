@@ -66,13 +66,15 @@ extension Ghostty {
 
         @EnvironmentObject private var ghostty: Ghostty.App
         @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
+        @Environment(\.ghosttyWorkingDirectoryLabelsHidden) private var workingDirectoryLabelsHidden
 
         private var isFocusedSurface: Bool {
             surfaceFocus || lastFocusedSurface?.value === surfaceView
         }
 
         private var workingDirectoryPresentation: WorkingDirectoryBadge.Presentation? {
-            WorkingDirectoryBadge.presentation(
+            guard !workingDirectoryLabelsHidden else { return nil }
+            return WorkingDirectoryBadge.presentation(
                 pwd: surfaceView.pwd,
                 isFocusedSurface: isFocusedSurface,
                 windowFocus: windowFocus,
@@ -322,6 +324,7 @@ extension Ghostty {
                 SurfaceGrabHandle(surfaceView: surfaceView)
                 #endif
             }
+            .preference(key: SurfaceWindowFocusKey.self, value: windowFocus)
         }
     }
 
@@ -1241,14 +1244,40 @@ extension Ghostty {
             windowFocus: Bool,
             showFocusedSurface: Bool = false
         ) -> Presentation? {
-            guard let pwd, !pwd.isEmpty else { return nil }
+            guard let name = name(pwd: pwd) else { return nil }
             if windowFocus && isFocusedSurface && !showFocusedSurface { return nil }
 
-            let path = FilePath(pwd)
             return .init(
-                name: path.lastComponent?.string ?? path.string,
+                name: name,
                 style: isFocusedSurface ? .focused : .normal
             )
+        }
+
+        static func commonName(pwds: [String?]) -> String? {
+            guard !pwds.isEmpty else { return nil }
+            let names = pwds.compactMap { name(pwd: $0) }
+            guard names.count == pwds.count, let first = names.first else { return nil }
+            return names.dropFirst().allSatisfy { $0 == first } ? first : nil
+        }
+
+        static func quadrantPresentation(
+            name: String?,
+            isFocusedQuadrant: Bool,
+            windowFocus: Bool
+        ) -> Presentation? {
+            guard let name else { return nil }
+            if isFocusedQuadrant && windowFocus { return nil }
+
+            return .init(
+                name: name,
+                style: isFocusedQuadrant ? .focused : .normal
+            )
+        }
+
+        private static func name(pwd: String?) -> String? {
+            guard let pwd, !pwd.isEmpty else { return nil }
+            let path = FilePath(pwd)
+            return path.lastComponent?.string ?? path.string
         }
 
         static func width(for presentation: Presentation) -> CGFloat {
@@ -1331,6 +1360,42 @@ extension Ghostty {
                     .fill(Color.accentColor)
                     .opacity(focused ? 0 : flashOpacity)
             }
+        }
+    }
+
+    struct QuadrantWorkingDirectoryBadge: View {
+        let presentation: WorkingDirectoryBadge.Presentation
+        let windowFocus: Bool
+
+        var body: some View {
+            let focused = presentation.style == .focused
+
+            Text(presentation.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .font(.title.weight(.semibold))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(focused ? AnyShapeStyle(Color.black) : AnyShapeStyle(.regularMaterial))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(
+                                    focused ? Color.accentColor : Color.secondary.opacity(0.35),
+                                    lineWidth: 1
+                                )
+                        )
+                )
+                .foregroundStyle(focused ? Color.white : Color.secondary)
+                .opacity(windowFocus ? 0.8 : 1)
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    focused
+                        ? "Focused quadrant working directory: \(presentation.name)"
+                        : "Quadrant working directory: \(presentation.name)"
+                )
         }
     }
 
@@ -1484,6 +1549,20 @@ private struct GhosttyLastFocusedSurfaceKey: EnvironmentKey {
     static let defaultValue: Weak<Ghostty.SurfaceView>? = nil
 }
 
+private struct GhosttyWorkingDirectoryLabelsHiddenKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension Ghostty {
+    struct SurfaceWindowFocusKey: PreferenceKey {
+        static let defaultValue = true
+
+        static func reduce(value: inout Bool, nextValue: () -> Bool) {
+            value = value && nextValue()
+        }
+    }
+}
+
 extension EnvironmentValues {
     var ghosttySurfaceView: Ghostty.SurfaceView? {
         get { self[GhosttySurfaceViewKey.self] }
@@ -1493,6 +1572,11 @@ extension EnvironmentValues {
     var ghosttyLastFocusedSurface: Weak<Ghostty.SurfaceView>? {
         get { self[GhosttyLastFocusedSurfaceKey.self] }
         set { self[GhosttyLastFocusedSurfaceKey.self] = newValue }
+    }
+
+    var ghosttyWorkingDirectoryLabelsHidden: Bool {
+        get { self[GhosttyWorkingDirectoryLabelsHiddenKey.self] }
+        set { self[GhosttyWorkingDirectoryLabelsHiddenKey.self] = newValue }
     }
 }
 

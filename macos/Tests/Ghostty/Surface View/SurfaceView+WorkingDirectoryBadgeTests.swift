@@ -28,6 +28,37 @@ import Testing
         ) == nil)
     }
 
+    @Test func commonNameRequiresMatchingLabels() {
+        #expect(Badge.commonName(pwds: ["/one/project", "/two/project"]) == "project")
+        #expect(Badge.commonName(pwds: ["/one", "/two"]) == nil)
+        #expect(Badge.commonName(pwds: ["/project", nil]) == nil)
+        #expect(Badge.commonName(pwds: ["/project"]) == "project")
+        #expect(Badge.commonName(pwds: []) == nil)
+    }
+
+    @Test func quadrantPresentationFollowsFocusAndWindowState() {
+        #expect(Badge.quadrantPresentation(
+            name: "project",
+            isFocusedQuadrant: false,
+            windowFocus: true
+        )?.style == .normal)
+        #expect(Badge.quadrantPresentation(
+            name: "project",
+            isFocusedQuadrant: true,
+            windowFocus: false
+        )?.style == .focused)
+        #expect(Badge.quadrantPresentation(
+            name: "project",
+            isFocusedQuadrant: true,
+            windowFocus: true
+        ) == nil)
+        #expect(Badge.quadrantPresentation(
+            name: nil,
+            isFocusedQuadrant: false,
+            windowFocus: false
+        ) == nil)
+    }
+
     @Test func focusedSurfaceInFocusedWindowIsHidden() {
         #expect(Badge.presentation(
             pwd: "/project",

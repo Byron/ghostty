@@ -36,6 +36,7 @@ extension Ghostty {
         @EnvironmentObject private var ghostty: Ghostty.App
         @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
         @Environment(\.ghosttyWorkingDirectoryLabelsHidden) private var workingDirectoryLabelsHidden
+        @Environment(\.ghosttyWorkingDirectoryLabelsLarge) private var workingDirectoryLabelsLarge
 
         private var isFocusedSurface: Bool {
             surfaceFocus || lastFocusedSurface?.value === surfaceView
@@ -113,6 +114,8 @@ extension Ghostty {
                     readonly: surfaceView.readonly,
                     workingDirectory: workingDirectoryPresentation,
                     workingDirectoryPosition: workingDirectoryPosition,
+                    largeWorkingDirectoryLabels: workingDirectoryLabelsLarge,
+                    windowFocus: windowFocus,
                     workingDirectoryActivity: paneActivity,
                     workingDirectoryFlashOpacity: paneActivityFlashOpacity,
                     onDisableReadonly: {
@@ -1104,9 +1107,19 @@ extension Ghostty {
         let readonly: Bool
         let workingDirectory: WorkingDirectoryBadge.Presentation?
         let workingDirectoryPosition: CGPoint?
+        let largeWorkingDirectoryLabels: Bool
+        let windowFocus: Bool
         let workingDirectoryActivity: Bool
         let workingDirectoryFlashOpacity: Double
         let onDisableReadonly: () -> Void
+
+        private var workingDirectoryLayout: WorkingDirectoryBadge.Layout? {
+            workingDirectory.map {
+                WorkingDirectoryBadge.paneLayout(
+                    $0,
+                    largeInactiveLabels: largeWorkingDirectoryLabels)
+            }
+        }
 
         var body: some View {
             ZStack {
@@ -1115,7 +1128,9 @@ extension Ghostty {
                         ReadonlyBadge(onDisable: onDisableReadonly)
                     }
 
-                    if workingDirectoryPosition == nil, let workingDirectory {
+                    if workingDirectoryLayout == .compact,
+                       workingDirectoryPosition == nil,
+                       let workingDirectory {
                         WorkingDirectoryBadge(
                             presentation: workingDirectory,
                             isActive: workingDirectoryActivity,
@@ -1126,7 +1141,21 @@ extension Ghostty {
                 .padding(8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 
-                if let workingDirectoryPosition, let workingDirectory {
+                if workingDirectoryLayout == .large, let workingDirectory {
+                    GeometryReader { geometry in
+                        WorkingDirectoryBadge(
+                            presentation: workingDirectory,
+                            isActive: workingDirectoryActivity,
+                            flashOpacity: workingDirectoryFlashOpacity,
+                            layout: .large,
+                            windowFocus: windowFocus)
+                            .frame(maxWidth: geometry.size.width * 0.75)
+                            .position(
+                                x: geometry.size.width / 2,
+                                y: geometry.size.height / 2)
+                    }
+                    .transition(.opacity)
+                } else if let workingDirectoryPosition, let workingDirectory {
                     GeometryReader { _ in
                         WorkingDirectoryBadge(
                             presentation: workingDirectory,
@@ -1134,8 +1163,7 @@ extension Ghostty {
                             flashOpacity: workingDirectoryFlashOpacity)
                             .position(
                                 x: workingDirectoryPosition.x,
-                                y: workingDirectoryPosition.y
-                            )
+                                y: workingDirectoryPosition.y)
                     }
                     .transition(.opacity)
                 }
@@ -1149,6 +1177,11 @@ extension Ghostty {
             case focused
         }
 
+        enum Layout: Equatable {
+            case compact
+            case large
+        }
+
         struct Presentation: Equatable {
             let name: String
             let style: Style
@@ -1157,15 +1190,31 @@ extension Ghostty {
         let presentation: Presentation
         let isActive: Bool
         let flashOpacity: Double
+        let layout: Layout
+        let windowFocus: Bool
+        let customAccessibilityLabel: String?
 
         init(
             presentation: Presentation,
             isActive: Bool = false,
-            flashOpacity: Double = 0
+            flashOpacity: Double = 0,
+            layout: Layout = .compact,
+            windowFocus: Bool = true,
+            accessibilityLabel: String? = nil
         ) {
             self.presentation = presentation
             self.isActive = isActive
             self.flashOpacity = flashOpacity
+            self.layout = layout
+            self.windowFocus = windowFocus
+            self.customAccessibilityLabel = accessibilityLabel
+        }
+
+        static func paneLayout(
+            _ presentation: Presentation,
+            largeInactiveLabels: Bool
+        ) -> Layout {
+            presentation.style == .normal && largeInactiveLabels ? .large : .compact
         }
 
         static func presentation(
@@ -1252,6 +1301,7 @@ extension Ghostty {
 
         var body: some View {
             let focused = presentation.style == .focused
+            let large = layout == .large
             let showsActivity = Self.showsActivityIndicator(
                 isActive: isActive,
                 presentation: presentation)
@@ -1264,29 +1314,32 @@ extension Ghostty {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .underline(showsActivity)
-                .font(.system(size: 12, weight: focused ? .semibold : .medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(background(focused: focused))
+                .font(large
+                    ? .title.weight(.semibold)
+                    : .system(size: 12, weight: focused ? .semibold : .medium))
+                .padding(.horizontal, large ? 16 : 8)
+                .padding(.vertical, large ? 10 : 4)
+                .background(background(focused: focused, cornerRadius: large ? 10 : 6))
                 .foregroundStyle(focused ? Color.white : Color.secondary)
+                .opacity(large && windowFocus ? 0.8 : 1)
                 .allowsHitTesting(false)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(accessibilityLabel)
+                .accessibilityLabel(customAccessibilityLabel ?? accessibilityLabel)
         }
 
-        private func background(focused: Bool) -> some View {
+        private func background(focused: Bool, cornerRadius: CGFloat) -> some View {
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(focused ? AnyShapeStyle(Color.black) : AnyShapeStyle(.regularMaterial))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: cornerRadius)
                             .strokeBorder(
                                 focused ? Color.accentColor : Color.secondary.opacity(0.35),
                                 lineWidth: 1
                             )
                     )
 
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(Color.accentColor)
                     .opacity(focused ? 0 : flashOpacity)
             }
@@ -1299,33 +1352,15 @@ extension Ghostty {
 
         var body: some View {
             let focused = presentation.style == .focused
+            let accessibilityLabel = focused
+                ? "Focused quadrant working directory: \(presentation.name)"
+                : "Quadrant working directory: \(presentation.name)"
 
-            Text(presentation.name)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .font(.title.weight(.semibold))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(focused ? AnyShapeStyle(Color.black) : AnyShapeStyle(.regularMaterial))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(
-                                    focused ? Color.accentColor : Color.secondary.opacity(0.35),
-                                    lineWidth: 1
-                                )
-                        )
-                )
-                .foregroundStyle(focused ? Color.white : Color.secondary)
-                .opacity(windowFocus ? 0.8 : 1)
-                .allowsHitTesting(false)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(
-                    focused
-                        ? "Focused quadrant working directory: \(presentation.name)"
-                        : "Quadrant working directory: \(presentation.name)"
-                )
+            WorkingDirectoryBadge(
+                presentation: presentation,
+                layout: .large,
+                windowFocus: windowFocus,
+                accessibilityLabel: accessibilityLabel)
         }
     }
 
@@ -1481,6 +1516,10 @@ private struct GhosttyWorkingDirectoryLabelsHiddenKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct GhosttyWorkingDirectoryLabelsLargeKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension Ghostty {
     struct SurfaceWindowFocusKey: PreferenceKey {
         static let defaultValue = true
@@ -1505,6 +1544,11 @@ extension EnvironmentValues {
     var ghosttyWorkingDirectoryLabelsHidden: Bool {
         get { self[GhosttyWorkingDirectoryLabelsHiddenKey.self] }
         set { self[GhosttyWorkingDirectoryLabelsHiddenKey.self] = newValue }
+    }
+
+    var ghosttyWorkingDirectoryLabelsLarge: Bool {
+        get { self[GhosttyWorkingDirectoryLabelsLargeKey.self] }
+        set { self[GhosttyWorkingDirectoryLabelsLargeKey.self] = newValue }
     }
 }
 

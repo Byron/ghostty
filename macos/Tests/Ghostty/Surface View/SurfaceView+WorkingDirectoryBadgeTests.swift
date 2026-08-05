@@ -59,6 +59,15 @@ import Testing
         ) == nil)
     }
 
+    @Test func paneLayoutFollowsPresentationStyle() {
+        let normal = Badge.Presentation(name: "project", style: .normal)
+        let focused = Badge.Presentation(name: "project", style: .focused)
+
+        #expect(Badge.paneLayout(normal, largeInactiveLabels: true) == .large)
+        #expect(Badge.paneLayout(normal, largeInactiveLabels: false) == .compact)
+        #expect(Badge.paneLayout(focused, largeInactiveLabels: true) == .compact)
+    }
+
     @Test func focusedSurfaceInFocusedWindowIsHidden() {
         #expect(Badge.presentation(
             pwd: "/project",

@@ -42,6 +42,9 @@ struct TerminalSplitTreeView: View {
             // the tree structure of splits it could result in bad behaviors.
             // See: https://github.com/ghostty-org/ghostty/issues/7546
             .id(node.structuralIdentity)
+            .environment(
+                \.ghosttyWorkingDirectoryLabelsLarge,
+                tree.zoomed != nil && tree.zoomed == tree.quadrantZoomed)
         }
     }
 }

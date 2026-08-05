@@ -50,7 +50,7 @@ extension Ghostty {
 
         // Briefly show the working directory when this surface gains focus.
         @State private var showFocusedWorkingDirectory: Bool = false
-        @State private var focusedWorkingDirectoryPosition: CGPoint?
+        @State private var workingDirectoryPosition: CGPoint?
 
         // Activity presentation for this individual pane.
         @State private var paneActivity: Bool = false
@@ -146,9 +146,7 @@ extension Ghostty {
                 SurfaceStatusBadges(
                     readonly: surfaceView.readonly,
                     workingDirectory: workingDirectoryPresentation,
-                    workingDirectoryPosition: isFocusedSurface && windowFocus
-                        ? focusedWorkingDirectoryPosition
-                        : nil,
+                    workingDirectoryPosition: workingDirectoryPosition,
                     workingDirectoryActivity: paneActivity,
                     workingDirectoryFlashOpacity: paneActivityFlashOpacity,
                     onDisableReadonly: {
@@ -194,16 +192,10 @@ extension Ghostty {
                     try? await Task.sleep(for: .seconds(1))
                 }
                 .task(id: isFocusedSurface && windowFocus) {
-                    guard isFocusedSurface && windowFocus else {
-                        showFocusedWorkingDirectory = false
-                        focusedWorkingDirectoryPosition = nil
-                        return
-                    }
-
                     let presentation = WorkingDirectoryBadge.presentation(
                         pwd: surfaceView.pwd,
-                        isFocusedSurface: true,
-                        windowFocus: true,
+                        isFocusedSurface: isFocusedSurface,
+                        windowFocus: windowFocus,
                         showFocusedSurface: true
                     )
                     let labelWidth = presentation.map {
@@ -212,7 +204,13 @@ extension Ghostty {
                     let initialPosition = labelWidth.flatMap {
                         surfaceView.workingDirectoryLabelPosition(labelWidth: $0)
                     }
-                    focusedWorkingDirectoryPosition = initialPosition
+                    workingDirectoryPosition = initialPosition
+
+                    guard isFocusedSurface && windowFocus else {
+                        showFocusedWorkingDirectory = false
+                        return
+                    }
+
                     withAnimation(.easeIn(duration: 0.15)) {
                         showFocusedWorkingDirectory = true
                     }
@@ -225,7 +223,6 @@ extension Ghostty {
                                 }
                             ) {
                                 showFocusedWorkingDirectory = false
-                                focusedWorkingDirectoryPosition = nil
                                 return
                             }
                         } else {

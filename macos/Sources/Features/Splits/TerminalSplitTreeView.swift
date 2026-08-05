@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// A single operation within the split tree.
@@ -32,6 +33,7 @@ struct TerminalSplitTreeView: View {
     var body: some View {
         if let node = tree.zoomed ?? tree.root {
             TerminalSplitSubtreeView(
+                tree: tree,
                 node: node,
                 isRoot: node == tree.root,
                 action: action)
@@ -47,11 +49,22 @@ struct TerminalSplitTreeView: View {
 private struct TerminalSplitSubtreeView: View {
     @EnvironmentObject var ghostty: Ghostty.App
 
+    let tree: SplitTree<Ghostty.SurfaceView>
     let node: SplitTree<Ghostty.SurfaceView>.Node
     var isRoot: Bool = false
     let action: (TerminalSplitOperation) -> Void
 
     var body: some View {
+        if tree.quadrant(containing: node) == node {
+            TerminalQuadrantView(node: node) {
+                subtree
+            }
+        } else {
+            subtree
+        }
+    }
+
+    @ViewBuilder private var subtree: some View {
         switch node {
         case .leaf(let leafView):
             TerminalSplitLeaf(surfaceView: leafView, isSplit: !isRoot, action: action)
@@ -72,16 +85,81 @@ private struct TerminalSplitSubtreeView: View {
                 dividerColor: ghostty.config.splitDividerColor,
                 resizeIncrements: .init(width: 1, height: 1),
                 left: {
-                    TerminalSplitSubtreeView(node: split.left, action: action)
+                    TerminalSplitSubtreeView(tree: tree, node: split.left, action: action)
                 },
                 right: {
-                    TerminalSplitSubtreeView(node: split.right, action: action)
+                    TerminalSplitSubtreeView(tree: tree, node: split.right, action: action)
                 },
                 onEqualize: {
                     guard let surface = node.leftmostLeaf().surface else { return }
                     ghostty.splitEqualize(surface: surface)
                 }
             )
+        }
+    }
+}
+
+private struct TerminalQuadrantView<Content: View>: View {
+    @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
+
+    let node: SplitTree<Ghostty.SurfaceView>.Node
+    let content: Content
+
+    @State private var commonWorkingDirectory: String?
+    @State private var windowFocus = true
+
+    init(
+        node: SplitTree<Ghostty.SurfaceView>.Node,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.node = node
+        self.content = content()
+        self._commonWorkingDirectory = State(initialValue:
+            Ghostty.WorkingDirectoryBadge.commonName(pwds: node.leaves().map(\.pwd)))
+    }
+
+    private var quadrantPresentation: Ghostty.WorkingDirectoryBadge.Presentation? {
+        let isFocusedQuadrant = lastFocusedSurface?.value.map {
+            node.node(view: $0) != nil
+        } ?? false
+        return Ghostty.WorkingDirectoryBadge.quadrantPresentation(
+            name: commonWorkingDirectory,
+            isFocusedQuadrant: isFocusedQuadrant,
+            windowFocus: windowFocus)
+    }
+
+    private var pwdChanges: AnyPublisher<Void, Never> {
+        Publishers.MergeMany(node.leaves().map { surface in
+            surface.$pwd.map { _ in () }.eraseToAnyPublisher()
+        })
+        .eraseToAnyPublisher()
+    }
+
+    var body: some View {
+        ZStack {
+            content
+                .environment(
+                    \.ghosttyWorkingDirectoryLabelsHidden,
+                    quadrantPresentation != nil)
+
+            if let quadrantPresentation {
+                GeometryReader { geometry in
+                    Ghostty.QuadrantWorkingDirectoryBadge(
+                        presentation: quadrantPresentation,
+                        windowFocus: windowFocus)
+                        .frame(maxWidth: geometry.size.width * 0.75)
+                        .position(
+                            x: geometry.size.width / 2,
+                            y: geometry.size.height / 2)
+                }
+            }
+        }
+        .onReceive(pwdChanges) { _ in
+            commonWorkingDirectory = Ghostty.WorkingDirectoryBadge.commonName(
+                pwds: node.leaves().map(\.pwd))
+        }
+        .onPreferenceChange(Ghostty.SurfaceWindowFocusKey.self) {
+            windowFocus = $0
         }
     }
 }

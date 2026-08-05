@@ -535,13 +535,7 @@ extension Ghostty {
                         _ = surfaceView.navigateSearchToNext()
                     }
 #if canImport(AppKit)
-                    .onExitCommand {
-                        if searchState.needle.isEmpty {
-                            onClose()
-                        } else {
-                            Ghostty.moveFocus(to: surfaceView)
-                        }
-                    }
+                    .onExitCommand(perform: onClose)
 #endif
                     .backport.onKeyPress(.return) { modifiers in
                         if modifiers.contains(.shift) {
@@ -576,6 +570,7 @@ extension Ghostty {
                 .background(.background)
                 .clipShape(clipShape)
                 .shadow(radius: 4)
+                .opacity(isSearchFieldFocused ? 1 : 0.8)
                 .onAppear {
                     isSearchFieldFocused = true
                 }

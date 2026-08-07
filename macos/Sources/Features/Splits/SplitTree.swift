@@ -226,6 +226,31 @@ extension SplitTree {
         focusTarget(for: direction, from: currentNode, within: nil)
     }
 
+    /// Find the nearest view in the adjacent quadrant, skipping every view
+    /// within the current quadrant.
+    func quadrantFocusTarget(for direction: FocusDirection, from currentNode: Node) -> ViewType? {
+        guard case .spatial(let spatialDirection) = direction,
+              let root,
+              let sourceQuadrant = quadrant(containing: currentNode)
+        else { return nil }
+
+        let spatial = root.spatial()
+        guard let targetQuadrant = spatial.slots(
+            in: spatialDirection,
+            from: sourceQuadrant
+        ).first(where: { quadrant(containing: $0.node) == $0.node })?.node else {
+            return nil
+        }
+
+        return spatial.slots(in: spatialDirection, from: currentNode)
+            .first(where: { slot in
+                guard case .leaf = slot.node else { return false }
+                return targetQuadrant.contains(slot.node)
+            })?
+            .node
+            .leftmostLeaf()
+    }
+
     /// Find the next view to focus, optionally constrained to a subtree.
     func focusTarget(for direction: FocusDirection, from currentNode: Node, within subtree: Node?) -> ViewType? {
         guard let root else { return nil }

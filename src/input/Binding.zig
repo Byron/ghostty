@@ -629,8 +629,10 @@ pub const Action = union(enum) {
     new_split: SplitDirection,
 
     /// Focus on a split either in the specified direction (`right`, `down`,
-    /// `left` and `up`), or in the adjacent split in the order of creation
-    /// (`previous` and `next`).
+    /// `left` and `up`), in the adjacent split in the order of creation
+    /// (`previous` and `next`), or in the nearest split in an adjacent
+    /// quadrant (`quadrant_right`, `quadrant_down`, `quadrant_left`, and
+    /// `quadrant_up`).
     goto_split: SplitFocusDirection,
 
     /// Focus on either the previous window or the next one ('previous', 'next')
@@ -1053,6 +1055,10 @@ pub const Action = union(enum) {
         left,
         down,
         right,
+        quadrant_up,
+        quadrant_left,
+        quadrant_down,
+        quadrant_right,
 
         pub fn parse(input: []const u8) !SplitFocusDirection {
             return std.meta.stringToEnum(SplitFocusDirection, input) orelse {
@@ -1078,6 +1084,11 @@ pub const Action = union(enum) {
             try testing.expectEqual(.left, try SplitFocusDirection.parse("left"));
             try testing.expectEqual(.down, try SplitFocusDirection.parse("down"));
             try testing.expectEqual(.right, try SplitFocusDirection.parse("right"));
+
+            try testing.expectEqual(.quadrant_up, try SplitFocusDirection.parse("quadrant_up"));
+            try testing.expectEqual(.quadrant_left, try SplitFocusDirection.parse("quadrant_left"));
+            try testing.expectEqual(.quadrant_down, try SplitFocusDirection.parse("quadrant_down"));
+            try testing.expectEqual(.quadrant_right, try SplitFocusDirection.parse("quadrant_right"));
 
             try testing.expectEqual(.up, try SplitFocusDirection.parse("top"));
             try testing.expectEqual(.down, try SplitFocusDirection.parse("bottom"));

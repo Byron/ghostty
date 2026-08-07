@@ -1222,7 +1222,10 @@ extension Ghostty {
                     // returning true. This ensures performable keybinds only consume
                     // the key event when we actually perform navigation.
                     let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = splitDirection.toSplitTreeFocusDirection()
-                    guard controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode) != nil else {
+                    let next = splitDirection.targetsQuadrant
+                        ? controller.surfaceTree.quadrantFocusTarget(for: focusDirection, from: targetNode)
+                        : controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode)
+                    guard next != nil else {
                         return false
                     }
 

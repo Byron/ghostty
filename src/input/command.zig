@@ -504,6 +504,26 @@ fn actionCommands(action: Action.Key) []const Command {
                 .title = "Focus Split: Down",
                 .description = "Focus the split below, if it exists.",
             },
+            .{
+                .action = .{ .goto_split = .quadrant_left },
+                .title = "Focus Quadrant: Left",
+                .description = "Focus the nearest split in the quadrant to the left, if it exists.",
+            },
+            .{
+                .action = .{ .goto_split = .quadrant_right },
+                .title = "Focus Quadrant: Right",
+                .description = "Focus the nearest split in the quadrant to the right, if it exists.",
+            },
+            .{
+                .action = .{ .goto_split = .quadrant_up },
+                .title = "Focus Quadrant: Up",
+                .description = "Focus the nearest split in the quadrant above, if it exists.",
+            },
+            .{
+                .action = .{ .goto_split = .quadrant_down },
+                .title = "Focus Quadrant: Down",
+                .description = "Focus the nearest split in the quadrant below, if it exists.",
+            },
         },
 
         .goto_window => comptime &.{

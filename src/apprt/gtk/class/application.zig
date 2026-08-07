@@ -2034,6 +2034,10 @@ const Action = struct {
                     .down => .{ .spatial = .down },
                     .left => .{ .spatial = .left },
                     .right => .{ .spatial = .right },
+                    .quadrant_up => .{ .quadrant = .up },
+                    .quadrant_down => .{ .quadrant = .down },
+                    .quadrant_left => .{ .quadrant = .left },
+                    .quadrant_right => .{ .quadrant = .right },
                 });
             },
         }

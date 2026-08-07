@@ -352,7 +352,60 @@ pub fn SplitTree(comptime V: type) type {
             /// based on the nearest surface in the given direction visually
             /// as the surfaces are laid out on a 2D grid.
             spatial: Spatial.Direction,
+
+            /// Move to the nearest surface in the adjacent quadrant.
+            quadrant: Spatial.Direction,
         };
+
+        /// Returns the nearest leaf in the adjacent quadrant. Panes within
+        /// the current quadrant are skipped entirely.
+        pub fn gotoQuadrant(
+            self: *const Self,
+            alloc: Allocator,
+            from: Node.Handle,
+            direction: Spatial.Direction,
+        ) Allocator.Error!?Node.Handle {
+            const source_quadrant = self.quadrant(from) orelse return null;
+
+            var sp = try self.spatial(alloc);
+            defer sp.deinit(alloc);
+
+            const source = sp.slots[source_quadrant.idx()];
+            var target: ?struct {
+                handle: Node.Handle,
+                distance: f16,
+            } = null;
+
+            for (sp.slots, 0..) |slot, idx| {
+                const handle: Node.Handle = @enumFromInt(idx);
+                const candidate_quadrant = self.quadrant(handle) orelse continue;
+                if (candidate_quadrant != handle) continue;
+
+                if (!switch (direction) {
+                    .left => slot.maxX() <= source.x,
+                    .right => slot.x >= source.maxX(),
+                    .up => slot.maxY() <= source.y,
+                    .down => slot.y >= source.maxY(),
+                }) continue;
+
+                const dx = slot.x - source.x;
+                const dy = slot.y - source.y;
+                const distance = @sqrt(dx * dx + dy * dy);
+                if (target) |current| {
+                    if (distance >= current.distance) continue;
+                }
+                target = .{ .handle = handle, .distance = distance };
+            }
+
+            const target_quadrant = (target orelse return null).handle;
+            return self.nearest(
+                sp,
+                target_quadrant,
+                from,
+                direction,
+                sp.slots[from.idx()],
+            );
+        }
 
         /// Goto a view from a certain point in the split tree. Returns null
         /// if the direction results in no visitable view.
@@ -375,6 +428,7 @@ pub fn SplitTree(comptime V: type) type {
                     defer sp.deinit(alloc);
                     break :spatial self.nearestWrapped(sp, from, d);
                 },
+                .quadrant => |d| self.gotoQuadrant(alloc, from, d),
             };
         }
 
@@ -401,6 +455,7 @@ pub fn SplitTree(comptime V: type) type {
                     defer sp.deinit(alloc);
                     break :spatial self.nearest(sp, root, from, d, sp.slots[from.idx()]);
                 },
+                .quadrant => null,
             };
         }
 
@@ -2818,6 +2873,48 @@ test "SplitTree: quadrant bounded goto" {
     )).?);
 }
 
+test "SplitTree: quadrant goto skips nested panes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var v1: TestTree.View = .{ .label = "A" };
+    var t1: TestTree = try .init(alloc, &v1);
+    defer t1.deinit();
+    var v2: TestTree.View = .{ .label = "B" };
+    var t2: TestTree = try .init(alloc, &v2);
+    defer t2.deinit();
+    var v3: TestTree.View = .{ .label = "C" };
+    var t3: TestTree = try .init(alloc, &v3);
+    defer t3.deinit();
+    var v4: TestTree.View = .{ .label = "D" };
+    var t4: TestTree = try .init(alloc, &v4);
+    defer t4.deinit();
+    var v5: TestTree.View = .{ .label = "E" };
+    var t5: TestTree = try .init(alloc, &v5);
+    defer t5.deinit();
+
+    var ab = try t1.split(alloc, .root, .right, 0.5, &t2);
+    defer ab.deinit();
+    var abc = try ab.split(alloc, try testHandleForLabel(&ab, "A"), .down, 0.5, &t3);
+    defer abc.deinit();
+    var abcd = try abc.split(alloc, try testHandleForLabel(&abc, "B"), .down, 0.5, &t4);
+    defer abcd.deinit();
+    var tree = try abcd.split(alloc, try testHandleForLabel(&abcd, "A"), .right, 0.5, &t5);
+    defer tree.deinit();
+
+    const a = try testHandleForLabel(&tree, "A");
+    const b = try testHandleForLabel(&tree, "B");
+    const c = try testHandleForLabel(&tree, "C");
+    const e = try testHandleForLabel(&tree, "E");
+
+    try testing.expectEqual(e, (try tree.goto(alloc, a, .{ .spatial = .right })).?);
+    try testing.expectEqual(b, (try tree.goto(alloc, a, .{ .quadrant = .right })).?);
+    try testing.expectEqual(e, (try tree.goto(alloc, b, .{ .quadrant = .left })).?);
+    try testing.expectEqual(c, (try tree.goto(alloc, a, .{ .quadrant = .down })).?);
+    try testing.expectEqual(a, (try tree.goto(alloc, c, .{ .quadrant = .up })).?);
+    try testing.expect(try tree.goto(alloc, b, .{ .quadrant = .right }) == null);
+}
+
 test "SplitTree: quadrant zoom requires two axes" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -2832,9 +2929,11 @@ test "SplitTree: quadrant zoom requires two axes" {
     var tree = try t1.split(alloc, .root, .right, 0.5, &t2);
     defer tree.deinit();
 
-    try testing.expect(!tree.toggleQuadrantZoom(try testHandleForLabel(&tree, "A")));
+    const a = try testHandleForLabel(&tree, "A");
+    try testing.expect(!tree.toggleQuadrantZoom(a));
     try testing.expect(tree.zoomed == null);
     try testing.expect(tree.quadrant_zoomed == null);
+    try testing.expect(try tree.goto(alloc, a, .{ .quadrant = .right }) == null);
 }
 
 test "SplitTree: remove and zoom" {

@@ -320,6 +320,36 @@ struct SplitTreeTests {
         #expect(tree.focusTarget(for: .spatial(.down), from: targetNode, within: quadrant) == nil)
     }
 
+    @Test func quadrantFocusSkipsNestedPanes() throws {
+        let view1 = MockView()
+        let view2 = MockView()
+        let view3 = MockView()
+        let view4 = MockView()
+        let view5 = MockView()
+        var tree = SplitTree<MockView>(view: view1)
+        tree = try tree.inserting(view: view2, at: view1, direction: .right)
+        tree = try tree.inserting(view: view3, at: view1, direction: .down)
+        tree = try tree.inserting(view: view4, at: view2, direction: .down)
+        tree = try tree.inserting(view: view5, at: view1, direction: .right)
+
+        let node1 = try #require(tree.root?.node(view: view1))
+        let node2 = try #require(tree.root?.node(view: view2))
+        let node3 = try #require(tree.root?.node(view: view3))
+
+        #expect(tree.focusTarget(for: .spatial(.right), from: node1) === view5)
+        #expect(tree.quadrantFocusTarget(for: .spatial(.right), from: node1) === view2)
+        #expect(tree.quadrantFocusTarget(for: .spatial(.left), from: node2) === view5)
+        #expect(tree.quadrantFocusTarget(for: .spatial(.down), from: node1) === view3)
+        #expect(tree.quadrantFocusTarget(for: .spatial(.up), from: node3) === view1)
+        #expect(tree.quadrantFocusTarget(for: .spatial(.right), from: node2) == nil)
+    }
+
+    @Test func quadrantFocusRequiresQuadrants() throws {
+        let (tree, view1, _) = try makeHorizontalSplit()
+        let node = try #require(tree.root?.node(view: view1))
+        #expect(tree.quadrantFocusTarget(for: .spatial(.right), from: node) == nil)
+    }
+
     @Test func insertingInsideQuadrantZoomKeepsQuadrantZoom() throws {
         let (tree, view1, _) = try makeQuadrantTree()
         guard let root = tree.root,

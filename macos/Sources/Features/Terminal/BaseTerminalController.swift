@@ -753,7 +753,13 @@ class BaseTerminalController: NSWindowController,
         // Find the next surface to focus
         let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = direction.toSplitTreeFocusDirection()
         let nextSurface: Ghostty.SurfaceView
-        if let zoomedQuadrant = surfaceTree.quadrantZoomed {
+        if direction.targetsQuadrant {
+            guard let next = surfaceTree.quadrantFocusTarget(
+                for: focusDirection,
+                from: targetNode
+            ) else { return }
+            nextSurface = next
+        } else if let zoomedQuadrant = surfaceTree.quadrantZoomed {
             guard zoomedQuadrant.contains(targetNode) else {
                 surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
                 return
@@ -778,7 +784,9 @@ class BaseTerminalController: NSWindowController,
             nextSurface = next
         }
 
-        if surfaceTree.zoomed != nil {
+        if direction.targetsQuadrant {
+            surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
+        } else if surfaceTree.zoomed != nil {
             if let zoomedQuadrant = surfaceTree.quadrantZoomed {
                 surfaceTree = SplitTree(
                     root: surfaceTree.root,

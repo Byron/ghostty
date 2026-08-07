@@ -534,6 +534,10 @@ pub const GotoSplit = enum(c_int) {
     left,
     down,
     right,
+    quadrant_up,
+    quadrant_left,
+    quadrant_down,
+    quadrant_right,
 
     test "ghostty.h GotoSplit" {
         try lib.checkGhosttyHEnum(GotoSplit, "GHOSTTY_GOTO_SPLIT_");

@@ -354,29 +354,35 @@ pub const SplitTree = extern struct {
         const active = self.getActiveSurfaceHandle() orelse return false;
         const active_surface = tree.nodes[active.idx()].leaf;
         const alloc = Application.default().allocator();
+        const targets_quadrant = switch (to) {
+            .quadrant => true,
+            else => false,
+        };
 
         const target = target: {
-            if (tree.quadrant_zoomed) |quadrant| {
-                if (active != quadrant and tree.quadrant(active) != quadrant) {
-                    tree.zoom(null);
-                    self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
-                    self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
-                    return false;
+            if (!targets_quadrant) {
+                if (tree.quadrant_zoomed) |quadrant| {
+                    if (active != quadrant and tree.quadrant(active) != quadrant) {
+                        tree.zoom(null);
+                        self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+                        self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+                        return false;
+                    }
+
+                    const handle = tree.gotoBounded(
+                        alloc,
+                        quadrant,
+                        active,
+                        to,
+                    ) catch |err| switch (err) {
+                        error.OutOfMemory => return false,
+                    } orelse {
+                        active_surface.setBellRinging(true);
+                        return true;
+                    };
+
+                    break :target handle;
                 }
-
-                const handle = tree.gotoBounded(
-                    alloc,
-                    quadrant,
-                    active,
-                    to,
-                ) catch |err| switch (err) {
-                    error.OutOfMemory => return false,
-                } orelse {
-                    active_surface.setBellRinging(true);
-                    return true;
-                };
-
-                break :target handle;
             }
 
             break :target if (tree.goto(
@@ -410,17 +416,21 @@ pub const SplitTree = extern struct {
         errdefer self.private().last_focused.set(old_last_focused);
 
         if (tree.zoomed != null) {
-            const app = Application.default();
-            const config_obj = app.getConfig();
-            defer config_obj.unref();
-            const config = config_obj.get();
-
-            if (tree.quadrant_zoomed) |quadrant| {
-                tree.zoomed = quadrant;
-            } else if (!config.@"split-preserve-zoom".navigation) {
+            if (targets_quadrant) {
                 tree.zoom(null);
             } else {
-                tree.zoom(target);
+                const app = Application.default();
+                const config_obj = app.getConfig();
+                defer config_obj.unref();
+                const config = config_obj.get();
+
+                if (tree.quadrant_zoomed) |quadrant| {
+                    tree.zoomed = quadrant;
+                } else if (!config.@"split-preserve-zoom".navigation) {
+                    tree.zoom(null);
+                } else {
+                    tree.zoom(target);
+                }
             }
 
             // When the zoom state changes our tree state changes and

@@ -1346,6 +1346,13 @@ extension Ghostty {
                     // Find the current node in the tree
                     guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }
 
+                    let modifierFlags: NSEvent.ModifierFlags = if let event = NSApp.currentEvent,
+                                                                  event.type == .keyDown {
+                        event.modifierFlags.intersection([.shift, .control, .option, .command])
+                    } else {
+                        []
+                    }
+
                     // Check if a split actually exists in the target direction before
                     // returning true. This ensures performable keybinds only consume
                     // the key event when we actually perform navigation.
@@ -1353,7 +1360,16 @@ extension Ghostty {
                     let next = splitDirection.targetsQuadrant
                         ? controller.surfaceTree.quadrantFocusTarget(for: focusDirection, from: targetNode)
                         : controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode)
-                    guard next != nil else {
+                    let isQuadrantZoomed = if let quadrant = controller.surfaceTree.quadrantZoomed {
+                        controller.surfaceTree.zoomed == quadrant
+                    } else {
+                        false
+                    }
+                    guard next != nil || (splitDirection.targetsQuadrant &&
+                        BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
+                            isQuadrantZoomed: isQuadrantZoomed,
+                            isSwitching: controller.quadrantSwitchIsActive,
+                            modifiers: modifierFlags)) else {
                         return false
                     }
 
@@ -1363,6 +1379,7 @@ extension Ghostty {
                         object: surfaceView,
                         userInfo: [
                             Notification.SplitDirectionKey: splitDirection as Any,
+                            Notification.SplitModifierFlagsKey: modifierFlags,
                         ]
                     )
 

@@ -6,6 +6,18 @@ extension Ghostty {
     class OSSurfaceView: NSView, ObservableObject {
         typealias ID = UUID
 
+        enum FiniteHighlight: Equatable {
+            case focus
+            case zoom
+
+            var lineWidth: CGFloat {
+                switch self {
+                case .focus: 1.5
+                case .zoom: 3
+                }
+            }
+        }
+
         /// Unique ID per surface
         let id: UUID
 
@@ -52,10 +64,10 @@ extension Ghostty {
         /// True when the surface should show a highlight effect (e.g., when presented via goto_split).
         @Published private(set) var highlighted: Bool = false
 
-        /// True while a zoom change should briefly identify this surface.
-        @Published private(set) var zoomHighlighted: Bool = false
+        /// Briefly identifies this surface after focus or zoom changes.
+        @Published private(set) var finiteHighlight: FiniteHighlight?
 
-        private var zoomHighlightTask: Task<Void, Never>?
+        private var finiteHighlightTask: Task<Void, Never>?
 
         /// A message sent from `ghostty_surface_t` when a child process exited
         @Published private(set) var childExitedMessage: ChildExitedMessage?
@@ -103,12 +115,21 @@ extension Ghostty {
 
         /// Briefly identifies this surface after a multi-pane zoom change.
         func highlightZoom() {
-            zoomHighlightTask?.cancel()
-            zoomHighlighted = true
-            zoomHighlightTask = Task { @MainActor [weak self] in
+            highlightFinite(.zoom)
+        }
+
+        /// Briefly identifies this surface after keyboard focus navigation.
+        func highlightFocus() {
+            highlightFinite(.focus)
+        }
+
+        private func highlightFinite(_ highlight: FiniteHighlight) {
+            finiteHighlightTask?.cancel()
+            finiteHighlight = highlight
+            finiteHighlightTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(200))
                 guard !Task.isCancelled else { return }
-                self?.zoomHighlighted = false
+                self?.finiteHighlight = nil
             }
         }
 

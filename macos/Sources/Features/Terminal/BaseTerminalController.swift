@@ -854,6 +854,7 @@ class BaseTerminalController: NSWindowController,
         guard let nextSurface else { return }
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: nextSurface, from: target)
+            nextSurface.highlightFocus()
         }
     }
 

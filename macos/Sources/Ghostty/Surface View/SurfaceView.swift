@@ -294,8 +294,8 @@ extension Ghostty {
                 // Show a highlight effect when this surface needs attention
                 HighlightOverlay(highlighted: surfaceView.highlighted)
 
-                // Identify the focused surface after a multi-pane zoom change.
-                ZoomHighlightOverlay(highlighted: surfaceView.zoomHighlighted)
+                // Identify the focused surface after focus or zoom changes.
+                FiniteHighlightOverlay(highlight: surfaceView.finiteHighlight)
 
                 // If our surface is not healthy, then we render an error view over it.
                 if !surfaceView.healthy {
@@ -1158,16 +1158,16 @@ extension Ghostty {
         }
     }
 
-    /// A cheap, finite zoom highlight that remains stable when the split tree is rebuilt.
-    struct ZoomHighlightOverlay: View {
-        let highlighted: Bool
+    /// A cheap, finite highlight that remains stable when the split tree is rebuilt.
+    struct FiniteHighlightOverlay: View {
+        let highlight: Ghostty.OSSurfaceView.FiniteHighlight?
 
         var body: some View {
             Rectangle()
-                .strokeBorder(Color.accentColor.opacity(0.8), lineWidth: 3)
+                .strokeBorder(Color.accentColor.opacity(0.8), lineWidth: highlight?.lineWidth ?? 0)
                 .allowsHitTesting(false)
-                .opacity(highlighted ? 1 : 0)
-                .animation(highlighted ? nil : .easeOut(duration: 0.2), value: highlighted)
+                .opacity(highlight == nil ? 0 : 1)
+                .animation(highlight == nil ? .easeOut(duration: 0.2) : nil, value: highlight)
         }
     }
 

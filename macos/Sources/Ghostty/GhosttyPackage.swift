@@ -429,6 +429,7 @@ extension Ghostty.Notification {
     /// Focus previous/next split. Has a SplitFocusDirection in the userinfo.
     static let ghosttyFocusSplit = Notification.Name("com.mitchellh.ghostty.focusSplit")
     static let SplitDirectionKey = ghosttyFocusSplit.rawValue
+    static let SplitModifierFlagsKey = ghosttyFocusSplit.rawValue + ".modifierFlags"
 
     /// Goto tab. Has tab index in the userinfo.
     static let ghosttyGotoTab = Notification.Name("com.mitchellh.ghostty.gotoTab")

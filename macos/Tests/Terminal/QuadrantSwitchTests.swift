@@ -1,0 +1,56 @@
+import AppKit
+import Testing
+@testable import Ghostty
+
+@Suite
+struct QuadrantSwitchTests {
+    @Test func blockedNavigationEligibility() {
+        let modifiers: NSEvent.ModifierFlags = [.command, .control]
+
+        #expect(BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
+            isQuadrantZoomed: true,
+            isSwitching: false,
+            modifiers: modifiers))
+        #expect(BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
+            isQuadrantZoomed: false,
+            isSwitching: true,
+            modifiers: modifiers))
+        #expect(!BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
+            isQuadrantZoomed: false,
+            isSwitching: false,
+            modifiers: modifiers))
+        #expect(!BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
+            isQuadrantZoomed: true,
+            isSwitching: false,
+            modifiers: []))
+    }
+
+    @Test func blockedNavigationPreservesDestination() {
+        var state = BaseTerminalController.QuadrantSwitch(
+            modifiers: NSEvent.ModifierFlags([.command, .control]),
+            target: "original")
+
+        state.updateTarget(nil)
+        #expect(state.target == "original")
+
+        state.updateTarget("next")
+        #expect(state.target == "next")
+    }
+
+    @Test func commitsWhenInitiatingChordBreaks() {
+        let initiating: NSEvent.ModifierFlags = [.command, .control]
+
+        #expect(!BaseTerminalController.shouldCommitQuadrantSwitch(
+            initiating: initiating,
+            current: [.command, .control]))
+        #expect(!BaseTerminalController.shouldCommitQuadrantSwitch(
+            initiating: initiating,
+            current: [.command, .control, .shift]))
+        #expect(BaseTerminalController.shouldCommitQuadrantSwitch(
+            initiating: initiating,
+            current: [.command]))
+        #expect(BaseTerminalController.shouldCommitQuadrantSwitch(
+            initiating: initiating,
+            current: [.control]))
+    }
+}

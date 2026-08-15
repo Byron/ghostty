@@ -307,6 +307,22 @@ struct SplitTreeTests {
         #expect(tree.quadrant(containing: targetNode!) == nil)
     }
 
+    @Test func quadrantPositionsAreStableSpatialCells() throws {
+        let topLeft = MockView()
+        let topRight = MockView()
+        let bottomLeft = MockView()
+        let bottomRight = MockView()
+        var tree = SplitTree<MockView>(view: topLeft)
+        tree = try tree.inserting(view: topRight, at: topLeft, direction: .right)
+        tree = try tree.inserting(view: bottomLeft, at: topLeft, direction: .down)
+        tree = try tree.inserting(view: bottomRight, at: topRight, direction: .down)
+
+        #expect(tree.quadrantPosition(containing: .leaf(view: topLeft)) == .topLeft)
+        #expect(tree.quadrantPosition(containing: .leaf(view: topRight)) == .topRight)
+        #expect(tree.quadrantPosition(containing: .leaf(view: bottomLeft)) == .bottomLeft)
+        #expect(tree.quadrantPosition(containing: .leaf(view: bottomRight)) == .bottomRight)
+    }
+
     @Test func focusTargetCanBeConstrainedToQuadrant() throws {
         let (tree, view1, view5) = try makeQuadrantTree()
         guard let root = tree.root,

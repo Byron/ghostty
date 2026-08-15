@@ -1232,14 +1232,9 @@ extension Ghostty {
                     let next = splitDirection.targetsQuadrant
                         ? controller.surfaceTree.quadrantFocusTarget(for: focusDirection, from: targetNode)
                         : controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode)
-                    let isQuadrantZoomed = if let quadrant = controller.surfaceTree.quadrantZoomed {
-                        controller.surfaceTree.zoomed == quadrant
-                    } else {
-                        false
-                    }
                     guard next != nil || (splitDirection.targetsQuadrant &&
                         BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
-                            isQuadrantZoomed: isQuadrantZoomed,
+                            hasQuadrantZoom: controller.surfaceTree.quadrantZoomed != nil,
                             isSwitching: controller.quadrantSwitchIsActive,
                             modifiers: modifierFlags)) else {
                         return false

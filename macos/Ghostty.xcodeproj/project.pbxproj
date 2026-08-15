@@ -10,7 +10,6 @@
 		29C15B1D2CDC3B2900520DD4 /* bat in Resources */ = {isa = PBXBuildFile; fileRef = 29C15B1C2CDC3B2000520DD4 /* bat */; };
 		55154BE02B33911F001622DC /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = 55154BDF2B33911F001622DC /* ghostty */; };
 		552964E62B34A9B400030505 /* vim in Resources */ = {isa = PBXBuildFile; fileRef = 552964E52B34A9B400030505 /* vim */; };
-		819324582F24E78800A9ED8F /* DockTilePlugin.plugin in Copy DockTilePlugin */ = {isa = PBXBuildFile; fileRef = 8193244D2F24E6C000A9ED8F /* DockTilePlugin.plugin */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		819324642F24FF2100A9ED8F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
 		8F3A9B4C2FA6B88000A18D13 /* Ghostty.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */; };
 		9351BE8E3D22937F003B3499 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
@@ -38,13 +37,6 @@
 			remoteGlobalIDString = A5B30530299BEAAA0047F10C;
 			remoteInfo = Ghostty;
 		};
-		819324672F2502FB00A9ED8F /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = A5B30529299BEAAA0047F10C /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 8193244C2F24E6C000A9ED8F;
-			remoteInfo = DockTilePlugin;
-		};
 		A54F45F72E1F047A0046BD5C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = A5B30529299BEAAA0047F10C /* Project object */;
@@ -55,17 +47,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		819324572F24E74E00A9ED8F /* Copy DockTilePlugin */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				819324582F24E78800A9ED8F /* DockTilePlugin.plugin in Copy DockTilePlugin */,
-			);
-			name = "Copy DockTilePlugin";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -451,12 +432,10 @@
 				A5B3052D299BEAAA0047F10C /* Sources */,
 				A5B3052E299BEAAA0047F10C /* Frameworks */,
 				A5B3052F299BEAAA0047F10C /* Resources */,
-				819324572F24E74E00A9ED8F /* Copy DockTilePlugin */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				819324682F2502FB00A9ED8F /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				81F82BC72E82815D001EDFA7 /* Sources */,
@@ -664,11 +643,6 @@
 			isa = PBXTargetDependency;
 			target = A5B30530299BEAAA0047F10C /* Ghostty */;
 			targetProxy = 810ACCA52E9D3302004F8F92 /* PBXContainerItemProxy */;
-		};
-		819324682F2502FB00A9ED8F /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 8193244C2F24E6C000A9ED8F /* DockTilePlugin */;
-			targetProxy = 819324672F2502FB00A9ED8F /* PBXContainerItemProxy */;
 		};
 		A54F45F82E1F047A0046BD5C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;

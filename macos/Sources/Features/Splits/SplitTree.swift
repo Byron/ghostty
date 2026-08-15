@@ -90,6 +90,13 @@ struct SplitTree<ViewType: NSView & Codable & Identifiable> {
         // is always from the top-left corner for now.
         case spatial(Spatial.Direction)
     }
+
+    enum QuadrantPosition: Hashable {
+        case topLeft
+        case topRight
+        case bottomLeft
+        case bottomRight
+    }
 }
 
 // MARK: SplitTree
@@ -416,38 +423,61 @@ extension SplitTree {
     /// reached as soon as the path from the root has crossed both a horizontal and
     /// a vertical split.
     func quadrant(containing target: Node) -> Node? {
+        quadrantInfo(containing: target)?.node
+    }
+
+    func quadrantPosition(containing target: Node) -> QuadrantPosition? {
+        quadrantInfo(containing: target)?.position
+    }
+
+    private func quadrantInfo(
+        containing target: Node
+    ) -> (node: Node, position: QuadrantPosition)? {
         guard let root else { return nil }
 
         func search(
             current: Node,
-            seenHorizontal: Bool,
-            seenVertical: Bool
-        ) -> Node? {
+            horizontal: Bool?,
+            vertical: Bool?
+        ) -> (node: Node, position: QuadrantPosition)? {
             guard case .split(let split) = current else { return nil }
 
             let child: Node
+            let isRightOrBottom: Bool
             if split.left.contains(target) {
                 child = split.left
+                isRightOrBottom = false
             } else if split.right.contains(target) {
                 child = split.right
+                isRightOrBottom = true
             } else {
                 return nil
             }
 
-            let newSeenHorizontal = seenHorizontal || split.direction == .horizontal
-            let newSeenVertical = seenVertical || split.direction == .vertical
-            if newSeenHorizontal && newSeenVertical && !(seenHorizontal && seenVertical) {
-                return child
+            let newHorizontal = split.direction == .horizontal
+                ? horizontal ?? isRightOrBottom
+                : horizontal
+            let newVertical = split.direction == .vertical
+                ? vertical ?? isRightOrBottom
+                : vertical
+            if let newHorizontal, let newVertical {
+                let position: QuadrantPosition = switch (newHorizontal, newVertical) {
+                case (false, false): .topLeft
+                case (true, false): .topRight
+                case (false, true): .bottomLeft
+                case (true, true): .bottomRight
+                }
+                return (child, position)
             }
 
             return search(
                 current: child,
-                seenHorizontal: newSeenHorizontal,
-                seenVertical: newSeenVertical
+                horizontal: newHorizontal,
+                vertical: newVertical
             )
         }
 
-        return search(current: root, seenHorizontal: false, seenVertical: false)
+        return search(current: root, horizontal: nil, vertical: nil)
     }
 
     /// Returns the total bounds of the split hierarchy using NSView bounds.

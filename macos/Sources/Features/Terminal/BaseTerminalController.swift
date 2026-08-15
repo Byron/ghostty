@@ -76,6 +76,14 @@ class BaseTerminalController: NSWindowController,
         !modifiers.isEmpty && (hasQuadrantZoom || isSwitching)
     }
 
+    static func shouldBeginQuadrantPeek(
+        modifiers: NSEvent.ModifierFlags,
+        configured: [NSEvent.ModifierFlags],
+        hasQuadrantZoom: Bool
+    ) -> Bool {
+        hasQuadrantZoom && configured.contains(modifiers)
+    }
+
     /// The app instance that this terminal view will represent.
     let ghostty: Ghostty.App
 
@@ -747,6 +755,23 @@ class BaseTerminalController: NSWindowController,
         return remembered
     }
 
+    private func beginQuadrantSwitch(
+        modifiers: NSEvent.ModifierFlags,
+        target: Ghostty.SurfaceView
+    ) {
+        let fullZoomTarget: Ghostty.SurfaceView?
+        if surfaceTree.zoomed != surfaceTree.quadrantZoomed {
+            fullZoomTarget = surfaceTree.zoomed?.leftmostLeaf()
+        } else {
+            fullZoomTarget = nil
+        }
+
+        quadrantSwitch = .init(
+            modifiers: modifiers,
+            target: target,
+            fullZoomTarget: fullZoomTarget)
+    }
+
     @objc private func ghosttyDidFocusSplit(_ notification: Notification) {
         // The target must be within our tree
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
@@ -760,12 +785,6 @@ class BaseTerminalController: NSWindowController,
         guard let targetNode = surfaceTree.root?.node(view: target) else { return }
 
         let startsQuadrantSwitch = direction.targetsQuadrant && surfaceTree.quadrantZoomed != nil
-        let fullZoomTarget: Ghostty.SurfaceView?
-        if startsQuadrantSwitch, surfaceTree.zoomed != surfaceTree.quadrantZoomed {
-            fullZoomTarget = surfaceTree.zoomed?.leftmostLeaf()
-        } else {
-            fullZoomTarget = nil
-        }
 
         // Find the next surface to focus
         let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = direction.toSplitTreeFocusDirection()
@@ -807,10 +826,9 @@ class BaseTerminalController: NSWindowController,
                       let modifiers = notification.userInfo?[Ghostty.Notification.SplitModifierFlagsKey]
                         as? NSEvent.ModifierFlags,
                       !modifiers.isEmpty {
-                self.quadrantSwitch = .init(
+                beginQuadrantSwitch(
                     modifiers: modifiers,
-                    target: nextSurface ?? target,
-                    fullZoomTarget: fullZoomTarget)
+                    target: nextSurface ?? target)
             } else if nextSurface == nil {
                 return
             }
@@ -1004,36 +1022,53 @@ class BaseTerminalController: NSWindowController,
     }
 
     private func localEventFlagsChanged(_ event: NSEvent) -> NSEvent? {
-        if let quadrantSwitch,
-           Self.shouldCommitQuadrantSwitch(
-            initiating: quadrantSwitch.modifiers,
-            current: event.modifierFlags) {
-            self.quadrantSwitch = nil
+        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
 
-            if NSApp.mainWindow == window,
-               surfaceTree.zoomed == nil,
-               surfaceTree.quadrantZoomed == nil,
-               surfaceTree.contains(quadrantSwitch.target) {
-                if let fullZoomTarget = quadrantSwitch.fullZoomTarget,
-                   let root = surfaceTree.root,
-                   let fullZoomNode = root.node(view: fullZoomTarget),
-                   let targetNode = root.node(view: quadrantSwitch.target),
-                   let fullZoomQuadrant = surfaceTree.quadrant(containing: fullZoomNode),
-                   let fullZoomPosition = surfaceTree.quadrantPosition(containing: fullZoomNode),
-                   let targetPosition = surfaceTree.quadrantPosition(containing: targetNode),
-                   fullZoomPosition == targetPosition {
-                    surfaceTree = SplitTree(
-                        root: root,
-                        zoomed: fullZoomNode,
-                        quadrantZoomed: fullZoomQuadrant)
-                    DispatchQueue.main.async {
-                        Ghostty.moveFocus(to: fullZoomTarget)
+        if let quadrantSwitch {
+            if Self.shouldCommitQuadrantSwitch(
+                initiating: quadrantSwitch.modifiers,
+                current: modifiers
+            ) {
+                self.quadrantSwitch = nil
+
+                if NSApp.mainWindow == window,
+                   surfaceTree.zoomed == nil,
+                   surfaceTree.quadrantZoomed == nil,
+                   surfaceTree.contains(quadrantSwitch.target) {
+                    if let fullZoomTarget = quadrantSwitch.fullZoomTarget,
+                       let root = surfaceTree.root,
+                       let fullZoomNode = root.node(view: fullZoomTarget),
+                       let targetNode = root.node(view: quadrantSwitch.target),
+                       let fullZoomQuadrant = surfaceTree.quadrant(containing: fullZoomNode),
+                       let fullZoomPosition = surfaceTree.quadrantPosition(containing: fullZoomNode),
+                       let targetPosition = surfaceTree.quadrantPosition(containing: targetNode),
+                       fullZoomPosition == targetPosition {
+                        surfaceTree = SplitTree(
+                            root: root,
+                            zoomed: fullZoomNode,
+                            quadrantZoomed: fullZoomQuadrant)
+                        DispatchQueue.main.async {
+                            Ghostty.moveFocus(to: fullZoomTarget)
+                        }
+                    } else {
+                        NotificationCenter.default.post(
+                            name: Ghostty.Notification.didToggleQuadrantZoom,
+                            object: quadrantSwitch.target)
                     }
-                } else {
-                    NotificationCenter.default.post(
-                        name: Ghostty.Notification.didToggleQuadrantZoom,
-                        object: quadrantSwitch.target)
                 }
+            }
+        } else if Self.shouldBeginQuadrantPeek(
+            modifiers: modifiers,
+            configured: derivedConfig.quadrantNavigationModifierFlags,
+            hasQuadrantZoom: surfaceTree.quadrantZoomed != nil
+        ),
+            NSApp.mainWindow == window,
+            let target = focusedSurface,
+            surfaceTree.contains(target) {
+            beginQuadrantSwitch(modifiers: modifiers, target: target)
+            surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
+            DispatchQueue.main.async {
+                target.highlightZoom()
             }
         }
 
@@ -1777,12 +1812,14 @@ class BaseTerminalController: NSWindowController,
         let windowStepResize: Bool
         let focusFollowsMouse: Bool
         let splitPreserveZoom: Ghostty.Config.SplitPreserveZoom
+        let quadrantNavigationModifierFlags: [NSEvent.ModifierFlags]
 
         init() {
             self.macosTitlebarProxyIcon = .visible
             self.windowStepResize = false
             self.focusFollowsMouse = false
             self.splitPreserveZoom = .init()
+            self.quadrantNavigationModifierFlags = []
         }
 
         init(_ config: Ghostty.Config) {
@@ -1790,6 +1827,7 @@ class BaseTerminalController: NSWindowController,
             self.windowStepResize = config.windowStepResize
             self.focusFollowsMouse = config.focusFollowsMouse
             self.splitPreserveZoom = config.splitPreserveZoom
+            self.quadrantNavigationModifierFlags = config.quadrantNavigationModifierFlags
         }
     }
 }

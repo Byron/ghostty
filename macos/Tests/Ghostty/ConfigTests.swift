@@ -246,4 +246,28 @@ struct ConfigTests {
         let gotoToNextSplit = try #require(config.keyboardShortcut(for: "goto_split:next"))
         #expect(gotoToNextSplit == .init("]", modifiers: [.command]))
     }
+
+    @MainActor @Test func quadrantNavigationModifiersRequireTwoKeys() throws {
+        let config = try TemporaryConfig("""
+        keybind=cmd+ctrl+h=goto_split:quadrant_left
+        keybind=cmd+j=goto_split:quadrant_down
+        keybind=cmd+ctrl+k=goto_split:quadrant_up
+        """)
+
+        let modifiers = config.quadrantNavigationModifierFlags
+        #expect(modifiers.count == 1)
+        #expect(modifiers.allSatisfy { $0 == [.command, .control] })
+    }
+
+    @MainActor @Test func quadrantNavigationModifiersReloadWithConfig() throws {
+        let config = try TemporaryConfig("""
+        keybind=cmd+ctrl+h=goto_split:quadrant_left
+        """)
+        #expect(config.quadrantNavigationModifierFlags.contains([.command, .control]))
+
+        try config.reload("""
+        keybind=cmd+option+h=goto_split:quadrant_left
+        """)
+        #expect(config.quadrantNavigationModifierFlags == [[.command, .option]])
+    }
 }

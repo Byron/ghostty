@@ -121,6 +121,26 @@ extension Ghostty {
             return ghostty_config_trigger(config, action, UInt(action.lengthOfBytes(using: .utf8)))
         }
 
+        @MainActor var quadrantNavigationModifierFlags: [NSEvent.ModifierFlags] {
+            let bindingModifiers: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
+            let actions = [
+                "goto_split:quadrant_up",
+                "goto_split:quadrant_down",
+                "goto_split:quadrant_left",
+                "goto_split:quadrant_right",
+            ]
+            var seen: Set<UInt> = []
+
+            return actions.compactMap { action in
+                guard let shortcut = keyboardShortcut(for: action) else { return nil }
+                let modifiers = NSEvent.ModifierFlags(swiftUIFlags: shortcut.modifiers)
+                    .intersection(bindingModifiers)
+                guard modifiers.rawValue.nonzeroBitCount >= 2,
+                      seen.insert(modifiers.rawValue).inserted else { return nil }
+                return modifiers
+            }
+        }
+
         // MARK: - Configuration Values
 
         /// For all of the configuration values below, see the associated Ghostty documentation for

@@ -8,19 +8,19 @@ struct QuadrantSwitchTests {
         let modifiers: NSEvent.ModifierFlags = [.command, .control]
 
         #expect(BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
-            isQuadrantZoomed: true,
+            hasQuadrantZoom: true,
             isSwitching: false,
             modifiers: modifiers))
         #expect(BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
-            isQuadrantZoomed: false,
+            hasQuadrantZoom: false,
             isSwitching: true,
             modifiers: modifiers))
         #expect(!BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
-            isQuadrantZoomed: false,
+            hasQuadrantZoom: false,
             isSwitching: false,
             modifiers: modifiers))
         #expect(!BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
-            isQuadrantZoomed: true,
+            hasQuadrantZoom: true,
             isSwitching: false,
             modifiers: []))
     }
@@ -28,13 +28,15 @@ struct QuadrantSwitchTests {
     @Test func blockedNavigationPreservesDestination() {
         var state = BaseTerminalController.QuadrantSwitch(
             modifiers: NSEvent.ModifierFlags([.command, .control]),
-            target: "original")
+            target: "original",
+            fullZoomTarget: "zoomed")
 
         state.updateTarget(nil)
         #expect(state.target == "original")
 
         state.updateTarget("next")
         #expect(state.target == "next")
+        #expect(state.fullZoomTarget == "zoomed")
     }
 
     @Test func commitsWhenInitiatingChordBreaks() {

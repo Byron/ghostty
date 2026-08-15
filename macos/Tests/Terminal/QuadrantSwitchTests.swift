@@ -55,4 +55,28 @@ struct QuadrantSwitchTests {
             initiating: initiating,
             current: [.control]))
     }
+
+    @Test func peekBeginsWhenConfiguredChordIsComplete() {
+        let configured: [NSEvent.ModifierFlags] = [
+            [.command, .control],
+            [.command, .option],
+        ]
+
+        #expect(BaseTerminalController.shouldBeginQuadrantPeek(
+            modifiers: [.command, .control],
+            configured: configured,
+            hasQuadrantZoom: true))
+        #expect(!BaseTerminalController.shouldBeginQuadrantPeek(
+            modifiers: [.command],
+            configured: configured,
+            hasQuadrantZoom: true))
+        #expect(!BaseTerminalController.shouldBeginQuadrantPeek(
+            modifiers: [.command, .control, .shift],
+            configured: configured,
+            hasQuadrantZoom: true))
+        #expect(!BaseTerminalController.shouldBeginQuadrantPeek(
+            modifiers: [.command, .control],
+            configured: configured,
+            hasQuadrantZoom: false))
+    }
 }

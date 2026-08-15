@@ -1590,6 +1590,7 @@ class BaseTerminalController: NSWindowController,
         DispatchQueue.main.async {
             self.syncFocusToSurfaceTree()
             self.syncSurfaceTreeOcclusionState()
+            self.focusedSurface?.highlightZoom()
         }
     }
 

@@ -1320,7 +1320,7 @@ extension Ghostty {
                 .padding(.horizontal, large ? 16 : 8)
                 .padding(.vertical, large ? 10 : 4)
                 .background(background(focused: focused, cornerRadius: large ? 10 : 6))
-                .foregroundStyle(focused ? Color.white : Color.secondary)
+                .foregroundStyle(focused ? Color.white : Color.primary)
                 .opacity(large && windowFocus ? 0.8 : 1)
                 .allowsHitTesting(false)
                 .accessibilityElement(children: .ignore)

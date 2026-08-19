@@ -1342,10 +1342,11 @@ extension Ghostty {
         static func quadrantPresentation(
             name: String?,
             isFocusedQuadrant: Bool,
-            windowFocus: Bool
+            windowFocus: Bool,
+            showFocused: Bool = false
         ) -> Presentation? {
             guard let name else { return nil }
-            if isFocusedQuadrant && windowFocus { return nil }
+            if isFocusedQuadrant && windowFocus && !showFocused { return nil }
 
             return .init(
                 name: name,

@@ -53,6 +53,12 @@ import Testing
             windowFocus: true
         ) == nil)
         #expect(Badge.quadrantPresentation(
+            name: "project",
+            isFocusedQuadrant: true,
+            windowFocus: true,
+            showFocused: true
+        )?.style == .focused)
+        #expect(Badge.quadrantPresentation(
             name: nil,
             isFocusedQuadrant: false,
             windowFocus: false

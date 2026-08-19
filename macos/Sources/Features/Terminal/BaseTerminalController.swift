@@ -45,6 +45,9 @@ class BaseTerminalController: NSWindowController,
         let modifiers: NSEvent.ModifierFlags
         private(set) var target: T
         let fullZoomTarget: T?
+        private var navigationKeysUsed = false
+
+        var showsContrastOverlay: Bool { !navigationKeysUsed }
 
         init(
             modifiers: NSEvent.ModifierFlags,
@@ -58,6 +61,10 @@ class BaseTerminalController: NSWindowController,
 
         mutating func updateTarget(_ target: T?) {
             if let target { self.target = target }
+        }
+
+        mutating func markNavigationKeyUsed() {
+            navigationKeysUsed = true
         }
     }
 
@@ -82,6 +89,16 @@ class BaseTerminalController: NSWindowController,
         hasQuadrantZoom: Bool
     ) -> Bool {
         hasQuadrantZoom && configured.contains(modifiers)
+    }
+
+    static func quadrantActivationTarget<ViewType>(
+        in node: SplitTree<ViewType>.Node,
+        remembered: ViewType?
+    ) -> ViewType where ViewType: NSView & Codable & Identifiable {
+        guard let remembered, node.node(view: remembered) != nil else {
+            return node.leftmostLeaf()
+        }
+        return remembered
     }
 
     /// The app instance that this terminal view will represent.
@@ -124,9 +141,10 @@ class BaseTerminalController: NSWindowController,
     private var eventMonitor: Any?
 
     /// Active keyboard-driven quadrant switch, committed on modifier release.
-    private var quadrantSwitch: QuadrantSwitch<Ghostty.SurfaceView>?
+    @Published private var quadrantSwitch: QuadrantSwitch<Ghostty.SurfaceView>?
 
     var quadrantSwitchIsActive: Bool { quadrantSwitch != nil }
+    var quadrantPeekShowsOverlay: Bool { quadrantSwitch?.showsContrastOverlay ?? false }
 
     /// The last focused surface in each spatial quadrant.
     private var quadrantFocus: [
@@ -836,6 +854,7 @@ class BaseTerminalController: NSWindowController,
             } else if nextSurface == nil {
                 return
             }
+            self.quadrantSwitch?.markNavigationKeyUsed()
 
             surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
         } else if surfaceTree.zoomed != nil {
@@ -1206,6 +1225,26 @@ class BaseTerminalController: NSWindowController,
             splitDidResize(node: resize.node, to: resize.ratio)
         case .drop(let drop):
             splitDidDrop(source: drop.payload, destination: drop.destination, zone: drop.zone)
+        case .activateQuadrant(let node):
+            splitDidActivateQuadrant(node)
+        }
+    }
+
+    private func splitDidActivateQuadrant(_ node: SplitTree<Ghostty.SurfaceView>.Node) {
+        guard quadrantSwitch != nil,
+              surfaceTree.contains(node),
+              let position = surfaceTree.quadrantPosition(containing: node)
+        else { return }
+
+        let target = Self.quadrantActivationTarget(
+            in: node,
+            remembered: quadrantFocus[position]?.value)
+        quadrantSwitch?.updateTarget(target)
+
+        let source = focusedSurface
+        DispatchQueue.main.async {
+            Ghostty.moveFocus(to: target, from: source)
+            target.highlightFocus()
         }
     }
 

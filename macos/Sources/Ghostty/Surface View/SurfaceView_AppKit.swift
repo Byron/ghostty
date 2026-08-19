@@ -511,6 +511,7 @@ extension Ghostty {
 
                 // We unset our bell state if we gained focus
                 bell = false
+                clearNotificationAttention()
 
                 // Remove any notifications for this surface once we gain focus.
                 if !notificationIdentifiers.isEmpty {

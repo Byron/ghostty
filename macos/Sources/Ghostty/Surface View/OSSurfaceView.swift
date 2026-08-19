@@ -69,6 +69,9 @@ extension Ghostty {
 
         private var finiteHighlightTask: Task<Void, Never>?
 
+        /// True while an OSC desktop notification from this surface needs attention.
+        @Published private(set) var notificationAttention = false
+
         /// A message sent from `ghostty_surface_t` when a child process exited
         @Published private(set) var childExitedMessage: ChildExitedMessage?
 
@@ -131,6 +134,15 @@ extension Ghostty {
                 guard !Task.isCancelled else { return }
                 self?.finiteHighlight = nil
             }
+        }
+
+        func requestNotificationAttention(isFocused: Bool) {
+            guard !isFocused else { return }
+            notificationAttention = true
+        }
+
+        func clearNotificationAttention() {
+            notificationAttention = false
         }
 
         func setChildExitedMessage(_ message: ChildExitedMessage) {

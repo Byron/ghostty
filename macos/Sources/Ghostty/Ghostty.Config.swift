@@ -518,6 +518,14 @@ extension Ghostty {
             return 1 - opacity
         }
 
+        var quadrantPeekOpacity: Double {
+            guard let config = self.config else { return 0.5 }
+            var opacity: Double = 0.5
+            let key = "quadrant-peek-opacity"
+            _ = ghostty_config_get(config, &opacity, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return opacity
+        }
+
         var unfocusedSplitFill: Color {
             guard let config = self.config else { return .white }
 

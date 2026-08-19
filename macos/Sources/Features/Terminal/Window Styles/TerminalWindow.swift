@@ -170,6 +170,7 @@ class TerminalWindow: NSWindow {
             tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
             updateZoomedTabTintsForTabGroup()
             updateNotificationAttention()
+            terminalController?.objectWillChange.send()
             invalidateRestorableState()
         }
     }

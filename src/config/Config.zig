@@ -1078,6 +1078,13 @@ palette: Palette = .{},
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
 @"unfocused-split-fill": ?Color = null,
 
+/// The opacity of the overlay shown over quadrants during quadrant peek.
+/// A value of 0 disables the overlay and a value of 1 makes it fully opaque.
+/// Values outside this range are clamped to the nearest valid value.
+///
+/// This currently only applies to macOS.
+@"quadrant-peek-opacity": f64 = 0.5,
+
 /// The color of the split divider. If this is not set, a default will be chosen.
 /// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color.
 ///
@@ -4845,6 +4852,7 @@ pub fn finalize(self: *Config) !void {
 
     // Clamp our split opacity
     self.@"unfocused-split-opacity" = @min(1.0, @max(0.15, self.@"unfocused-split-opacity"));
+    self.@"quadrant-peek-opacity" = std.math.clamp(self.@"quadrant-peek-opacity", 0.0, 1.0);
 
     // Clamp our contrast
     self.@"minimum-contrast" = @min(21, @max(1, self.@"minimum-contrast"));

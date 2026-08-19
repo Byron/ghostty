@@ -163,6 +163,17 @@ struct ConfigTests {
         #expect(config.backgroundOpacity == 0.5)
     }
 
+    @Test(arguments: [
+        ("", 0.5),
+        ("quadrant-peek-opacity = 0.25", 0.25),
+        ("quadrant-peek-opacity = -1", 0),
+        ("quadrant-peek-opacity = 2", 1),
+    ])
+    func quadrantPeekOpacity(configSource: String, expected: Double) throws {
+        let config = try TemporaryConfig(configSource)
+        #expect(config.quadrantPeekOpacity == expected)
+    }
+
     @Test func windowPositionDefaultsToNil() throws {
         let config = try TemporaryConfig("")
         #expect(config.windowPositionX == nil)

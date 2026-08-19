@@ -8,6 +8,7 @@ import SwiftUI
 enum TerminalSplitOperation {
     case resize(Resize)
     case drop(Drop)
+    case activateQuadrant(SplitTree<Ghostty.SurfaceView>.Node)
 
     struct Resize {
         let node: SplitTree<Ghostty.SurfaceView>.Node
@@ -28,6 +29,8 @@ enum TerminalSplitOperation {
 
 struct TerminalSplitTreeView: View {
     let tree: SplitTree<Ghostty.SurfaceView>
+    let isQuadrantPeek: Bool
+    let showsQuadrantPeekOverlay: Bool
     let action: (TerminalSplitOperation) -> Void
 
     var body: some View {
@@ -36,6 +39,8 @@ struct TerminalSplitTreeView: View {
                 tree: tree,
                 node: node,
                 isRoot: node == tree.root,
+                isQuadrantPeek: isQuadrantPeek,
+                showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
                 action: action)
             // This is necessary because we can't rely on SwiftUI's implicit
             // structural identity to detect changes to this view. Due to
@@ -55,11 +60,18 @@ private struct TerminalSplitSubtreeView: View {
     let tree: SplitTree<Ghostty.SurfaceView>
     let node: SplitTree<Ghostty.SurfaceView>.Node
     var isRoot: Bool = false
+    let isQuadrantPeek: Bool
+    let showsQuadrantPeekOverlay: Bool
     let action: (TerminalSplitOperation) -> Void
 
     var body: some View {
         if tree.quadrant(containing: node) == node {
-            TerminalQuadrantView(node: node) {
+            TerminalQuadrantView(
+                node: node,
+                isQuadrantPeek: isQuadrantPeek,
+                showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
+                action: action
+            ) {
                 subtree
             }
         } else {
@@ -88,10 +100,20 @@ private struct TerminalSplitSubtreeView: View {
                 dividerColor: ghostty.config.splitDividerColor,
                 resizeIncrements: .init(width: 1, height: 1),
                 left: {
-                    TerminalSplitSubtreeView(tree: tree, node: split.left, action: action)
+                    TerminalSplitSubtreeView(
+                        tree: tree,
+                        node: split.left,
+                        isQuadrantPeek: isQuadrantPeek,
+                        showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
+                        action: action)
                 },
                 right: {
-                    TerminalSplitSubtreeView(tree: tree, node: split.right, action: action)
+                    TerminalSplitSubtreeView(
+                        tree: tree,
+                        node: split.right,
+                        isQuadrantPeek: isQuadrantPeek,
+                        showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
+                        action: action)
                 },
                 onEqualize: {
                     guard let surface = node.leftmostLeaf().surface else { return }
@@ -103,22 +125,35 @@ private struct TerminalSplitSubtreeView: View {
 }
 
 private struct TerminalQuadrantView<Content: View>: View {
+    @EnvironmentObject private var ghostty: Ghostty.App
     @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
 
     let node: SplitTree<Ghostty.SurfaceView>.Node
+    let isQuadrantPeek: Bool
+    let showsQuadrantPeekOverlay: Bool
+    let action: (TerminalSplitOperation) -> Void
     let content: Content
 
     @State private var commonWorkingDirectory: String?
+    @State private var notificationAttention: Bool
     @State private var windowFocus = true
 
     init(
         node: SplitTree<Ghostty.SurfaceView>.Node,
+        isQuadrantPeek: Bool,
+        showsQuadrantPeekOverlay: Bool,
+        action: @escaping (TerminalSplitOperation) -> Void,
         @ViewBuilder content: () -> Content
     ) {
         self.node = node
+        self.isQuadrantPeek = isQuadrantPeek
+        self.showsQuadrantPeekOverlay = showsQuadrantPeekOverlay
+        self.action = action
         self.content = content()
         self._commonWorkingDirectory = State(initialValue:
             Ghostty.WorkingDirectoryBadge.commonName(pwds: node.leaves().map(\.pwd)))
+        self._notificationAttention = State(initialValue:
+            node.leaves().contains { $0.notificationAttention })
     }
 
     private var quadrantPresentation: Ghostty.WorkingDirectoryBadge.Presentation? {
@@ -128,7 +163,8 @@ private struct TerminalQuadrantView<Content: View>: View {
         return Ghostty.WorkingDirectoryBadge.quadrantPresentation(
             name: commonWorkingDirectory,
             isFocusedQuadrant: isFocusedQuadrant,
-            windowFocus: windowFocus)
+            windowFocus: windowFocus,
+            showFocused: isQuadrantPeek)
     }
 
     private var pwdChanges: AnyPublisher<Void, Never> {
@@ -138,12 +174,36 @@ private struct TerminalQuadrantView<Content: View>: View {
         .eraseToAnyPublisher()
     }
 
+    private var notificationAttentionChanges: AnyPublisher<Bool, Never> {
+        let surfaces = node.leaves()
+        return Publishers.MergeMany(surfaces.map { surface in
+            surface.$notificationAttention
+                .map { _ in surfaces.contains { $0.notificationAttention } }
+                .eraseToAnyPublisher()
+        })
+        .removeDuplicates()
+        .eraseToAnyPublisher()
+    }
+
+    private var quadrantPeekFill: Color {
+        guard notificationAttention else { return ghostty.config.unfocusedSplitFill }
+        let tabColor = (node.leaves().first?.window as? TerminalWindow)?.tabColor
+        return Color(nsColor: tabColor?.displayColor ?? .controlAccentColor)
+    }
+
     var body: some View {
         ZStack {
             content
                 .environment(
                     \.ghosttyWorkingDirectoryLabelsHidden,
                     quadrantPresentation != nil)
+
+            if showsQuadrantPeekOverlay {
+                Rectangle()
+                    .fill(quadrantPeekFill)
+                    .opacity(ghostty.config.quadrantPeekOpacity)
+                    .allowsHitTesting(false)
+            }
 
             if let quadrantPresentation {
                 GeometryReader { geometry in
@@ -156,10 +216,21 @@ private struct TerminalQuadrantView<Content: View>: View {
                             y: geometry.size.height / 2)
                 }
             }
+
+            if isQuadrantPeek {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        action(.activateQuadrant(node))
+                    }
+            }
         }
         .onReceive(pwdChanges) { _ in
             commonWorkingDirectory = Ghostty.WorkingDirectoryBadge.commonName(
                 pwds: node.leaves().map(\.pwd))
+        }
+        .onReceive(notificationAttentionChanges) {
+            notificationAttention = $0
         }
         .onPreferenceChange(Ghostty.SurfaceWindowFocusKey.self) {
             windowFocus = $0

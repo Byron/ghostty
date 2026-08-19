@@ -294,6 +294,8 @@ extension Ghostty {
                 // Show a highlight effect when this surface needs attention
                 HighlightOverlay(highlighted: surfaceView.highlighted)
 
+                NotificationAttentionOverlay(active: surfaceView.notificationAttention)
+
                 // Identify the focused surface after focus or zoom changes.
                 FiniteHighlightOverlay(highlight: surfaceView.finiteHighlight)
 
@@ -1168,6 +1170,34 @@ extension Ghostty {
                 .allowsHitTesting(false)
                 .opacity(highlight == nil ? 0 : 1)
                 .animation(highlight == nil ? .easeOut(duration: 0.2) : nil, value: highlight)
+        }
+    }
+
+    struct NotificationAttentionOverlay: View {
+        private static let duration = 1.6
+
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        let active: Bool
+
+        var body: some View {
+            TimelineView(.animation(paused: !active || reduceMotion)) { context in
+                Rectangle()
+                    .strokeBorder(
+                        Color.accentColor.opacity(0.8),
+                        lineWidth: Ghostty.OSSurfaceView.FiniteHighlight.focus.lineWidth)
+                    .allowsHitTesting(false)
+                    .opacity(opacity(at: context.date))
+            }
+        }
+
+        private func opacity(at date: Date) -> Double {
+            guard active else { return 0 }
+            guard !reduceMotion else { return 0.65 }
+
+            let phase = date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: Self.duration) / Self.duration
+            return 0.675 - 0.325 * cos(phase * 2 * .pi)
         }
     }
 

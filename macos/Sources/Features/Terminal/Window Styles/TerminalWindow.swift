@@ -132,6 +132,9 @@ class TerminalWindow: NSWindow {
     /// Whether any surface in this tab is active.
     private var tabActivity = false
 
+    /// Whether any surface in this tab has an unseen OSC notification.
+    private var notificationAttention = false
+
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private(set) var derivedConfig: DerivedConfig = .init()
 
@@ -166,6 +169,7 @@ class TerminalWindow: NSWindow {
             guard tabColor != oldValue else { return }
             tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
             updateZoomedTabTintsForTabGroup()
+            updateNotificationAttention()
             invalidateRestorableState()
         }
     }
@@ -428,6 +432,7 @@ class TerminalWindow: NSWindow {
         // everything works fine.
         DispatchQueue.main.async {
             self.updateZoomedTabTintsForTabGroup()
+            self.updateNotificationAttention()
         }
     }
 
@@ -575,6 +580,22 @@ class TerminalWindow: NSWindow {
         let windows = tabBarOwner.tabbedWindows ?? tabBarOwner.tabGroup?.windows ?? [tabBarOwner]
         guard let index = windows.firstIndex(of: self) else { return nil }
         return tabBarOwner.tabButtonsInVisualOrder()[safe: index]
+    }
+
+    func setNotificationAttention(_ active: Bool) {
+        notificationAttention = active
+        updateNotificationAttention()
+    }
+
+    private func updateNotificationAttention() {
+        guard let tabButton = nativeTabButton else { return }
+        guard notificationAttention else {
+            TabNotificationPulseView.remove(from: tabButton)
+            return
+        }
+
+        TabNotificationPulseView.install(in: tabButton)
+            .pulse(color: tabColor.displayColor ?? .controlAccentColor)
     }
 
     override var title: String {
@@ -967,6 +988,77 @@ private final class TabActivityStoppedFlashView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration) { [weak self] in
             self?.isFlashing = false
         }
+    }
+}
+
+private final class TabNotificationPulseView: NSView {
+    private static let viewIdentifier = NSUserInterfaceItemIdentifier(
+        "com.mitchellh.ghostty.notificationPulse")
+    private static let tabBackgroundIdentifier = NSUserInterfaceItemIdentifier("_backgroundView")
+
+    static func install(in tabButton: NSView) -> TabNotificationPulseView {
+        if let view = existing(in: tabButton) {
+            view.frame = tabButton.bounds
+            return view
+        }
+
+        let view = TabNotificationPulseView(frame: tabButton.bounds)
+        view.identifier = viewIdentifier
+        view.autoresizingMask = [.width, .height]
+
+        let relativeView = tabButton.subviews.first { $0 is ZoomedTabTintView }
+            ?? tabButton.subviews.first { $0.identifier == tabBackgroundIdentifier }
+        tabButton.addSubview(
+            view,
+            positioned: relativeView == nil ? .below : .above,
+            relativeTo: relativeView)
+        return view
+    }
+
+    static func remove(from tabButton: NSView) {
+        existing(in: tabButton)?.removeFromSuperview()
+    }
+
+    private static func existing(in tabButton: NSView) -> TabNotificationPulseView? {
+        tabButton.subviews.first { $0.identifier == viewIdentifier } as? TabNotificationPulseView
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.masksToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    func pulse(color: NSColor) {
+        layer?.backgroundColor = color.cgColor
+
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            layer?.removeAllAnimations()
+            layer?.opacity = 0.3
+            return
+        }
+
+        layer?.opacity = 0.15
+        guard layer?.animation(forKey: "notificationPulse") == nil else { return }
+
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 0.15
+        animation.toValue = 0.45
+        animation.duration = 0.8
+        animation.autoreverses = true
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer?.add(animation, forKey: "notificationPulse")
     }
 }
 

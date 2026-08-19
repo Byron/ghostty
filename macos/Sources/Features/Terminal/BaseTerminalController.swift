@@ -157,6 +157,9 @@ class BaseTerminalController: NSWindowController,
     /// Cancellable for aggregate command and progress activity across all surfaces.
     private var activityStateCancellable: AnyCancellable?
 
+    /// Cancellable for aggregate OSC notification attention across all surfaces.
+    private var notificationAttentionCancellable: AnyCancellable?
+
     /// An override title for the tab/window set by the user via prompt_tab_title.
     /// When set, this is shown alongside the computed title from the terminal.
     var titleOverride: String? {
@@ -220,6 +223,7 @@ class BaseTerminalController: NSWindowController,
         setupBellNotificationPublisher()
         setupTitlePublisher()
         setupActivityPublisher()
+        setupNotificationAttentionPublisher()
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -1879,6 +1883,18 @@ extension BaseTerminalController: NSMenuItemValidation {
 // MARK: Combine Methods
 
 extension BaseTerminalController {
+    private func setupNotificationAttentionPublisher() {
+        notificationAttentionCancellable = surfaceValuesPublisher(
+            valueKeyPath: \.notificationAttention,
+            publisherKeyPath: \.$notificationAttention)
+            .map { $0.values.contains(true) }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                (self?.window as? TerminalWindow)?.setNotificationAttention($0)
+            }
+    }
+
     private func setupActivityPublisher() {
         activityStateCancellable = $surfaceTree
             .map { tree -> AnyPublisher<Bool, Never> in

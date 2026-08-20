@@ -8,6 +8,7 @@ import SwiftUI
 enum TerminalSplitOperation {
     case resize(Resize)
     case drop(Drop)
+    case selectQuadrant(SplitTree<Ghostty.SurfaceView>.Node)
     case activateQuadrant(SplitTree<Ghostty.SurfaceView>.Node)
 
     struct Resize {
@@ -30,7 +31,6 @@ enum TerminalSplitOperation {
 struct TerminalSplitTreeView: View {
     let tree: SplitTree<Ghostty.SurfaceView>
     let isQuadrantPeek: Bool
-    let showsQuadrantPeekOverlay: Bool
     let action: (TerminalSplitOperation) -> Void
 
     var body: some View {
@@ -40,7 +40,6 @@ struct TerminalSplitTreeView: View {
                 node: node,
                 isRoot: node == tree.root,
                 isQuadrantPeek: isQuadrantPeek,
-                showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
                 action: action)
             // This is necessary because we can't rely on SwiftUI's implicit
             // structural identity to detect changes to this view. Due to
@@ -61,7 +60,6 @@ private struct TerminalSplitSubtreeView: View {
     let node: SplitTree<Ghostty.SurfaceView>.Node
     var isRoot: Bool = false
     let isQuadrantPeek: Bool
-    let showsQuadrantPeekOverlay: Bool
     let action: (TerminalSplitOperation) -> Void
 
     var body: some View {
@@ -69,7 +67,6 @@ private struct TerminalSplitSubtreeView: View {
             TerminalQuadrantView(
                 node: node,
                 isQuadrantPeek: isQuadrantPeek,
-                showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
                 action: action
             ) {
                 subtree
@@ -104,7 +101,6 @@ private struct TerminalSplitSubtreeView: View {
                         tree: tree,
                         node: split.left,
                         isQuadrantPeek: isQuadrantPeek,
-                        showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
                         action: action)
                 },
                 right: {
@@ -112,7 +108,6 @@ private struct TerminalSplitSubtreeView: View {
                         tree: tree,
                         node: split.right,
                         isQuadrantPeek: isQuadrantPeek,
-                        showsQuadrantPeekOverlay: showsQuadrantPeekOverlay,
                         action: action)
                 },
                 onEqualize: {
@@ -130,7 +125,6 @@ private struct TerminalQuadrantView<Content: View>: View {
 
     let node: SplitTree<Ghostty.SurfaceView>.Node
     let isQuadrantPeek: Bool
-    let showsQuadrantPeekOverlay: Bool
     let action: (TerminalSplitOperation) -> Void
     let content: Content
 
@@ -141,13 +135,11 @@ private struct TerminalQuadrantView<Content: View>: View {
     init(
         node: SplitTree<Ghostty.SurfaceView>.Node,
         isQuadrantPeek: Bool,
-        showsQuadrantPeekOverlay: Bool,
         action: @escaping (TerminalSplitOperation) -> Void,
         @ViewBuilder content: () -> Content
     ) {
         self.node = node
         self.isQuadrantPeek = isQuadrantPeek
-        self.showsQuadrantPeekOverlay = showsQuadrantPeekOverlay
         self.action = action
         self.content = content()
         self._commonWorkingDirectory = State(initialValue:
@@ -198,7 +190,7 @@ private struct TerminalQuadrantView<Content: View>: View {
                     \.ghosttyWorkingDirectoryLabelsHidden,
                     quadrantPresentation != nil)
 
-            if showsQuadrantPeekOverlay {
+            if isQuadrantPeek {
                 Rectangle()
                     .fill(quadrantPeekFill)
                     .opacity(ghostty.config.quadrantPeekOpacity)
@@ -220,6 +212,9 @@ private struct TerminalQuadrantView<Content: View>: View {
             if isQuadrantPeek {
                 Color.clear
                     .contentShape(Rectangle())
+                    .onHover {
+                        if $0 { action(.selectQuadrant(node)) }
+                    }
                     .onTapGesture {
                         action(.activateQuadrant(node))
                     }

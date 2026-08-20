@@ -38,9 +38,6 @@ protocol TerminalViewModel: ObservableObject {
 
     /// Whether keyboard-driven quadrant peek is active.
     var quadrantSwitchIsActive: Bool { get }
-
-    /// Whether quadrant peek should dim terminal content.
-    var quadrantPeekShowsOverlay: Bool { get }
 }
 
 /// The main terminal view. This terminal view supports splits.
@@ -88,7 +85,6 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                     TerminalSplitTreeView(
                         tree: viewModel.surfaceTree,
                         isQuadrantPeek: viewModel.quadrantSwitchIsActive,
-                        showsQuadrantPeekOverlay: viewModel.quadrantPeekShowsOverlay,
                         action: { delegate?.performSplitAction($0) })
                         .environmentObject(ghostty)
                         .ghosttyLastFocusedSurface(lastFocusedSurface)

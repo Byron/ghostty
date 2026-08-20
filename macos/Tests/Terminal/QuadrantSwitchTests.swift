@@ -39,21 +39,6 @@ struct QuadrantSwitchTests {
         #expect(state.fullZoomTarget == "zoomed")
     }
 
-    @Test func navigationHidesContrastOverlay() {
-        var state = BaseTerminalController.QuadrantSwitch(
-            modifiers: NSEvent.ModifierFlags([.command, .control]),
-            target: "original")
-
-        #expect(state.showsContrastOverlay)
-        state.updateTarget("next")
-        #expect(state.showsContrastOverlay)
-        state.markNavigationKeyUsed()
-        #expect(!state.showsContrastOverlay)
-        #expect(BaseTerminalController.QuadrantSwitch(
-            modifiers: NSEvent.ModifierFlags([.command, .control]),
-            target: "new").showsContrastOverlay)
-    }
-
     @Test func clickRestoresRememberedPaneWithinQuadrant() throws {
         let (tree, first, second) = try SplitTreeTests.makeHorizontalSplit()
         let quadrant = try #require(tree.root)

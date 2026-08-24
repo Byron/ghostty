@@ -126,6 +126,7 @@ private struct TerminalSplitSubtreeView: View {
 
 private struct TerminalQuadrantView<Content: View>: View {
     @EnvironmentObject private var ghostty: Ghostty.App
+    @Environment(\.ghosttyAccentColor) private var accentColor
     @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
 
     let node: SplitTree<Ghostty.SurfaceView>.Node
@@ -157,9 +158,6 @@ private struct TerminalQuadrantView<Content: View>: View {
     }
 
     private var quadrantPresentation: Ghostty.WorkingDirectoryBadge.Presentation? {
-        let isFocusedQuadrant = lastFocusedSurface?.value.map {
-            node.node(view: $0) != nil
-        } ?? false
         return Ghostty.WorkingDirectoryBadge.quadrantPresentation(
             name: commonWorkingDirectory,
             isFocusedQuadrant: isFocusedQuadrant,
@@ -187,8 +185,11 @@ private struct TerminalQuadrantView<Content: View>: View {
 
     private var quadrantPeekFill: Color {
         guard notificationAttention else { return ghostty.config.unfocusedSplitFill }
-        let tabColor = (node.leaves().first?.window as? TerminalWindow)?.tabColor
-        return Color(nsColor: tabColor?.displayColor ?? .controlAccentColor)
+        return accentColor
+    }
+
+    private var isFocusedQuadrant: Bool {
+        lastFocusedSurface?.value.map { node.node(view: $0) != nil } ?? false
     }
 
     var body: some View {
@@ -198,7 +199,7 @@ private struct TerminalQuadrantView<Content: View>: View {
                     \.ghosttyWorkingDirectoryLabelsHidden,
                     quadrantPresentation != nil)
 
-            if showsQuadrantPeekOverlay {
+            if showsQuadrantPeekOverlay && !isFocusedQuadrant {
                 Rectangle()
                     .fill(quadrantPeekFill)
                     .opacity(ghostty.config.quadrantPeekOpacity)
@@ -215,6 +216,14 @@ private struct TerminalQuadrantView<Content: View>: View {
                             x: geometry.size.width / 2,
                             y: geometry.size.height / 2)
                 }
+            }
+
+            if isQuadrantPeek && isFocusedQuadrant {
+                Rectangle()
+                    .strokeBorder(
+                        accentColor.opacity(0.8),
+                        lineWidth: Ghostty.OSSurfaceView.FiniteHighlight.focus.lineWidth)
+                    .allowsHitTesting(false)
             }
 
             if isQuadrantPeek {

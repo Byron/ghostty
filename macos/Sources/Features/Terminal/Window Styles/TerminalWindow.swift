@@ -168,6 +168,7 @@ class TerminalWindow: NSWindow {
         didSet {
             guard tabColor != oldValue else { return }
             tabColorIndicator.rootView = TabColorIndicatorView(tabColor: tabColor)
+            updateTabAccentColor()
             updateZoomedTabTintsForTabGroup()
             updateNotificationAttention()
             terminalController?.objectWillChange.send()
@@ -308,7 +309,7 @@ class TerminalWindow: NSWindow {
         super.becomeKey()
         cancelActivityStoppedFlash()
         updateTabActivityIndicator()
-        resetZoomTabButton.contentTintColor = .controlAccentColor
+        resetZoomTabButton.contentTintColor = tabColor.accentColor
         updateZoomedTabTintsForTabGroup()
     }
 
@@ -500,7 +501,7 @@ class TerminalWindow: NSWindow {
         button.isBordered = false
         button.allowsExpansionToolTips = true
         button.toolTip = "Reset Zoom"
-        button.contentTintColor = isMainWindow ? .controlAccentColor : .secondaryLabelColor
+        button.contentTintColor = isMainWindow ? tabColor.accentColor : .secondaryLabelColor
         button.state = .on
         button.image = NSImage(named: "ResetZoom")
         button.frame = NSRect(x: 0, y: 0, width: 20, height: 20)
@@ -508,6 +509,14 @@ class TerminalWindow: NSWindow {
         button.widthAnchor.constraint(equalToConstant: 20).isActive = true
         button.heightAnchor.constraint(equalToConstant: 20).isActive = true
         return button
+    }
+
+    /// Update tab-owned controls which live outside the terminal SwiftUI tree.
+    func updateTabAccentColor() {
+        viewModel.tabColor = tabColor
+        if isKeyWindow {
+            resetZoomTabButton.contentTintColor = tabColor.accentColor
+        }
     }
 
     func updateZoomedTabTintsForTabGroup() {
@@ -568,7 +577,7 @@ class TerminalWindow: NSWindow {
         guard let tabButton = nativeTabButton else { return }
 
         TabActivityStoppedFlashView.install(in: tabButton)
-            .flash(color: tabColor.displayColor ?? .controlAccentColor)
+            .flash(color: tabColor.accentColor)
     }
 
     private func cancelActivityStoppedFlash() {
@@ -596,7 +605,7 @@ class TerminalWindow: NSWindow {
         }
 
         TabNotificationPulseView.install(in: tabButton)
-            .pulse(color: tabColor.displayColor ?? .controlAccentColor)
+            .pulse(color: tabColor.accentColor)
     }
 
     override var title: String {
@@ -839,6 +848,7 @@ extension TerminalWindow {
         @Published var isSurfaceZoomed: Bool = false
         @Published var hasToolbar: Bool = false
         @Published var isMainWindow: Bool = true
+        @Published var tabColor: TerminalTabColor = .none
 
         /// Calculates the top padding based on toolbar visibility and macOS version
         fileprivate var accessoryTopPadding: CGFloat {
@@ -871,6 +881,7 @@ extension TerminalWindow {
                 .padding(.top, viewModel.accessoryTopPadding)
                 // We always need space at the end of the titlebar
                 .padding(.trailing, 10)
+                .accentColor(Color(nsColor: viewModel.tabColor.accentColor))
             }
         }
     }
@@ -882,7 +893,7 @@ extension TerminalWindow {
 
         var body: some View {
             // We use the same top/trailing padding so that it hugs the same.
-            UpdatePill(model: model)
+            UpdatePill(model: model, tabColor: viewModel.tabColor)
                 .padding(.top, viewModel.accessoryTopPadding)
                 .padding(.trailing, viewModel.accessoryTopPadding)
         }

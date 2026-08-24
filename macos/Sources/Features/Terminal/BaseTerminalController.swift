@@ -154,6 +154,11 @@ class BaseTerminalController: NSWindowController,
     var quadrantSwitchIsActive: Bool { quadrantSwitch != nil }
     var quadrantPeekShowsOverlay: Bool { quadrantSwitch?.showsContrastOverlay ?? false }
 
+    /// The color assigned to this controller's native tab, when it has one.
+    var tabColor: TerminalTabColor {
+        (window as? TerminalWindow)?.tabColor ?? .none
+    }
+
     /// The last focused surface in each spatial quadrant.
     private var quadrantFocus: [
         SplitTree<Ghostty.SurfaceView>.QuadrantPosition: Weak<Ghostty.SurfaceView>

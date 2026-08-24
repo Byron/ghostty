@@ -3,6 +3,19 @@ import Testing
 @testable import Ghostty
 
 struct ZoomedTabTintTests {
+    @Test func tabAccentUsesSelectedColor() throws {
+        try expectColor(TerminalTabColor.red.accentColor, equals: .systemRed)
+    }
+
+    @Test func tabAccentFallsBackToSystemAccent() throws {
+        try expectColor(TerminalTabColor.none.accentColor, equals: .controlAccentColor)
+    }
+
+    @Test func tabAccentForegroundContrastsWithAccent() throws {
+        try expectColor(TerminalTabColor.yellow.accentForegroundColor, equals: .black)
+        try expectColor(TerminalTabColor.red.accentForegroundColor, equals: .white)
+    }
+
     @Test func noTabColorUsesIconColor() throws {
         let iconColor = NSColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1)
         let tint = ZoomedTabTint.make(

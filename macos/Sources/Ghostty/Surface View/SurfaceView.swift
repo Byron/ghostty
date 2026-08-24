@@ -1037,6 +1037,8 @@ extension Ghostty {
     /// Visual overlay that briefly highlights a surface to draw attention to it.
     /// Uses a soft, soothing highlight with a pulsing border effect.
     struct HighlightOverlay: View {
+        @Environment(\.ghosttyAccentColor) private var accentColor
+
         let highlighted: Bool
 
         @State private var borderPulse: Bool = false
@@ -1047,8 +1049,8 @@ extension Ghostty {
                     .fill(
                         RadialGradient(
                             gradient: Gradient(colors: [
-                                Color.accentColor.opacity(0.12),
-                                Color.accentColor.opacity(0.03),
+                                accentColor.opacity(0.12),
+                                accentColor.opacity(0.03),
                                 Color.clear
                             ]),
                             center: .center,
@@ -1061,17 +1063,17 @@ extension Ghostty {
                     .strokeBorder(
                         LinearGradient(
                             gradient: Gradient(colors: [
-                                Color.accentColor.opacity(0.8),
-                                Color.accentColor.opacity(0.5),
-                                Color.accentColor.opacity(0.8)
+                                accentColor.opacity(0.8),
+                                accentColor.opacity(0.5),
+                                accentColor.opacity(0.8)
                             ]),
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
                         lineWidth: borderPulse ? 4 : 2
                     )
-                    .shadow(color: Color.accentColor.opacity(borderPulse ? 0.8 : 0.6), radius: borderPulse ? 12 : 8, x: 0, y: 0)
-                    .shadow(color: Color.accentColor.opacity(borderPulse ? 0.5 : 0.3), radius: borderPulse ? 24 : 16, x: 0, y: 0)
+                    .shadow(color: accentColor.opacity(borderPulse ? 0.8 : 0.6), radius: borderPulse ? 12 : 8, x: 0, y: 0)
+                    .shadow(color: accentColor.opacity(borderPulse ? 0.5 : 0.3), radius: borderPulse ? 24 : 16, x: 0, y: 0)
             }
             .allowsHitTesting(false)
             .opacity(highlighted ? 1.0 : 0.0)
@@ -1092,11 +1094,13 @@ extension Ghostty {
 
     /// A cheap, finite highlight that remains stable when the split tree is rebuilt.
     struct FiniteHighlightOverlay: View {
+        @Environment(\.ghosttyAccentColor) private var accentColor
+
         let highlight: Ghostty.OSSurfaceView.FiniteHighlight?
 
         var body: some View {
             Rectangle()
-                .strokeBorder(Color.accentColor.opacity(0.8), lineWidth: highlight?.lineWidth ?? 0)
+                .strokeBorder(accentColor.opacity(0.8), lineWidth: highlight?.lineWidth ?? 0)
                 .allowsHitTesting(false)
                 .opacity(highlight == nil ? 0 : 1)
                 .animation(highlight == nil ? .easeOut(duration: 0.2) : nil, value: highlight)
@@ -1107,6 +1111,7 @@ extension Ghostty {
         private static let duration = 1.6
 
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @Environment(\.ghosttyAccentColor) private var accentColor
 
         let active: Bool
 
@@ -1114,7 +1119,7 @@ extension Ghostty {
             TimelineView(.animation(paused: !active || reduceMotion)) { context in
                 Rectangle()
                     .strokeBorder(
-                        Color.accentColor.opacity(0.8),
+                        accentColor.opacity(0.8),
                         lineWidth: Ghostty.OSSurfaceView.FiniteHighlight.focus.lineWidth)
                     .allowsHitTesting(false)
                     .opacity(opacity(at: context.date))
@@ -1543,6 +1548,10 @@ private struct GhosttyLastFocusedSurfaceKey: EnvironmentKey {
     static let defaultValue: Weak<Ghostty.SurfaceView>? = nil
 }
 
+private struct GhosttyAccentColorKey: EnvironmentKey {
+    static let defaultValue = Color.accentColor
+}
+
 private struct GhosttyWorkingDirectoryLabelsHiddenKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -1562,6 +1571,11 @@ extension Ghostty {
 }
 
 extension EnvironmentValues {
+    var ghosttyAccentColor: Color {
+        get { self[GhosttyAccentColorKey.self] }
+        set { self[GhosttyAccentColorKey.self] = newValue }
+    }
+
     var ghosttySurfaceView: Ghostty.SurfaceView? {
         get { self[GhosttySurfaceViewKey.self] }
         set { self[GhosttySurfaceViewKey.self] = newValue }
@@ -1584,6 +1598,11 @@ extension EnvironmentValues {
 }
 
 extension View {
+    func ghosttyAccentColor(_ color: Color) -> some View {
+        environment(\.ghosttyAccentColor, color)
+            .accentColor(color)
+    }
+
     func ghosttySurfaceView(_ surfaceView: Ghostty.SurfaceView?) -> some View {
         environment(\.ghosttySurfaceView, surfaceView)
     }

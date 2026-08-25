@@ -2085,10 +2085,10 @@ extension BaseTerminalController {
 
     private func setupActivityPublisher() {
         activityStateCancellable = $surfaceTree
-            .map { tree -> AnyPublisher<Bool, Never> in
+            .map { tree -> AnyPublisher<(isActive: Bool, stopped: Bool), Never> in
                 let surfaces = Array(tree)
                 guard !surfaces.isEmpty else {
-                    return Just(false).eraseToAnyPublisher()
+                    return Just((isActive: false, stopped: false)).eraseToAnyPublisher()
                 }
 
                 let initial = Dictionary(uniqueKeysWithValues: surfaces.map {
@@ -2096,27 +2096,32 @@ extension BaseTerminalController {
                 })
                 let updates = Publishers.MergeMany(surfaces.map { surface in
                     surface.activityPublisher
-                        .map { (surface.id, $0) }
+                        .scan((
+                            transition: ActivityTransition(),
+                            isActive: false,
+                            stopped: false
+                        )) { state, isActive in
+                            var transition = state.transition
+                            let stopped = transition.stopped(isActive)
+                            return (transition, isActive, stopped)
+                        }
+                        .map { (id: surface.id, isActive: $0.isActive, stopped: $0.stopped) }
                         .eraseToAnyPublisher()
                 })
 
                 return updates
-                    .scan(initial) { state, update in
-                        var state = state
-                        state[update.0] = update.1
-                        return state
+                    .scan((activity: initial, stopped: false)) { state, update in
+                        var activity = state.activity
+                        activity[update.id] = update.isActive
+                        return (activity, update.stopped)
                     }
-                    .prepend(initial)
-                    .map { $0.values.contains(true) }
+                    .prepend((activity: initial, stopped: false))
+                    .map {
+                        (isActive: $0.activity.values.contains(true), stopped: $0.stopped)
+                    }
                     .eraseToAnyPublisher()
             }
             .switchToLatest()
-            .removeDuplicates()
-            .scan((transition: ActivityTransition(), isActive: false, stopped: false)) { state, isActive in
-                var transition = state.transition
-                let stopped = transition.stopped(isActive)
-                return (transition, isActive, stopped)
-            }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
                 guard let window = self?.window as? TerminalWindow else { return }

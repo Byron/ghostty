@@ -106,4 +106,21 @@ struct TerminalTitleTests {
         #expect(!secondStart)
         #expect(secondStop)
     }
+
+    @Test func activityStopsAreTrackedPerSurface() {
+        var first = BaseTerminalController.ActivityTransition()
+        var second = BaseTerminalController.ActivityTransition()
+
+        let firstStarted = first.stopped(true)
+        let secondStarted = second.stopped(true)
+        let firstStopped = first.stopped(false)
+        let secondRemainedActive = second.stopped(true)
+        let secondStopped = second.stopped(false)
+
+        #expect(!firstStarted)
+        #expect(!secondStarted)
+        #expect(firstStopped)
+        #expect(!secondRemainedActive)
+        #expect(secondStopped)
+    }
 }

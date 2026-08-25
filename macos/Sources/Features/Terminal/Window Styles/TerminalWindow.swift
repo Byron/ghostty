@@ -564,6 +564,7 @@ class TerminalWindow: NSWindow {
     // MARK: Title Text
 
     func setTabActivity(_ isActive: Bool) {
+        guard tabActivity != isActive else { return }
         tabActivity = isActive
         updateTabActivityIndicator()
     }
@@ -927,9 +928,6 @@ private final class TabActivityStoppedFlashView: NSView {
         "com.mitchellh.ghostty.activityStoppedFlash")
     private static let tabBackgroundIdentifier = NSUserInterfaceItemIdentifier("_backgroundView")
 
-    private var color = NSColor.clear
-    private var isFlashing = false
-
     static func install(in tabButton: NSView) -> TabActivityStoppedFlashView {
         if let view = existing(in: tabButton) {
             view.frame = tabButton.bounds
@@ -960,6 +958,8 @@ private final class TabActivityStoppedFlashView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.masksToBounds = true
         layer?.opacity = 0
     }
 
@@ -972,23 +972,11 @@ private final class TabActivityStoppedFlashView: NSView {
         nil
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(
-            roundedRect: bounds.insetBy(dx: 2, dy: 2),
-            xRadius: 6,
-            yRadius: 6)
-        color.setFill()
-        path.fill()
-    }
-
     func flash(color: NSColor) {
-        guard !isFlashing else { return }
-        isFlashing = true
-        self.color = color
-        needsDisplay = true
+        layer?.backgroundColor = color.cgColor
 
         let animation = CAKeyframeAnimation(keyPath: "opacity")
-        animation.values = [0, 1, 0]
+        animation.values = [0, 0.45, 0]
         animation.keyTimes = [0, NSNumber(value: 1.0 / 6.0), 1]
         animation.timingFunctions = [
             CAMediaTimingFunction(name: .easeOut),
@@ -996,10 +984,6 @@ private final class TabActivityStoppedFlashView: NSView {
         ]
         animation.duration = Self.duration
         layer?.add(animation, forKey: "activityStoppedFlash")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration) { [weak self] in
-            self?.isFlashing = false
-        }
     }
 }
 

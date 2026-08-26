@@ -2071,6 +2071,44 @@ extension BaseTerminalController {
 // MARK: Combine Methods
 
 extension BaseTerminalController {
+    static func aggregateActivityPublisher(
+        for surfaces: [Ghostty.SurfaceView]
+    ) -> AnyPublisher<(isActive: Bool, stopped: Bool), Never> {
+        guard !surfaces.isEmpty else {
+            return Just((isActive: false, stopped: false)).eraseToAnyPublisher()
+        }
+
+        let initial = Dictionary(uniqueKeysWithValues: surfaces.map {
+            ($0.id, $0.commandRunning || $0.progressReport != nil)
+        })
+        let updates = Publishers.MergeMany(surfaces.map { surface in
+            surface.activityPublisher
+                .scan((
+                    transition: ActivityTransition(),
+                    isActive: false,
+                    stopped: false
+                )) { state, isActive in
+                    var transition = state.transition
+                    let stopped = transition.stopped(isActive)
+                    return (transition, isActive, stopped)
+                }
+                .map { (id: surface.id, isActive: $0.isActive, stopped: $0.stopped) }
+                .eraseToAnyPublisher()
+        })
+
+        return updates
+            .scan((activity: initial, stopped: false)) { state, update in
+                var activity = state.activity
+                activity[update.id] = update.isActive
+                return (activity, update.stopped)
+            }
+            .prepend((activity: initial, stopped: false))
+            .map {
+                (isActive: $0.activity.values.contains(true), stopped: $0.stopped)
+            }
+            .eraseToAnyPublisher()
+    }
+
     private func setupNotificationAttentionPublisher() {
         notificationAttentionCancellable = surfaceValuesPublisher(
             valueKeyPath: \.notificationAttention,
@@ -2085,41 +2123,8 @@ extension BaseTerminalController {
 
     private func setupActivityPublisher() {
         activityStateCancellable = $surfaceTree
-            .map { tree -> AnyPublisher<(isActive: Bool, stopped: Bool), Never> in
-                let surfaces = Array(tree)
-                guard !surfaces.isEmpty else {
-                    return Just((isActive: false, stopped: false)).eraseToAnyPublisher()
-                }
-
-                let initial = Dictionary(uniqueKeysWithValues: surfaces.map {
-                    ($0.id, $0.commandRunning || $0.progressReport != nil)
-                })
-                let updates = Publishers.MergeMany(surfaces.map { surface in
-                    surface.activityPublisher
-                        .scan((
-                            transition: ActivityTransition(),
-                            isActive: false,
-                            stopped: false
-                        )) { state, isActive in
-                            var transition = state.transition
-                            let stopped = transition.stopped(isActive)
-                            return (transition, isActive, stopped)
-                        }
-                        .map { (id: surface.id, isActive: $0.isActive, stopped: $0.stopped) }
-                        .eraseToAnyPublisher()
-                })
-
-                return updates
-                    .scan((activity: initial, stopped: false)) { state, update in
-                        var activity = state.activity
-                        activity[update.id] = update.isActive
-                        return (activity, update.stopped)
-                    }
-                    .prepend((activity: initial, stopped: false))
-                    .map {
-                        (isActive: $0.activity.values.contains(true), stopped: $0.stopped)
-                    }
-                    .eraseToAnyPublisher()
+            .map { tree in
+                Self.aggregateActivityPublisher(for: Array(tree))
             }
             .switchToLatest()
             .receive(on: DispatchQueue.main)

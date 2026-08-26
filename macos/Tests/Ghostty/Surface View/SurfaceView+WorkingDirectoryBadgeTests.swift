@@ -124,6 +124,22 @@ import Testing
         #expect(!Badge.showsActivityIndicator(isActive: true, presentation: focused))
     }
 
+    @Test func activityFlashCanIncludeFocusedQuadrants() {
+        let inactive = Badge.Presentation(name: "project", style: .normal)
+        let focused = Badge.Presentation(name: "project", style: .focused)
+
+        #expect(Badge.showsActivityFlash(stopped: true, presentation: inactive))
+        #expect(!Badge.showsActivityFlash(stopped: true, presentation: focused))
+        #expect(Badge.showsActivityFlash(
+            stopped: true,
+            presentation: focused,
+            includeFocused: true))
+        #expect(!Badge.showsActivityFlash(
+            stopped: false,
+            presentation: focused,
+            includeFocused: true))
+    }
+
     @Test func badgeIsFiveCellsToTheRightOfTheCursor() {
         #expect(Badge.cursorAdjacentX(
             containerWidth: 300,

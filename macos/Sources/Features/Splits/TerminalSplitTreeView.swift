@@ -137,6 +137,10 @@ private struct TerminalQuadrantView<Content: View>: View {
 
     @State private var commonWorkingDirectory: String?
     @State private var notificationAttention: Bool
+    @State private var activity = false
+    @State private var activityFlashID = 0
+    @State private var activityFlashOpacity: Double = 0
+    @State private var activityIsFlashing = false
     @State private var windowFocus = true
 
     init(
@@ -183,6 +187,12 @@ private struct TerminalQuadrantView<Content: View>: View {
         .eraseToAnyPublisher()
     }
 
+    private var activityChanges: AnyPublisher<(isActive: Bool, stopped: Bool), Never> {
+        BaseTerminalController.aggregateActivityPublisher(for: node.leaves())
+            .receive(on: DispatchQueue.main)
+            .eraseToAnyPublisher()
+    }
+
     private var quadrantPeekFill: Color {
         guard notificationAttention else { return ghostty.config.unfocusedSplitFill }
         return accentColor
@@ -210,6 +220,8 @@ private struct TerminalQuadrantView<Content: View>: View {
                 GeometryReader { geometry in
                     Ghostty.QuadrantWorkingDirectoryBadge(
                         presentation: quadrantPresentation,
+                        isActive: activity,
+                        flashOpacity: activityFlashOpacity,
                         windowFocus: windowFocus)
                         .frame(maxWidth: geometry.size.width * 0.75)
                         .position(
@@ -240,6 +252,43 @@ private struct TerminalQuadrantView<Content: View>: View {
         }
         .onReceive(notificationAttentionChanges) {
             notificationAttention = $0
+        }
+        .onReceive(activityChanges) { state in
+            activity = state.isActive
+
+            guard
+                !activityIsFlashing,
+                let presentation = quadrantPresentation,
+                Ghostty.WorkingDirectoryBadge.showsActivityFlash(
+                    stopped: state.stopped,
+                    presentation: presentation,
+                    includeFocused: true)
+            else { return }
+
+            activityIsFlashing = true
+            activityFlashID += 1
+        }
+        .task(id: activityFlashID) {
+            guard activityFlashID > 0 else { return }
+            defer {
+                activityFlashID = 0
+                activityFlashOpacity = 0
+                activityIsFlashing = false
+            }
+
+            withAnimation(.easeOut(duration: 0.2)) {
+                activityFlashOpacity = 1
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(200))
+            } catch {
+                return
+            }
+
+            withAnimation(.easeInOut(duration: 1.0)) {
+                activityFlashOpacity = 0
+            }
+            try? await Task.sleep(for: .seconds(1))
         }
         .onPreferenceChange(Ghostty.SurfaceWindowFocusKey.self) {
             windowFocus = $0

@@ -130,8 +130,8 @@ extension Ghostty {
                     guard
                         !paneActivityIsFlashing,
                         let presentation = workingDirectoryPresentation,
-                        WorkingDirectoryBadge.showsActivityIndicator(
-                            isActive: stopped,
+                        WorkingDirectoryBadge.showsActivityFlash(
+                            stopped: stopped,
                             presentation: presentation)
                     else { return }
 
@@ -1225,6 +1225,7 @@ extension Ghostty {
         let presentation: Presentation
         let isActive: Bool
         let flashOpacity: Double
+        let flashesWhenFocused: Bool
         let layout: Layout
         let windowFocus: Bool
         let customAccessibilityLabel: String?
@@ -1233,6 +1234,7 @@ extension Ghostty {
             presentation: Presentation,
             isActive: Bool = false,
             flashOpacity: Double = 0,
+            flashesWhenFocused: Bool = false,
             layout: Layout = .compact,
             windowFocus: Bool = true,
             accessibilityLabel: String? = nil
@@ -1240,6 +1242,7 @@ extension Ghostty {
             self.presentation = presentation
             self.isActive = isActive
             self.flashOpacity = flashOpacity
+            self.flashesWhenFocused = flashesWhenFocused
             self.layout = layout
             self.windowFocus = windowFocus
             self.customAccessibilityLabel = accessibilityLabel
@@ -1306,6 +1309,14 @@ extension Ghostty {
             presentation: Presentation
         ) -> Bool {
             isActive && presentation.style == .normal
+        }
+
+        static func showsActivityFlash(
+            stopped: Bool,
+            presentation: Presentation,
+            includeFocused: Bool = false
+        ) -> Bool {
+            stopped && (includeFocused || presentation.style == .normal)
         }
 
         static func cursorMoved(
@@ -1377,23 +1388,32 @@ extension Ghostty {
 
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(Color.accentColor)
-                    .opacity(focused ? 0 : flashOpacity)
+                    .opacity(focused && !flashesWhenFocused ? 0 : flashOpacity)
             }
         }
     }
 
     struct QuadrantWorkingDirectoryBadge: View {
         let presentation: WorkingDirectoryBadge.Presentation
+        let isActive: Bool
+        let flashOpacity: Double
         let windowFocus: Bool
 
         var body: some View {
             let focused = presentation.style == .focused
-            let accessibilityLabel = focused
+            let showsActivity = WorkingDirectoryBadge.showsActivityIndicator(
+                isActive: isActive,
+                presentation: presentation)
+            let accessibilityLabel = (focused
                 ? "Focused quadrant working directory: \(presentation.name)"
-                : "Quadrant working directory: \(presentation.name)"
+                : "Quadrant working directory: \(presentation.name)") +
+                    (showsActivity ? ", activity in progress" : "")
 
             WorkingDirectoryBadge(
                 presentation: presentation,
+                isActive: isActive,
+                flashOpacity: flashOpacity,
+                flashesWhenFocused: true,
                 layout: .large,
                 windowFocus: windowFocus,
                 accessibilityLabel: accessibilityLabel)

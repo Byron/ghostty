@@ -937,9 +937,10 @@ class BaseTerminalController: NSWindowController,
 
         // Move focus to the next surface
         guard let nextSurface else { return }
+        let highlightsFocus = quadrantSwitch == nil
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: nextSurface, from: target)
-            nextSurface.highlightFocus()
+            if highlightsFocus { nextSurface.highlightFocus() }
         }
     }
 
@@ -1151,9 +1152,6 @@ class BaseTerminalController: NSWindowController,
             surfaceTree.contains(target) {
             beginQuadrantSwitch(modifiers: modifiers, target: target)
             surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
-            DispatchQueue.main.async {
-                target.highlightZoom()
-            }
         }
 
         var surfaces: [Ghostty.SurfaceView] = surfaceTree.map { $0 }
@@ -1305,7 +1303,6 @@ class BaseTerminalController: NSWindowController,
         let source = focusedSurface
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: target, from: source)
-            target.highlightFocus()
         }
     }
 

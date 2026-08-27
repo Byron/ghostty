@@ -230,12 +230,14 @@ private struct TerminalQuadrantView<Content: View>: View {
                 }
             }
 
-            if isQuadrantPeek && isFocusedQuadrant {
+            if isQuadrantPeek {
                 Rectangle()
                     .strokeBorder(
                         accentColor.opacity(0.8),
                         lineWidth: Ghostty.OSSurfaceView.FiniteHighlight.focus.lineWidth)
                     .allowsHitTesting(false)
+                    .opacity(isFocusedQuadrant ? 1 : 0)
+                    .animation(nil, value: isFocusedQuadrant)
             }
 
             if isQuadrantPeek {

@@ -115,6 +115,19 @@ extension SplitTree {
         (zoomed ?? root) == node
     }
 
+    /// Remove the most specific zoom layer while preserving any quadrant zoom below it.
+    func unzoomedOneLevel() -> Self {
+        guard let zoomed else { return self }
+        guard let quadrantZoomed, zoomed != quadrantZoomed else {
+            return .init(root: root, zoomed: nil, quadrantZoomed: nil)
+        }
+
+        return .init(
+            root: root,
+            zoomed: quadrantZoomed,
+            quadrantZoomed: quadrantZoomed)
+    }
+
     init(root: Node?, zoomed: Node?) {
         self.root = root
         self.zoomed = zoomed

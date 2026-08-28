@@ -260,6 +260,10 @@ extension Ghostty {
                 // Identify the focused surface after focus or zoom changes.
                 FiniteHighlightOverlay(highlight: surfaceView.finiteHighlight)
 
+                NavigationWarningOverlay(
+                    warning: surfaceView.navigationWarning,
+                    scope: .panel)
+
                 // If our surface is not healthy, then we render an error view over it.
                 if !surfaceView.healthy {
                     Rectangle().fill(ghostty.config.backgroundColor)
@@ -1104,6 +1108,29 @@ extension Ghostty {
                 .allowsHitTesting(false)
                 .opacity(highlight == nil ? 0 : 1)
                 .animation(highlight == nil ? .easeOut(duration: 0.2) : nil, value: highlight)
+        }
+    }
+
+    struct NavigationWarningOverlay: View {
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @Environment(\.ghosttyAccentColor) private var accentColor
+
+        let warning: OSSurfaceView.NavigationWarning?
+        let scope: OSSurfaceView.NavigationWarning.Scope
+
+        var body: some View {
+            if let warning, warning.scope == scope {
+                TimelineView(.animation(paused: reduceMotion)) { context in
+                    Rectangle()
+                        .strokeBorder(
+                            accentColor.opacity(0.95),
+                            lineWidth: OSSurfaceView.FiniteHighlight.zoom.lineWidth)
+                        .allowsHitTesting(false)
+                        .opacity(warning.isVisible(
+                            at: context.date,
+                            reduceMotion: reduceMotion) ? 1 : 0)
+                }
+            }
         }
     }
 

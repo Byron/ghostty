@@ -1337,14 +1337,10 @@ extension Ghostty {
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
                     guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
 
-                    // If the window has no splits, the action is not performable
-                    guard controller.surfaceTree.isSplit else { return false }
-
                     // Convert the C API direction to our Swift type
                     guard let splitDirection = SplitFocusDirection.from(direction: direction) else { return false }
 
-                    // Find the current node in the tree
-                    guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }
+                    guard controller.surfaceTree.contains(surfaceView) else { return false }
 
                     let modifierFlags: NSEvent.ModifierFlags = if let event = NSApp.currentEvent,
                                                                   event.type == .keyDown {
@@ -1353,22 +1349,13 @@ extension Ghostty {
                         []
                     }
 
-                    // Check if a split actually exists in the target direction before
-                    // returning true. This ensures performable keybinds only consume
-                    // the key event when we actually perform navigation.
-                    let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = splitDirection.toSplitTreeFocusDirection()
-                    let next = splitDirection.targetsQuadrant
-                        ? controller.surfaceTree.quadrantFocusTarget(for: focusDirection, from: targetNode)
-                        : controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode)
-                    guard next != nil || (splitDirection.targetsQuadrant &&
-                        BaseTerminalController.shouldHandleBlockedQuadrantNavigation(
-                            hasQuadrantZoom: controller.surfaceTree.quadrantZoomed != nil,
-                            isSwitching: controller.quadrantSwitchIsActive,
-                            modifiers: modifierFlags)) else {
-                        return false
-                    }
+                    // Post even when navigation is blocked so the controller can provide
+                    // feedback. The return value still preserves performable keybinds.
+                    let performable = controller.isSplitFocusPerformable(
+                        from: surfaceView,
+                        direction: splitDirection,
+                        modifiers: modifierFlags)
 
-                    // We have a valid target, post the notification to perform the navigation
                     NotificationCenter.default.post(
                         name: Notification.ghosttyFocusSplit,
                         object: surfaceView,
@@ -1378,7 +1365,7 @@ extension Ghostty {
                         ]
                     )
 
-                    return true
+                    return performable
 
                 default:
                     assertionFailure()

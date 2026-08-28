@@ -25,6 +25,25 @@ struct QuadrantSwitchTests {
             modifiers: []))
     }
 
+    @Test func blockedPanelNavigationOnlyKeepsSplitQuadrantZoomed() throws {
+        let (tree, first, _) = try SplitTreeTests.makeHorizontalSplit()
+        let target = try #require(tree.root?.node(view: first))
+        let quadrant = try #require(tree.root)
+
+        #expect(!BaseTerminalController.shouldUnzoomAfterBlockedPanelNavigation(tree))
+        #expect(BaseTerminalController.shouldUnzoomAfterBlockedPanelNavigation(
+            SplitTree(root: tree.root, zoomed: target)))
+        #expect(BaseTerminalController.shouldUnzoomAfterBlockedPanelNavigation(
+            SplitTree(root: tree.root, zoomed: target, quadrantZoomed: quadrant)))
+        #expect(!BaseTerminalController.shouldUnzoomAfterBlockedPanelNavigation(
+            SplitTree(root: tree.root, zoomed: quadrant, quadrantZoomed: quadrant)))
+
+        let singlePanel = SplitTree<MockView>(view: MockView())
+        let leaf = try #require(singlePanel.root)
+        #expect(BaseTerminalController.shouldUnzoomAfterBlockedPanelNavigation(
+            SplitTree(root: leaf, zoomed: leaf, quadrantZoomed: leaf)))
+    }
+
     @Test func blockedNavigationPreservesDestination() {
         var state = BaseTerminalController.QuadrantSwitch(
             modifiers: NSEvent.ModifierFlags([.command, .control]),

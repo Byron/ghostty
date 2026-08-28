@@ -18,6 +18,24 @@ extension Ghostty {
             }
         }
 
+        struct NavigationWarning: Equatable, Sendable {
+            enum Scope: Equatable, Sendable {
+                case panel
+                case quadrant
+            }
+
+            static let duration: Duration = .milliseconds(400)
+
+            let scope: Scope
+            let startedAt: Date
+
+            func isVisible(at date: Date, reduceMotion: Bool) -> Bool {
+                let elapsed = date.timeIntervalSince(startedAt)
+                guard elapsed >= 0, elapsed < Self.duration.timeInterval else { return false }
+                return reduceMotion || elapsed < 0.15 || elapsed >= 0.25
+            }
+        }
+
         /// Unique ID per surface
         let id: UUID
 
@@ -68,6 +86,11 @@ extension Ghostty {
         @Published private(set) var finiteHighlight: FiniteHighlight?
 
         private var finiteHighlightTask: Task<Void, Never>?
+
+        /// Briefly warns that a focus navigation action had no destination.
+        @Published private(set) var navigationWarning: NavigationWarning?
+
+        private var navigationWarningTask: Task<Void, Never>?
 
         /// True while an OSC desktop notification from this surface needs attention.
         @Published private(set) var notificationAttention = false
@@ -127,6 +150,7 @@ extension Ghostty {
         }
 
         private func highlightFinite(_ highlight: FiniteHighlight) {
+            clearNavigationWarning()
             finiteHighlightTask?.cancel()
             finiteHighlight = highlight
             finiteHighlightTask = Task { @MainActor [weak self] in
@@ -134,6 +158,26 @@ extension Ghostty {
                 guard !Task.isCancelled else { return }
                 self?.finiteHighlight = nil
             }
+        }
+
+        func showNavigationWarning(_ scope: NavigationWarning.Scope) {
+            finiteHighlightTask?.cancel()
+            finiteHighlight = nil
+            navigationWarningTask?.cancel()
+
+            let warning = NavigationWarning(scope: scope, startedAt: Date())
+            navigationWarning = warning
+            navigationWarningTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: NavigationWarning.duration)
+                guard !Task.isCancelled, self?.navigationWarning == warning else { return }
+                self?.navigationWarning = nil
+            }
+        }
+
+        func clearNavigationWarning() {
+            navigationWarningTask?.cancel()
+            navigationWarningTask = nil
+            navigationWarning = nil
         }
 
         func requestNotificationAttention(isFocused: Bool) {

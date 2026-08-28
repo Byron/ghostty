@@ -283,6 +283,27 @@ struct SplitTreeTests {
 
     // MARK: - Quadrant Zoom
 
+    @Test func unzoomingOneLevelPreservesThenExitsQuadrantZoom() throws {
+        let (tree, view1, _) = try makeQuadrantTree()
+        let target = try #require(tree.root?.node(view: view1))
+        let quadrant = try #require(tree.quadrant(containing: target))
+
+        let panelZoom = SplitTree(
+            root: tree.root,
+            zoomed: target,
+            quadrantZoomed: quadrant)
+        let quadrantZoom = panelZoom.unzoomedOneLevel()
+        #expect(quadrantZoom.zoomed == quadrant)
+        #expect(quadrantZoom.quadrantZoomed == quadrant)
+
+        let unzoomed = quadrantZoom.unzoomedOneLevel()
+        #expect(unzoomed.zoomed == nil)
+        #expect(unzoomed.quadrantZoomed == nil)
+
+        let ordinaryPanelZoom = SplitTree(root: tree.root, zoomed: target)
+        #expect(ordinaryPanelZoom.unzoomedOneLevel().zoomed == nil)
+    }
+
     @Test func quadrantFindsCellAfterTwoAxes() throws {
         let (tree, view1, view5) = try makeQuadrantTree()
         guard let root = tree.root,

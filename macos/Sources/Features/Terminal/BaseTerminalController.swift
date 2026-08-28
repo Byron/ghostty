@@ -88,6 +88,16 @@ class BaseTerminalController: NSWindowController,
         !modifiers.isEmpty && (hasQuadrantZoom || isSwitching)
     }
 
+    static func shouldUnzoomAfterBlockedPanelNavigation<ViewType>(
+        _ tree: SplitTree<ViewType>
+    ) -> Bool where ViewType: NSView & Codable & Identifiable {
+        guard let zoomed = tree.zoomed else { return false }
+        guard zoomed == tree.quadrantZoomed else { return true }
+
+        if case .leaf = zoomed { return true }
+        return false
+    }
+
     static func shouldBeginQuadrantPeek(
         modifiers: NSEvent.ModifierFlags,
         configured: [NSEvent.ModifierFlags],
@@ -838,6 +848,43 @@ class BaseTerminalController: NSWindowController,
         return remembered
     }
 
+    func splitFocusTarget(
+        for direction: Ghostty.SplitFocusDirection,
+        from source: Ghostty.SurfaceView
+    ) -> Ghostty.SurfaceView? {
+        guard let sourceNode = surfaceTree.root?.node(view: source) else { return nil }
+
+        let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection =
+            direction.toSplitTreeFocusDirection()
+        if direction.targetsQuadrant {
+            return quadrantFocusTarget(for: focusDirection, from: sourceNode)
+        }
+
+        return surfaceTree.focusTarget(
+            for: focusDirection,
+            from: sourceNode,
+            within: surfaceTree.quadrantZoomed)
+    }
+
+    func isSplitFocusPerformable(
+        from source: Ghostty.SurfaceView,
+        direction: Ghostty.SplitFocusDirection,
+        modifiers: NSEvent.ModifierFlags
+    ) -> Bool {
+        if let target = splitFocusTarget(for: direction, from: source), target !== source {
+            return true
+        }
+        if !direction.targetsQuadrant,
+           Self.shouldUnzoomAfterBlockedPanelNavigation(surfaceTree) {
+            return true
+        }
+
+        return direction.targetsQuadrant && Self.shouldHandleBlockedQuadrantNavigation(
+            hasQuadrantZoom: surfaceTree.quadrantZoomed != nil,
+            isSwitching: quadrantSwitchIsActive,
+            modifiers: modifiers)
+    }
+
     private func beginQuadrantSwitch(
         modifiers: NSEvent.ModifierFlags,
         target: Ghostty.SurfaceView
@@ -864,43 +911,11 @@ class BaseTerminalController: NSWindowController,
         guard let directionAny = notification.userInfo?[Ghostty.Notification.SplitDirectionKey] else { return }
         guard let direction = directionAny as? Ghostty.SplitFocusDirection else { return }
 
-        // Find the node for the target surface
-        guard let targetNode = surfaceTree.root?.node(view: target) else { return }
-
         let startsQuadrantSwitch = direction.targetsQuadrant && surfaceTree.quadrantZoomed != nil
 
         // Find the next surface to focus
-        let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = direction.toSplitTreeFocusDirection()
-        let nextSurface: Ghostty.SurfaceView?
-        if direction.targetsQuadrant {
-            nextSurface = quadrantFocusTarget(
-                for: focusDirection,
-                from: targetNode
-            )
-        } else if let zoomedQuadrant = surfaceTree.quadrantZoomed {
-            guard zoomedQuadrant.contains(targetNode) else {
-                surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
-                return
-            }
-
-            guard let next = surfaceTree.focusTarget(
-                for: focusDirection,
-                from: targetNode,
-                within: zoomedQuadrant
-            ) else {
-                NotificationCenter.default.post(
-                    name: .ghosttyBellDidRing,
-                    object: target
-                )
-                return
-            }
-            nextSurface = next
-        } else {
-            guard let next = surfaceTree.focusTarget(for: focusDirection, from: targetNode) else {
-                return
-            }
-            nextSurface = next
-        }
+        let nextSurface = splitFocusTarget(for: direction, from: target)
+        let movesFocus = nextSurface.map { $0 !== target } ?? false
 
         if direction.targetsQuadrant {
             if self.quadrantSwitch != nil {
@@ -912,12 +927,30 @@ class BaseTerminalController: NSWindowController,
                 beginQuadrantSwitch(
                     modifiers: modifiers,
                     target: nextSurface ?? target)
-            } else if nextSurface == nil {
+            } else if !movesFocus {
+                target.showNavigationWarning(.panel)
                 return
             }
             self.quadrantSwitch?.markNavigationKeyUsed()
 
             surfaceTree = SplitTree(root: surfaceTree.root, zoomed: nil, quadrantZoomed: nil)
+            guard movesFocus else {
+                (quadrantSwitch?.target ?? target).showNavigationWarning(.quadrant)
+                return
+            }
+        } else if !movesFocus {
+            guard Self.shouldUnzoomAfterBlockedPanelNavigation(surfaceTree) else {
+                target.showNavigationWarning(.panel)
+                return
+            }
+
+            target.clearNavigationWarning()
+            surfaceTree = surfaceTree.unzoomedOneLevel()
+            DispatchQueue.main.async {
+                Ghostty.moveFocus(to: target)
+                target.highlightFocus()
+            }
+            return
         } else if surfaceTree.zoomed != nil {
             if let zoomedQuadrant = surfaceTree.quadrantZoomed {
                 surfaceTree = SplitTree(
@@ -937,6 +970,8 @@ class BaseTerminalController: NSWindowController,
 
         // Move focus to the next surface
         guard let nextSurface else { return }
+        target.clearNavigationWarning()
+        nextSurface.clearNavigationWarning()
         let highlightsFocus = quadrantSwitch == nil
         DispatchQueue.main.async {
             Ghostty.moveFocus(to: nextSurface, from: target)

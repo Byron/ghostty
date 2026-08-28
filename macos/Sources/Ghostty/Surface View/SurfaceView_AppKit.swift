@@ -495,6 +495,7 @@ extension Ghostty {
             // sent to stop things like mouse selection.
             if !focused {
                 suppressNextLeftMouseUp = false
+                clearNavigationWarning()
             }
 
             // Notify libghostty

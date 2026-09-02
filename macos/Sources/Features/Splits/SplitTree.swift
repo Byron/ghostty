@@ -443,6 +443,25 @@ extension SplitTree {
         quadrantInfo(containing: target)?.position
     }
 
+    /// Returns true when the split has different quadrants on each side.
+    func separatesQuadrants(_ target: Node) -> Bool {
+        guard case .split(let split) = target else { return false }
+
+        func firstQuadrant(in node: Node) -> Node? {
+            for view in node {
+                if let quadrant = quadrant(containing: .leaf(view: view)) {
+                    return quadrant
+                }
+            }
+
+            return nil
+        }
+
+        guard let left = firstQuadrant(in: split.left),
+              let right = firstQuadrant(in: split.right) else { return false }
+        return left != right
+    }
+
     private func quadrantInfo(
         containing target: Node
     ) -> (node: Node, position: QuadrantPosition)? {

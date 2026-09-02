@@ -328,6 +328,26 @@ struct SplitTreeTests {
         #expect(tree.quadrant(containing: targetNode!) == nil)
     }
 
+    @Test func quadrantSeparatorsExcludePaneSplits() throws {
+        let (tree, view1, _) = try makeQuadrantTree()
+        let root = try #require(tree.root)
+        guard case .split(let rootSplit) = root else {
+            Issue.record("missing root split")
+            return
+        }
+
+        #expect(tree.separatesQuadrants(root))
+        #expect(tree.separatesQuadrants(rootSplit.left))
+        #expect(tree.separatesQuadrants(rootSplit.right))
+
+        let quadrant = try #require(tree.quadrant(containing: .leaf(view: view1)))
+        #expect(!tree.separatesQuadrants(quadrant))
+
+        let (ordinaryTree, _, _) = try makeHorizontalSplit()
+        let ordinaryRoot = try #require(ordinaryTree.root)
+        #expect(!ordinaryTree.separatesQuadrants(ordinaryRoot))
+    }
+
     @Test func quadrantPositionsAreStableSpatialCells() throws {
         let topLeft = MockView()
         let topRight = MockView()

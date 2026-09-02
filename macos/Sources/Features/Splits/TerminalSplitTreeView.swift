@@ -98,6 +98,7 @@ private struct TerminalSplitSubtreeView: View {
                     action(.resize(.init(node: node, ratio: $0)))
                 }),
                 dividerColor: ghostty.config.splitDividerColor,
+                dividerSize: tree.zoomed == nil && tree.separatesQuadrants(node) ? 2 : 1,
                 resizeIncrements: .init(width: 1, height: 1),
                 left: {
                     TerminalSplitSubtreeView(

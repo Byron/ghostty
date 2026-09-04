@@ -1037,24 +1037,7 @@ private final class TabNotificationPulseView: NSView {
 
     func pulse(color: NSColor) {
         layer?.backgroundColor = color.cgColor
-
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            layer?.removeAllAnimations()
-            layer?.opacity = 0.3
-            return
-        }
-
-        layer?.opacity = 0.15
-        guard layer?.animation(forKey: "notificationPulse") == nil else { return }
-
-        let animation = CABasicAnimation(keyPath: "opacity")
-        animation.fromValue = 0.15
-        animation.toValue = 0.45
-        animation.duration = 0.8
-        animation.autoreverses = true
-        animation.repeatCount = .infinity
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer?.add(animation, forKey: "notificationPulse")
+        layer?.opacity = 0.3
     }
 }
 

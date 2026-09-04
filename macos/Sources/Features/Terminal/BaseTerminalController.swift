@@ -452,15 +452,38 @@ class BaseTerminalController: NSWindowController,
     ///
     /// Subclasses should call super first.
     func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
-        for surfaceView in from where !to.contains(surfaceView) {
-            cancelPendingClipboardConfirmation(for: surfaceView)
+        var membershipChanged = false
+
+        // Removed surfaces can remain alive for undo, so explicitly stop their
+        // rendering before they leave the controller's synchronization paths.
+        for view in from where !to.contains(view) {
+            membershipChanged = true
+            cancelPendingClipboardConfirmation(for: view)
+            view.focusDidChange(false)
+            setSurfaceOcclusionState(false, for: view)
+        }
+
+        // New surfaces aren't focused until AppKit installs them as the first
+        // responder. This also corrects their initially-focused default.
+        for view in to where !from.contains(view) {
+            membershipChanged = true
+            view.focusDidChange(false)
         }
 
         // If our surface tree becomes empty then we have no focused surface.
         if to.isEmpty {
             focusedSurface = nil
         }
+
         syncSurfaceTreeOcclusionState()
+
+        if membershipChanged {
+            // SwiftUI may temporarily detach the first responder while rebuilding
+            // the split tree, so reconcile existing surfaces after it settles.
+            DispatchQueue.main.async {
+                self.syncFocusToSurfaceTree()
+            }
+        }
     }
 
     /// Update all surfaces with the focus state. This ensures that libghostty has an accurate view about
@@ -1546,6 +1569,7 @@ class BaseTerminalController: NSWindowController,
         // Everything beyond here is setting up the window
         guard let window else { return }
 
+        syncFocusToSurfaceTree()
         syncSurfaceTreeOcclusionState()
 
         // We always initialize our fullscreen style to native if we can because
@@ -1628,9 +1652,13 @@ class BaseTerminalController: NSWindowController,
     func windowWillClose(_ notification: Notification) {
         guard let window else { return }
 
-        for surfaceView in surfaceTree {
-            cancelPendingClipboardConfirmation(for: surfaceView)
+        // The surface tree can be retained for undo without being emptied.
+        // Stop all rendering before this controller leaves the window lifecycle.
+        for view in surfaceTree {
+            cancelPendingClipboardConfirmation(for: view)
+            view.focusDidChange(false)
         }
+        setSurfaceTreeOcclusionState(false)
 
         // Emit a final bell-state transition so any observers can clear state
         // without separately tracking NSWindow lifecycle events.
@@ -1688,13 +1716,21 @@ class BaseTerminalController: NSWindowController,
         syncSurfaceTreeOcclusionState()
     }
 
-    private func syncSurfaceTreeOcclusionState() {
+    func syncSurfaceTreeOcclusionState() {
         let visible = self.window?.occlusionState.contains(.visible) ?? false
+        setSurfaceTreeOcclusionState(visible)
+    }
+
+    func setSurfaceTreeOcclusionState(_ visible: Bool) {
         for view in surfaceTree {
-            if let surface = view.surface, view.isWindowVisible != visible {
-                ghostty_surface_set_occlusion(surface, visible)
-                view.isWindowVisible = visible
-            }
+            setSurfaceOcclusionState(visible, for: view)
+        }
+    }
+
+    private func setSurfaceOcclusionState(_ visible: Bool, for view: Ghostty.SurfaceView) {
+        if let surface = view.surface, view.isWindowVisible != visible {
+            ghostty_surface_set_occlusion(surface, visible)
+            view.isWindowVisible = visible
         }
     }
 

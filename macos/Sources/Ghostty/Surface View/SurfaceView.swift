@@ -1135,31 +1135,17 @@ extension Ghostty {
     }
 
     struct NotificationAttentionOverlay: View {
-        private static let duration = 1.6
-
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Environment(\.ghosttyAccentColor) private var accentColor
 
         let active: Bool
 
         var body: some View {
-            TimelineView(.animation(paused: !active || reduceMotion)) { context in
-                Rectangle()
-                    .strokeBorder(
-                        accentColor.opacity(0.8),
-                        lineWidth: Ghostty.OSSurfaceView.FiniteHighlight.focus.lineWidth)
-                    .allowsHitTesting(false)
-                    .opacity(opacity(at: context.date))
-            }
-        }
-
-        private func opacity(at date: Date) -> Double {
-            guard active else { return 0 }
-            guard !reduceMotion else { return 0.65 }
-
-            let phase = date.timeIntervalSinceReferenceDate
-                .truncatingRemainder(dividingBy: Self.duration) / Self.duration
-            return 0.675 - 0.325 * cos(phase * 2 * .pi)
+            Rectangle()
+                .strokeBorder(
+                    accentColor.opacity(0.8),
+                    lineWidth: Ghostty.OSSurfaceView.FiniteHighlight.focus.lineWidth)
+                .allowsHitTesting(false)
+                .opacity(active ? 0.65 : 0)
         }
     }
 

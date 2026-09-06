@@ -1869,8 +1869,9 @@ extension Ghostty {
             let id = notification.request.identifier
             guard self.notificationIdentifiers.remove(id) != nil else { return }
             if focus {
-                self.window?.makeKeyAndOrderFront(self)
-                Ghostty.moveFocus(to: self)
+                NotificationCenter.default.post(
+                    name: Ghostty.Notification.ghosttyPresentTerminal,
+                    object: self)
             }
         }
 

@@ -922,13 +922,7 @@ class AppDelegate: NSObject,
     // MARK: - GhosttyAppDelegate
 
     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView? {
-        for c in TerminalController.all {
-            for view in c.surfaceTree where view.id == uuid {
-                return view
-            }
-        }
-
-        return nil
+        ghosttySurface(id: uuid)
     }
 
     // MARK: - Global State

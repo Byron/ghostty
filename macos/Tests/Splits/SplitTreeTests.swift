@@ -304,6 +304,96 @@ struct SplitTreeTests {
         #expect(ordinaryPanelZoom.unzoomedOneLevel().zoomed == nil)
     }
 
+    @Test func revealingVisibleOrMissingViewPreservesZoom() throws {
+        let (tree, view1, view5) = try makeQuadrantTree()
+        let target = try #require(tree.root?.node(view: view1))
+        let quadrant = try #require(tree.quadrant(containing: target))
+        let zoomedTree = SplitTree(
+            root: tree.root,
+            zoomed: quadrant,
+            quadrantZoomed: quadrant)
+
+        for revealed in [
+            zoomedTree.revealing(view5),
+            zoomedTree.revealing(MockView()),
+        ] {
+            #expect(revealed.root == tree.root)
+            #expect(revealed.zoomed == quadrant)
+            #expect(revealed.quadrantZoomed == quadrant)
+        }
+
+        let unzoomed = tree.revealing(view5)
+        #expect(unzoomed.root == tree.root)
+        #expect(unzoomed.zoomed == nil)
+        #expect(unzoomed.quadrantZoomed == nil)
+    }
+
+    @Test func revealingHiddenViewPreservesZoomIntent() throws {
+        let (tree, view1, view5) = try makeQuadrantTree()
+        let root = try #require(tree.root)
+        let target = try #require(root.node(view: view5))
+        let targetQuadrant = try #require(tree.quadrant(containing: target))
+        let outsideView = try #require(tree.first { view in
+            root.node(view: view).map { !targetQuadrant.contains($0) } ?? false
+        })
+        let outside = try #require(root.node(view: outsideView))
+        let outsideQuadrant = try #require(tree.quadrant(containing: outside))
+
+        #expect(targetQuadrant.leftmostLeaf() === view1)
+        #expect(targetQuadrant.leftmostLeaf() !== view5)
+
+        for revealed in [
+            SplitTree(root: root, zoomed: outsideQuadrant, quadrantZoomed: outsideQuadrant)
+                .revealing(view5),
+            SplitTree(root: root, zoomed: outside, quadrantZoomed: outsideQuadrant)
+                .revealing(view5),
+            SplitTree(root: root, zoomed: .leaf(view: view1), quadrantZoomed: targetQuadrant)
+                .revealing(view5),
+        ] {
+            #expect(revealed.root == tree.root)
+            #expect(revealed.zoomed == targetQuadrant)
+            #expect(revealed.quadrantZoomed == targetQuadrant)
+            #expect(revealed.contains(view1))
+            #expect(revealed.contains(view5))
+        }
+
+        let ordinaryZoom = SplitTree(root: root, zoomed: .leaf(view: view1))
+        let ordinaryReveal = ordinaryZoom.revealing(view5)
+        #expect(ordinaryReveal.root == tree.root)
+        #expect(ordinaryReveal.zoomed == nil)
+        #expect(ordinaryReveal.quadrantZoomed == nil)
+        let preservedReveal = ordinaryZoom.revealing(view5, preservingZoom: true)
+        #expect(preservedReveal.zoomed == target)
+        #expect(preservedReveal.quadrantZoomed == nil)
+
+        let (horizontalTree, horizontalView1, horizontalView2) = try makeHorizontalSplit()
+        let extraView = MockView()
+        let asymmetricTree = try horizontalTree.inserting(
+            view: extraView,
+            at: horizontalView1,
+            direction: .down)
+        let asymmetricRoot = try #require(asymmetricTree.root)
+        let source = try #require(asymmetricRoot.node(view: horizontalView1))
+        let sourceQuadrant = try #require(asymmetricTree.quadrant(containing: source))
+        let fallbackTarget = try #require(asymmetricRoot.node(view: horizontalView2))
+        let asymmetricZoom = SplitTree(
+            root: asymmetricRoot,
+            zoomed: sourceQuadrant,
+            quadrantZoomed: sourceQuadrant)
+        let fallback = asymmetricZoom.revealing(horizontalView2)
+
+        #expect(fallback.root == asymmetricTree.root)
+        #expect(fallback.zoomed == nil)
+        #expect(fallback.quadrantZoomed == nil)
+        #expect(fallback.count == asymmetricTree.count)
+        #expect(fallback.contains(horizontalView1))
+        #expect(fallback.contains(horizontalView2))
+        #expect(fallback.contains(extraView))
+        let preservedFallback = asymmetricZoom.revealing(horizontalView2, preservingZoom: true)
+        #expect(preservedFallback.zoomed == fallbackTarget)
+        #expect(preservedFallback.quadrantZoomed == nil)
+    }
+
     @Test func quadrantFindsCellAfterTwoAxes() throws {
         let (tree, view1, view5) = try makeQuadrantTree()
         guard let root = tree.root,

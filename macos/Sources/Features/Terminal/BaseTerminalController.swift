@@ -438,13 +438,13 @@ class BaseTerminalController: NSWindowController,
         // Check if target surface is in our tree
         guard surfaceTree.contains(view) else { return }
 
-        // Move focus to the target surface and activate the window/app
-        DispatchQueue.main.async {
-            Ghostty.moveFocus(to: view)
-            view.window?.makeKeyAndOrderFront(nil)
-            if !NSApp.isActive {
-                NSApp.activate(ignoringOtherApps: true)
-            }
+        // Select the owning window before notification handling returns, so app
+        // activation can use the target tab. moveFocus already defers pane focus
+        // until zoom changes have had a chance to attach the view.
+        Ghostty.moveFocus(to: view)
+        window?.makeKeyAndOrderFront(nil)
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -1103,12 +1103,19 @@ class BaseTerminalController: NSWindowController,
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(target) else { return }
 
-        // Bring the window to front and focus the surface.
-        window?.makeKeyAndOrderFront(nil)
+        // Start presentation before changing the tree so a hidden Quick Terminal
+        // uses its animation path. Focus is deferred until after the reveal below.
+        focusSurface(target)
+
+        let revealedTree = surfaceTree.revealing(
+            target,
+            preservingZoom: derivedConfig.splitPreserveZoom.contains(.navigation))
+        if revealedTree.zoomed != surfaceTree.zoomed || revealedTree.quadrantZoomed != surfaceTree.quadrantZoomed {
+            surfaceTree = revealedTree
+        }
 
         // We use a small delay to ensure this runs after any UI cleanup
         // (e.g., command palette restoring focus to its original surface).
-        Ghostty.moveFocus(to: target)
         Ghostty.moveFocus(to: target, delay: 0.1)
 
         // Show a brief highlight to help the user locate the presented terminal.

@@ -115,6 +115,19 @@ extension SplitTree {
         (zoomed ?? root) == node
     }
 
+    /// Reveal a view hidden by zoom, preserving its enclosing quadrant zoom if present.
+    func revealing(_ view: ViewType, preservingZoom: Bool = false) -> Self {
+        guard let zoomed,
+              let target = root?.node(view: view),
+              !zoomed.contains(target) else { return self }
+
+        let quadrant = quadrantZoomed == nil ? nil : quadrant(containing: target)
+        return .init(
+            root: root,
+            zoomed: quadrant ?? (preservingZoom ? target : nil),
+            quadrantZoomed: quadrant)
+    }
+
     /// Remove the most specific zoom layer while preserving any quadrant zoom below it.
     func unzoomedOneLevel() -> Self {
         guard let zoomed else { return self }

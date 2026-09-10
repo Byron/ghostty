@@ -293,6 +293,9 @@ extension Ghostty {
             // can do SOMETHING.
             super.init(id: uuid, frame: NSRect(x: 0, y: 0, width: 800, height: 600))
 
+            // State can be saved before the shell sends its first directory report.
+            self.pwd = baseConfig?.workingDirectory
+
             // Our cache of screen data
             cachedScreenContents = .init(duration: .milliseconds(500)) { [weak self] in
                 guard let self else { return "" }

@@ -201,6 +201,8 @@ class BaseTerminalController: NSWindowController,
     /// Cancellable for aggregate command and progress activity across all surfaces.
     private var activityStateCancellable: AnyCancellable?
 
+    private var reportedActivityCancellable: AnyCancellable?
+
     /// Cancellable for aggregate OSC notification attention across all surfaces.
     private var notificationAttentionCancellable: AnyCancellable?
 
@@ -2197,6 +2199,16 @@ extension BaseTerminalController {
     }
 
     private func setupActivityPublisher() {
+        reportedActivityCancellable = surfaceValuesPublisher(
+            valueKeyPath: \.reportedActivity,
+            publisherKeyPath: \.$reportedActivity)
+            .map { $0.values.filter { $0 }.count }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] count in
+                (self?.window as? TerminalWindow)?.setTabActiveCount(count)
+            }
+
         activityStateCancellable = $surfaceTree
             .map { tree in
                 Self.aggregateActivityPublisher(for: Array(tree))

@@ -3,6 +3,8 @@ import Testing
 
 @Suite
 struct TerminalTitleTests {
+    private typealias ReportedActivity = Ghostty.SurfaceView.ReportedActivity
+
     private final class Surface {
         let running: Bool
 
@@ -122,5 +124,47 @@ struct TerminalTitleTests {
         #expect(firstStopped)
         #expect(!secondRemainedActive)
         #expect(secondStopped)
+    }
+
+    @Test(arguments: Array("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"))
+    func reportedActivityRecognizesOnlyLeadingSpinnerFrames(frame: Character) {
+        for title in ["\(frame)", "\(frame) Fix a bug | project"] {
+            #expect(ReportedActivity(title: .init(title)).isActive)
+        }
+        for title in ["Fix a bug \(frame) | project", "renaming... \(frame)", "\(frame)filename"] {
+            #expect(!ReportedActivity(title: .init(title)).isActive)
+        }
+    }
+
+    @Test(arguments: [
+        (Ghostty.Action.ProgressReport.State.set, true),
+        (.indeterminate, true),
+        (.pause, false),
+        (.error, false),
+        (.remove, false),
+    ])
+    func reportedActivityDistinguishesProgressStates(state: Ghostty.Action.ProgressReport.State, active: Bool) {
+        #expect(ReportedActivity(progress: state).isActive == active)
+    }
+
+    @Test func reportedActivityFollowsWorkAndWaiting() {
+        var activity = ReportedActivity()
+        #expect(!activity.isActive)
+        activity.title = .init("⠋ Fix a bug | project")
+        #expect(activity.isActive)
+
+        // An input request overrides even a lingering progress report.
+        activity.progress = .set
+        for title in ["[ ! ] Action Required", "[ . ] Action Required | project"] {
+            activity.title = .init(title)
+            #expect(!activity.isActive)
+        }
+
+        activity.title = .init("⠙ Fix a bug | project")
+        #expect(activity.isActive)
+        activity.title = .init("Fix a bug | project")
+        #expect(activity.isActive)
+        activity.progress = nil
+        #expect(!activity.isActive)
     }
 }

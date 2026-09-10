@@ -274,6 +274,7 @@ class TerminalWindow: NSWindow {
         stackView.spacing = 4
         stackView.alignment = .centerY
         stackView.addArrangedSubview(tabColorIndicator)
+        stackView.addArrangedSubview(tabActivityCountLabel)
         stackView.addArrangedSubview(keyEquivalentLabel)
         stackView.addArrangedSubview(resetZoomTabButton)
         tab.accessoryView = stackView
@@ -475,6 +476,16 @@ class TerminalWindow: NSWindow {
         return label
     }()
 
+    private lazy var tabActivityCountLabel: NSTextField = {
+        let label = NSTextField(labelWithString: "")
+        label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        label.textColor = .labelColor
+        label.isHidden = true
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.setAccessibilityIdentifier("TabActivityCount")
+        return label
+    }()
+
     // MARK: Surface Zoom
 
     /// The current zoom state used to show and style the reset zoom button/tab.
@@ -562,6 +573,14 @@ class TerminalWindow: NSWindow {
     }
 
     // MARK: Title Text
+
+    func setTabActiveCount(_ count: Int) {
+        tabActivityCountLabel.stringValue = "▶ \(count)"
+        tabActivityCountLabel.isHidden = count == 0
+        let description = count == 1 ? "1 active pane" : "\(count) active panes"
+        tabActivityCountLabel.toolTip = description
+        tabActivityCountLabel.setAccessibilityLabel(description)
+    }
 
     func setTabActivity(_ isActive: Bool) {
         guard tabActivity != isActive else { return }

@@ -22,6 +22,9 @@ extension Ghostty {
         // The progress report (if any)
         override var progressReport: Action.ProgressReport? {
             didSet {
+                reportedActivityState.progress = progressReport?.state
+                updateReportedActivity()
+
                 // Cancel any existing timer
                 progressReportTimer?.invalidate()
                 progressReportTimer = nil
@@ -119,8 +122,54 @@ extension Ghostty {
         /// True while shell integration reports a command is running.
         @Published private(set) var commandRunning: Bool = false
 
-        func commandDidStart() { commandRunning = true }
-        func commandDidFinish() { commandRunning = false }
+        /// True while the terminal explicitly reports work, excluding agents waiting for input.
+        @Published private(set) var reportedActivity: Bool = false
+        private var reportedActivityState = ReportedActivity()
+
+        func commandDidStart() {
+            reportedActivityState = .init()
+            updateReportedActivity()
+            commandRunning = true
+        }
+
+        func commandDidFinish() {
+            reportedActivityState = .init()
+            updateReportedActivity()
+            commandRunning = false
+        }
+
+        private func updateReportedActivity() {
+            let active = reportedActivityState.isActive
+            if reportedActivity != active { reportedActivity = active }
+        }
+
+        struct ReportedActivity {
+            enum Title {
+                case idle, working, waiting
+
+                init(_ title: String) {
+                    // ponytail: follows Codex's leading title markers; replace with
+                    // structured progress reporting when Codex provides it.
+                    let waitingPrefixes = ["[ ! ] Action Required", "[ . ] Action Required"]
+                    if waitingPrefixes.contains(where: { title == $0 || title.hasPrefix($0 + " | ") }) {
+                        self = .waiting
+                    } else if let first = title.first,
+                              "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(first),
+                              title.dropFirst().first?.isWhitespace ?? true {
+                        self = .working
+                    } else {
+                        self = .idle
+                    }
+                }
+            }
+
+            var title: Title = .idle
+            var progress: Action.ProgressReport.State?
+
+            var isActive: Bool {
+                title != .waiting && (title == .working || progress == .set || progress == .indeterminate)
+            }
+        }
 
         var activityPublisher: AnyPublisher<Bool, Never> {
             Publishers.CombineLatest($commandRunning, $progressReport)
@@ -669,7 +718,14 @@ extension Ghostty {
             }
         }
 
-        func setTitle(_ title: String) {
+        func terminalTitleDidChange(_ title: String) {
+            // Track live reports before debouncing or applying a user-set display title.
+            reportedActivityState.title = .init(title)
+            updateReportedActivity()
+            setTitle(title)
+        }
+
+        private func setTitle(_ title: String) {
             // This fixes an issue where very quick changes to the title could
             // cause an unpleasant flickering. We set a timer so that we can
             // coalesce rapid changes. The timer is short enough that it still

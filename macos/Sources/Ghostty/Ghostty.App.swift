@@ -1855,7 +1855,7 @@ extension Ghostty {
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
                 guard let title = String(cString: v.title!, encoding: .utf8) else { return }
-                surfaceView.setTitle(title)
+                surfaceView.terminalTitleDidChange(title)
 
             default:
                 assertionFailure()

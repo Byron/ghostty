@@ -61,6 +61,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// The notification cancellable for focused surface property changes.
     private var surfaceAppearanceCancellables: Set<AnyCancellable> = []
 
+    private var workingDirectoryCancellable: AnyCancellable?
+
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
@@ -77,6 +79,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         self.derivedConfig = DerivedConfig(ghostty.config)
 
         super.init(ghostty, baseConfig: base, surfaceTree: tree)
+
+        // Watch every pane, including panes detached from the window by zoom.
+        workingDirectoryCancellable = surfaceValuesPublisher(valueKeyPath: \.pwd, publisherKeyPath: \.$pwd)
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.invalidateRestorableState() }
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default

@@ -15,6 +15,7 @@ import protocols
 import kitty_clipboard
 import paste_requests
 import semantic_prompts
+import charsets
 import host_queries
 import mode_defaults
 import color_protocols
@@ -474,6 +475,8 @@ def main():
                 requests.extend((request, covers) for request, covers in paste_requests.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in semantic_prompts.requests()
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in charsets.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in host_queries.requests()
                                 if not args.case or args.case in request["id"])

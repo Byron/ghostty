@@ -73,6 +73,12 @@ and restored snapshots. Duplicate IDs, malformed option traversal, invalid
 empty-URI endings and cursor restoration now match the native matrix. Complete
 control contexts and storage behavior still need coverage.
 
+`--protocols --case protocol/charsets` retains a bounded matrix of ASCII, UK
+and DEC graphics mappings through G0–G3, cell-write single shifts, repeat and
+snapshot continuation. Combining characters and wide-cell spacers exercise
+shift consumption separately from input-scalar dispatch. Smoke cases also keep
+minimized inherited failures with their original corpus source identifiers.
+
 Native libghostty-vt updates OSC 133 semantic state without command lifecycle
 callbacks. `Terminal::shell_command_events` explicitly enables Rustty's
 `CommandStart`/`CommandEnd` host extension and defaults to false; application

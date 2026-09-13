@@ -2,7 +2,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
-use crate::page_list::{PageAllocationInfo, PageList};
+use crate::page_list::{Page, PageAllocationInfo, PageList};
+use crate::page_resources::{SetFull, StyleAdmission};
 
 /// Independent logical storage budgets. `None` means unlimited.
 ///
@@ -151,8 +152,10 @@ pub enum SemanticClick {
     CursorKeys { motion: ClickMotion },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cell {
+    #[serde(skip)]
+    pub(crate) style_id: u16,
     /// Empty for unwritten cells and the continuation of a wide glyph.
     pub text: String,
     /// Zero denotes the continuation of a two-cell glyph.
@@ -168,9 +171,26 @@ pub struct Cell {
     pub spacer_head: bool,
 }
 
+impl PartialEq for Cell {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.width == other.width
+            && self.style == other.style
+            && self.hyperlink == other.hyperlink
+            && self.hyperlink_id == other.hyperlink_id
+            && self.hyperlink_raw == other.hyperlink_raw
+            && self.protected == other.protected
+            && self.semantic == other.semantic
+            && self.spacer_head == other.spacer_head
+    }
+}
+
+impl Eq for Cell {}
+
 impl Default for Cell {
     fn default() -> Self {
         Self {
+            style_id: 0,
             text: String::new(),
             width: 1,
             style: Style::default(),
@@ -202,6 +222,8 @@ impl Cell {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
+    #[serde(skip)]
+    pub(crate) style_page: Option<u64>,
     pub id: u64,
     pub cells: Vec<Cell>,
     pub wrapped: bool,
@@ -212,9 +234,15 @@ pub struct Row {
     pub dirty: bool,
 }
 
+pub(crate) struct RowCopy {
+    row: Row,
+    styles: Vec<(Option<u64>, u16, Style)>,
+}
+
 impl Row {
     pub(crate) fn new(id: u64, cols: usize, background: Color) -> Self {
         Self {
+            style_page: None,
             id,
             cells: vec![Cell::blank(background); cols],
             wrapped: false,
@@ -459,6 +487,8 @@ pub struct Screen {
     pub(crate) limits: ScrollbackLimits,
     pub(crate) history_bytes: usize,
     pub(crate) pages: PageList,
+    #[serde(skip)]
+    pub(crate) cursor_style: Option<(u64, u16)>,
     pub(crate) next_row: u64,
     #[serde(skip)]
     tracked: TrackedPoints,
@@ -507,6 +537,7 @@ impl Screen {
             limits,
             history_bytes: 0,
             pages: PageList::new(cols as u16, rows),
+            cursor_style: None,
             next_row: rows as u64,
             tracked: TrackedPoints::default(),
         }
@@ -526,7 +557,9 @@ impl Screen {
         self.all_rows().skip(start).take(self.rows.len())
     }
 
-    /// Copy only visible rows so shaping and GPU preparation need no session lock.
+    /// Detached display and selection view of the visible rows. Resolved cell
+    /// styles and page boundaries remain available without owning live resource
+    /// tables, so shaping and GPU preparation need no session lock.
     pub fn snapshot_viewport(&self) -> Self {
         let mut cursor = self.cursor.clone();
         cursor.row = cursor.row.saturating_add(self.viewport_offset);
@@ -536,7 +569,17 @@ impl Screen {
             metadata: self.metadata.clone(),
             graphics: self.graphics.snapshot(self),
             columns: self.columns,
-            rows: self.viewport().cloned().collect(),
+            rows: self
+                .viewport()
+                .map(|row| {
+                    let mut row = row.clone();
+                    row.style_page = None;
+                    for cell in &mut row.cells {
+                        cell.style_id = 0;
+                    }
+                    row
+                })
+                .collect(),
             history: VecDeque::new(),
             cursor,
             selection: self.selection,
@@ -551,6 +594,7 @@ impl Screen {
                 self.history.len().saturating_sub(self.viewport_offset),
                 self.rows.len(),
             ),
+            cursor_style: None,
             next_row: self.next_row,
             tracked: TrackedPoints::default(),
         }
@@ -670,6 +714,674 @@ impl Screen {
         Some(result)
     }
 
+    fn physical_row_mut(&mut self, absolute: usize) -> &mut Row {
+        if absolute < self.history.len() {
+            &mut self.history[absolute]
+        } else {
+            &mut self.rows[absolute - self.history.len()]
+        }
+    }
+
+    fn release_style(&mut self, serial: u64, id: u16) {
+        if id != 0
+            && let Some(page) = self
+                .pages
+                .pages
+                .iter_mut()
+                .find(|page| page.serial == serial)
+        {
+            page.styles.release(id);
+        }
+    }
+
+    pub(crate) fn release_row_styles(&mut self, row: &Row) {
+        if let Some(serial) = row.style_page {
+            for cell in &row.cells {
+                self.release_style(serial, cell.style_id);
+            }
+        }
+    }
+
+    /// Mutations confined to one page only change counts, never the set's
+    /// buckets. Rotations can therefore apply their net count changes without
+    /// transiently releasing a moved cell's final reference.
+    pub(crate) fn edit_row<R>(&mut self, y: usize, edit: impl FnOnce(&mut Row) -> R) -> R {
+        self.edit_physical_row(self.history.len() + y, edit)
+    }
+
+    fn edit_physical_row<R>(&mut self, absolute: usize, edit: impl FnOnce(&mut Row) -> R) -> R {
+        let index = self.pages.page_index(absolute);
+        let serial = self.pages.pages[index].serial;
+        let row = self.physical_row_mut(absolute);
+        row.style_page = Some(serial);
+        let mut counts: HashMap<u16, isize> = HashMap::new();
+        for cell in &row.cells {
+            if cell.style_id != 0 {
+                *counts.entry(cell.style_id).or_default() -= 1;
+            }
+        }
+        let result = edit(row);
+        for cell in &row.cells {
+            if cell.style_id != 0 {
+                *counts.entry(cell.style_id).or_default() += 1;
+            }
+        }
+        let styles = &mut self.pages.pages[index].styles;
+        for (id, count) in counts {
+            if count < 0 {
+                for _ in 0..-count {
+                    styles.release(id);
+                }
+            } else {
+                for _ in 0..count {
+                    styles.retain(id);
+                }
+            }
+        }
+        result
+    }
+
+    /// Erase a native cell range, retaining background-only blanks inline.
+    pub(crate) fn erase_row_cells(
+        &mut self,
+        y: usize,
+        mut start: usize,
+        mut end: usize,
+        background: Color,
+        protected: bool,
+    ) {
+        let absolute = self.history.len() + y;
+        let index = self.pages.page_index(absolute);
+        let serial = self.pages.pages[index].serial;
+        let row = &mut self.rows[y];
+        row.style_page = Some(serial);
+        if start >= row.cells.len() || start >= end {
+            return;
+        }
+        end = end.min(row.cells.len());
+        if row.cells[start].width == 0 && start > 0 {
+            start -= 1;
+        }
+        if end < row.cells.len() && row.cells[end - 1].width == 2 {
+            end += 1;
+        }
+        for cell in &mut row.cells[start..end] {
+            if !protected || !cell.protected {
+                self.pages.pages[index].styles.release(cell.style_id);
+                *cell = Cell::blank(background);
+            }
+        }
+        row.dirty = true;
+    }
+
+    pub(crate) fn release_cursor_style(&mut self) {
+        if let Some((serial, id)) = self.cursor_style.take() {
+            self.release_style(serial, id);
+        }
+    }
+
+    pub(crate) fn set_cursor_style(&mut self, value: Style) {
+        if self.cursor.style == value {
+            return;
+        }
+        let old = self.cursor.style;
+        self.release_cursor_style();
+        self.cursor.style = value;
+        if !self.install_cursor_style() {
+            self.cursor.style = old;
+            if !self.install_cursor_style() {
+                self.cursor.style = Style::default();
+            }
+        }
+    }
+
+    fn install_cursor_style(&mut self) -> bool {
+        if self.cursor.style == Style::default() {
+            return true;
+        }
+        let absolute = self.history.len() + self.cursor.row;
+        match self.acquire_style(absolute, self.cursor.style, None) {
+            Ok(id) => {
+                self.cursor_style = Some((self.pages.page_at(absolute).0.serial, id));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Cursor page changes own a reference independently of printed cells.
+    /// Saved cursor values and detached renderer snapshots own none.
+    pub(crate) fn sync_cursor_style(&mut self) {
+        let serial = self
+            .pages
+            .page_at(self.history.len() + self.cursor.row)
+            .0
+            .serial;
+        if let Some((owner, id)) = self.cursor_style
+            && owner == serial
+            && *self
+                .pages
+                .page_at(self.history.len() + self.cursor.row)
+                .0
+                .styles
+                .get(id)
+                == self.cursor.style
+        {
+            return;
+        }
+        self.release_cursor_style();
+        if !self.install_cursor_style() {
+            self.cursor.style = Style::default();
+        }
+    }
+
+    pub(crate) fn retain_cursor_style_for_cell(&mut self) -> u16 {
+        self.sync_cursor_style();
+        let id = self.cursor_style.map_or(0, |(_, id)| id);
+        let index = self.pages.page_index(self.history.len() + self.cursor.row);
+        self.pages.pages[index].styles.retain(id);
+        self.rows[self.cursor.row].style_page = Some(self.pages.pages[index].serial);
+        id
+    }
+
+    fn acquire_style(
+        &mut self,
+        absolute: usize,
+        style: Style,
+        preferred: Option<u16>,
+    ) -> Result<u16, SetFull> {
+        let index = self.pages.page_index(absolute);
+        let acquire = |set: &mut StyleAdmission| match preferred {
+            Some(id) if id != 0 => set.acquire_with_id(style, id),
+            _ => set.acquire(style),
+        };
+        match acquire(&mut self.pages.pages[index].styles) {
+            Ok(id) => Ok(id),
+            Err(error) => {
+                if self
+                    .grow_style_page(index, error == SetFull::OutOfMemory)
+                    .is_err()
+                {
+                    self.split_style_page(absolute)?;
+                }
+                let index = self.pages.page_index(absolute);
+                acquire(&mut self.pages.pages[index].styles)
+            }
+        }
+    }
+
+    fn exact_style_range_bytes(&self, start: usize, end: usize, columns: u16) -> usize {
+        use crate::page_resources::BitmapAllocator;
+        use std::collections::HashSet;
+        let mut styles = HashSet::new();
+        let mut links = HashSet::new();
+        let mut linked_cells: usize = 0;
+        let mut grapheme_bytes = 0;
+        let mut string_bytes = 0;
+        for row in self.all_rows().skip(start).take(end - start) {
+            for cell in &row.cells {
+                if cell.style_id != 0 {
+                    styles.insert(cell.style_id);
+                }
+                let suffix = cell.text.chars().count().saturating_sub(1);
+                if suffix != 0 {
+                    grapheme_bytes += BitmapAllocator::<16>::bytes_required(suffix * 4).unwrap();
+                }
+                if let Some(uri) = &cell.hyperlink {
+                    linked_cells += 1;
+                    let uri = cell.hyperlink_raw.as_deref().unwrap_or(uri.as_bytes());
+                    if links.insert((cell.hyperlink_id.as_ref(), uri)) {
+                        string_bytes += BitmapAllocator::<32>::bytes_required(uri.len()).unwrap();
+                        if let Some(HyperlinkId::Explicit(id)) = &cell.hyperlink_id {
+                            string_bytes +=
+                                BitmapAllocator::<32>::bytes_required(id.len()).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        let set_capacity = |count: usize| {
+            if count == 0 {
+                0
+            } else {
+                ((count + 1) * 16).div_ceil(13)
+            }
+        };
+        let capacity = crate::page_layout::PageCapacity {
+            cols: columns,
+            rows: (end - start) as u16,
+            styles: set_capacity(styles.len()).min(u16::MAX as usize) as u16,
+            hyperlink_bytes: (set_capacity(links.len()).max(linked_cells.div_ceil(16))
+                * crate::page_layout::HYPERLINK_ITEM_SIZE) as u16,
+            grapheme_bytes: grapheme_bytes as u32,
+            string_bytes: string_bytes as u32,
+        };
+        capacity
+            .layout()
+            .map_or(usize::MAX, |layout| layout.total_size)
+    }
+
+    fn split_style_page(&mut self, absolute: usize) -> Result<(), SetFull> {
+        let index = self.pages.page_index(absolute);
+        let (page, relative) = self.pages.page_at(absolute);
+        let start = absolute - relative;
+        let end = start + usize::from(page.rows);
+        let above = self.exact_style_range_bytes(start, absolute + 1, page.columns);
+        let below = self.exact_style_range_bytes(absolute, end, page.columns);
+        let split = if above < below && absolute + 1 < end {
+            relative + 1
+        } else {
+            relative
+        };
+        let referenced_cursor = self.cursor_style.is_some();
+        if !self.pages.split(index, split as u16) {
+            return Err(SetFull::OutOfMemory);
+        }
+        if split != 0 {
+            for row in start + split..end {
+                self.sync_style_row(row);
+            }
+        }
+        if referenced_cursor {
+            self.sync_cursor_style();
+        }
+        Ok(())
+    }
+
+    fn rebuild_style_page<'a>(
+        page: &mut Page,
+        rows: impl Iterator<Item = &'a mut Row>,
+        grow: bool,
+    ) -> Result<(), SetFull> {
+        let mut capacity = page.capacity;
+        if grow {
+            let old = capacity.styles;
+            if old == u16::MAX {
+                return Err(SetFull::OutOfMemory);
+            }
+            capacity.styles = if old == 0 { 16 } else { old.saturating_mul(2) };
+            capacity.layout().map_err(|_| SetFull::OutOfMemory)?;
+            let used = page.styles.count() as u64;
+            if used != 0 && page.rows != 0 {
+                let density = used * u64::from(capacity.rows) / u64::from(page.rows);
+                let projected = (density + density / 4)
+                    .min(u64::from(old) * 32)
+                    .min(u64::from(u16::MAX)) as u16;
+                if projected > capacity.styles {
+                    let projected_capacity = crate::page_layout::PageCapacity {
+                        styles: projected,
+                        ..capacity
+                    };
+                    if projected_capacity.layout().is_ok() {
+                        capacity = projected_capacity;
+                    }
+                }
+            }
+        }
+        let serial = page.serial;
+        let mut styles = StyleAdmission::new(capacity.metadata().unwrap().styles_layout);
+        let mut pending_ids = Vec::new();
+        for row in rows.filter(|row| row.style_page == Some(serial)) {
+            for cell in &mut row.cells {
+                if cell.style_id != 0 {
+                    let id =
+                        styles.acquire_with_id(*page.styles.get(cell.style_id), cell.style_id)?;
+                    pending_ids.push((&mut cell.style_id, id));
+                }
+            }
+        }
+        // Reordering live entries can itself exhaust a collision chain. Until
+        // every admission succeeds, cell IDs must still address the old set.
+        for (target, id) in pending_ids {
+            *target = id;
+        }
+        page.capacity = capacity;
+        page.styles = styles;
+        Ok(())
+    }
+
+    fn grow_style_page(&mut self, index: usize, grow: bool) -> Result<(), SetFull> {
+        let serial = self.pages.pages[index].serial;
+        Self::rebuild_style_page(
+            &mut self.pages.pages[index],
+            self.history.iter_mut().chain(&mut self.rows),
+            grow,
+        )?;
+        if self.cursor_style.is_some_and(|(owner, _)| owner == serial) {
+            match self.pages.pages[index].styles.acquire(self.cursor.style) {
+                Ok(id) => self.cursor_style = Some((serial, id)),
+                Err(_) => {
+                    self.cursor_style = None;
+                    self.cursor.style = Style::default();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reflow_style(
+        &mut self,
+        output: &mut [Row],
+        line: &mut Row,
+        style: Style,
+        source_id: u16,
+    ) -> Result<u16, SetFull> {
+        let index = self.pages.page_index(output.len());
+        line.style_page = Some(self.pages.pages[index].serial);
+        if source_id == 0 {
+            return Ok(0);
+        }
+        match self.pages.pages[index]
+            .styles
+            .acquire_with_id(style, source_id)
+        {
+            Ok(id) => Ok(id),
+            Err(error) => {
+                Self::rebuild_style_page(
+                    &mut self.pages.pages[index],
+                    output.iter_mut().chain(std::iter::once(line)),
+                    error == SetFull::OutOfMemory,
+                )?;
+                self.pages.pages[index]
+                    .styles
+                    .acquire_with_id(style, source_id)
+            }
+        }
+    }
+
+    /// Rehome complete rows after physical page movement. Same-page rotations
+    /// keep their IDs; crossing a page copies with addWithId before releasing
+    /// the source. The direction follows the native copy operation.
+    pub(crate) fn sync_style_pages(&mut self, reverse: bool) {
+        let count = self.rows.len();
+        for offset in 0..count {
+            let absolute = self.history.len() + if reverse { count - 1 - offset } else { offset };
+            self.sync_style_row(absolute);
+        }
+        self.sync_cursor_style();
+    }
+
+    fn sync_style_row(&mut self, absolute: usize) {
+        let serial = self.pages.page_at(absolute).0.serial;
+        let row = self.all_rows().nth(absolute).unwrap();
+        if row.style_page == Some(serial) {
+            return;
+        }
+        let previous = row.style_page;
+        let old_styles = previous
+            .and_then(|serial| self.pages.pages.iter().find(|page| page.serial == serial))
+            .map(|page| &page.styles);
+        let styles: Vec<_> = row
+            .cells
+            .iter()
+            .map(|cell| {
+                let value = if cell.style_id != 0 {
+                    old_styles.map_or(cell.style, |set| *set.get(cell.style_id))
+                } else {
+                    Style::default()
+                };
+                (cell.style_id, value)
+            })
+            .collect();
+        let row = self.physical_row_mut(absolute);
+        row.style_page = Some(serial);
+        for cell in &mut row.cells {
+            cell.style_id = 0;
+        }
+        for (col, (old_id, style)) in styles.into_iter().enumerate() {
+            if old_id == 0 {
+                continue;
+            }
+            let id = self
+                .acquire_style(absolute, style, Some(old_id))
+                .unwrap_or(0);
+            self.physical_row_mut(absolute).cells[col].style_id = id;
+            if id == 0 {
+                self.physical_row_mut(absolute).cells[col].style = Style::default();
+            }
+            if let Some(previous) = previous {
+                self.release_style(previous, old_id);
+            }
+        }
+    }
+
+    pub(crate) fn prepare_row_copy(
+        &self,
+        source: usize,
+        recycled: Option<usize>,
+        columns: usize,
+        limit: usize,
+    ) -> RowCopy {
+        let source = &self.rows[source];
+        let recycled = recycled.map(|index| &self.rows[index]);
+        let mut row = source.clone();
+        let end = row.cells.len().min(columns).min(limit);
+        row.cells.truncate(end);
+        if end < columns {
+            if let Some(recycled) = recycled {
+                row.cells.extend_from_slice(&recycled.cells[end..columns]);
+            } else {
+                row.cells.resize(columns, Cell::default());
+            }
+            row.wrapped = recycled.is_some_and(|row| row.wrapped);
+            row.wrap_continuation = recycled.is_some_and(|row| row.wrap_continuation);
+        }
+        if columns > source.cells.len() {
+            row.cells[source.cells.len() - 1].spacer_head = false;
+        }
+        let styles = row
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(column, cell)| {
+                let owner = if column < end { Some(source) } else { recycled }
+                    .and_then(|row| row.style_page);
+                let value = if cell.style_id == 0 {
+                    Style::default()
+                } else {
+                    owner
+                        .and_then(|serial| {
+                            self.pages.pages.iter().find(|page| page.serial == serial)
+                        })
+                        .map_or(cell.style, |page| *page.styles.get(cell.style_id))
+                };
+                (owner, cell.style_id, value)
+            })
+            .collect();
+        RowCopy { row, styles }
+    }
+
+    /// A mixed-width IND row combines two source pages. Keep recycled cells
+    /// on their destination page before releasing displaced rows, then admit
+    /// the copied prefix. Page growth can now remap every retained live cell.
+    pub(crate) fn install_row_copies(
+        &mut self,
+        copies: Vec<(usize, RowCopy)>,
+        discarded: Option<Row>,
+    ) {
+        let mut pending = Vec::new();
+        let mut displaced = Vec::new();
+        for (y, mut copy) in copies {
+            let index = self.pages.page_index(self.history.len() + y);
+            let serial = self.pages.pages[index].serial;
+            copy.row.style_page = Some(serial);
+            for (cell, &(owner, id, _)) in copy.row.cells.iter_mut().zip(&copy.styles) {
+                if owner == Some(serial) {
+                    self.pages.pages[index].styles.retain(id);
+                } else {
+                    cell.style_id = 0;
+                }
+            }
+            displaced.push(std::mem::replace(&mut self.rows[y], copy.row));
+            pending.push((y, serial, copy.styles));
+        }
+        for row in displaced.iter().chain(discarded.iter()) {
+            self.release_row_styles(row);
+        }
+        for (y, serial, styles) in pending {
+            for (column, (owner, source_id, style)) in styles.into_iter().enumerate() {
+                if source_id == 0 || owner == Some(serial) {
+                    continue;
+                }
+                let id = self
+                    .acquire_style(self.history.len() + y, style, Some(source_id))
+                    .unwrap_or(0);
+                self.rows[y].cells[column].style_id = id;
+                if id == 0 {
+                    self.rows[y].cells[column].style = Style::default();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn copy_row_cells(
+        &mut self,
+        source: usize,
+        destination: usize,
+        start: usize,
+        end: usize,
+        background: Color,
+    ) {
+        let end = end.min(self.rows[destination].cells.len());
+        if start >= end {
+            return;
+        }
+        let source_index = self.pages.page_index(self.history.len() + source);
+        let source_serial = self.pages.pages[source_index].serial;
+        let destination_serial = self
+            .pages
+            .page_at(self.history.len() + destination)
+            .0
+            .serial;
+        let cells: Vec<_> = (start..end)
+            .map(|col| {
+                let cell = self.rows[source]
+                    .cells
+                    .get(col)
+                    .cloned()
+                    .unwrap_or_else(|| Cell::blank(background));
+                let style = if cell.style_id == 0 {
+                    Style::default()
+                } else {
+                    *self.pages.pages[source_index].styles.get(cell.style_id)
+                };
+                (cell, style)
+            })
+            .collect();
+        self.edit_row(destination, |row| {
+            row.cells[start..end].fill(Cell::default())
+        });
+        for (offset, (mut cell, style)) in cells.into_iter().enumerate() {
+            if cell.style_id != 0 {
+                let index = self.pages.page_index(self.history.len() + destination);
+                if source_serial == destination_serial {
+                    self.pages.pages[index].styles.retain(cell.style_id);
+                } else {
+                    cell.style_id = self
+                        .acquire_style(self.history.len() + destination, style, Some(cell.style_id))
+                        .unwrap_or(0);
+                    if cell.style_id == 0 {
+                        cell.style = Style::default();
+                    }
+                }
+            }
+            self.rows[destination].cells[start + offset] = cell;
+        }
+        self.edit_row(destination, |row| row.repair_wide(background));
+    }
+
+    fn resize_owned_columns(
+        &mut self,
+        contents: &mut [Row],
+        columns: usize,
+        old_columns: usize,
+        spacer_heads: &[bool],
+    ) {
+        let old_pages = self.pages.clone();
+        for row in &mut *contents {
+            let mut counts: HashMap<u16, isize> = HashMap::new();
+            for cell in &row.cells {
+                if cell.style_id != 0 {
+                    *counts.entry(cell.style_id).or_default() -= 1;
+                }
+            }
+            row.cells.resize(columns, Cell::default());
+            row.repair_wide(Color::Default);
+            if columns > old_columns {
+                row.wrapped = false;
+            }
+            for cell in &row.cells {
+                if cell.style_id != 0 {
+                    *counts.entry(cell.style_id).or_default() += 1;
+                }
+            }
+            if let Some(serial) = row.style_page {
+                for (id, count) in counts {
+                    for _ in 0..-count {
+                        self.release_style(serial, id);
+                    }
+                }
+            }
+        }
+        self.pages.resize_columns(columns as u16, spacer_heads);
+        Self::rehome_contents(&mut self.pages, contents, &old_pages);
+    }
+
+    fn rehome_contents(pages: &mut PageList, contents: &mut [Row], old_pages: &PageList) {
+        for absolute in 0..contents.len() {
+            let index = pages.page_index(absolute);
+            let serial = pages.pages[index].serial;
+            let row = &mut contents[absolute];
+            if row.style_page == Some(serial) {
+                continue;
+            }
+            let previous = row.style_page;
+            let source =
+                previous.and_then(|owner| old_pages.pages.iter().find(|page| page.serial == owner));
+            let styles: Vec<_> = row
+                .cells
+                .iter_mut()
+                .map(|cell| {
+                    let id = std::mem::take(&mut cell.style_id);
+                    (
+                        id,
+                        if id == 0 {
+                            Style::default()
+                        } else {
+                            source.map_or(cell.style, |page| *page.styles.get(id))
+                        },
+                    )
+                })
+                .collect();
+            row.style_page = Some(serial);
+            for (col, (source_id, style)) in styles.into_iter().enumerate() {
+                if source_id == 0 {
+                    continue;
+                }
+                let acquired = pages.pages[index].styles.acquire_with_id(style, source_id);
+                let id = match acquired {
+                    Ok(id) => id,
+                    Err(error) => Self::rebuild_style_page(
+                        &mut pages.pages[index],
+                        contents.iter_mut(),
+                        error == SetFull::OutOfMemory,
+                    )
+                    .and_then(|()| pages.pages[index].styles.acquire_with_id(style, source_id))
+                    .unwrap_or(0),
+                };
+                contents[absolute].cells[col].style_id = id;
+                if id == 0 {
+                    contents[absolute].cells[col].style = Style::default();
+                }
+                if let Some(owner) = previous
+                    && let Some(page) = pages.pages.iter_mut().find(|page| page.serial == owner)
+                {
+                    page.styles.release(source_id);
+                }
+            }
+        }
+    }
+
     pub(crate) fn blank_row(&mut self, cols: usize, background: Color) -> Row {
         let id = self.next_row;
         self.next_row = self.next_row.wrapping_add(1);
@@ -677,22 +1389,32 @@ impl Screen {
     }
 
     pub(crate) fn extend_physical_row(&mut self, row: usize, columns: usize) {
-        let absolute = self.history.len() + row;
+        let history = self.history.len();
+        let absolute = history + row;
         let columns = columns.max(usize::from(self.pages.page_at(absolute).0.columns));
+        self.release_cursor_style();
+        let old_pages = self.pages.clone();
         let range = self.pages.extend_page(absolute, columns as u16);
-        for row in self
-            .history
-            .iter_mut()
-            .chain(&mut self.rows)
-            .skip(range.start)
-            .take(range.len())
-        {
+        let mut contents: Vec<_> = self.history.drain(..).chain(self.rows.drain(..)).collect();
+        for row in &mut contents[range.clone()] {
+            let old_ids: Vec<_> = row.cells.iter().map(|cell| cell.style_id).collect();
             row.cells.resize(columns, Cell::default());
             row.repair_wide(Color::Default);
+            if let Some(serial) = row.style_page {
+                for (old_id, cell) in old_ids.into_iter().zip(&row.cells) {
+                    if old_id != cell.style_id {
+                        self.release_style(serial, old_id);
+                    }
+                }
+            }
         }
-        if range.start < self.history.len() {
+        Self::rehome_contents(&mut self.pages, &mut contents, &old_pages);
+        self.rows = contents.split_off(history);
+        self.history = contents.into();
+        if range.start < history {
             self.history_bytes = self.history.iter().map(Row::storage_bytes).sum();
         }
+        self.sync_cursor_style();
     }
 
     pub(crate) fn split_cell_boundary(&mut self, col: usize) {
@@ -701,33 +1423,30 @@ impl Screen {
         let background = self.cursor.style.background;
         if col >= cols {
             if col == cols && self.rows[y].wrapped && self.rows[y].cells[cols - 1].spacer_head {
-                self.rows[y].erase(cols - 1, cols, background, false);
+                self.erase_row_cells(y, cols - 1, cols, background, false);
             }
             return;
         }
         if col <= 1 && self.rows[y].cells[0].width == 2 {
-            let previous = if y > 0 {
-                self.rows.get_mut(y - 1)
-            } else {
-                // This is the only edit path that can mutate a historical row.
-                self.history.back_mut()
-            };
-            if let Some(previous) = previous
-                && previous.wrapped
-                && previous.cells.last().is_some_and(|cell| cell.spacer_head)
-            {
-                let before = previous.storage_bytes();
-                let width = previous.cells.len();
-                previous.erase(width - 1, width, background, false);
-                if y == 0 {
-                    self.history_bytes = self
-                        .history_bytes
-                        .saturating_sub(before.saturating_sub(previous.storage_bytes()));
+            let absolute = self.history.len() + y;
+            if absolute > 0 {
+                let previous = self.all_rows().nth(absolute - 1).unwrap();
+                if previous.wrapped && previous.cells.last().is_some_and(|cell| cell.spacer_head) {
+                    let before = previous.storage_bytes();
+                    self.edit_physical_row(absolute - 1, |previous| {
+                        let width = previous.cells.len();
+                        previous.erase(width - 1, width, background, false);
+                    });
+                    if y == 0 {
+                        self.history_bytes = self.history_bytes.saturating_sub(
+                            before.saturating_sub(self.history.back().unwrap().storage_bytes()),
+                        );
+                    }
                 }
             }
         }
         if col > 0 && self.rows[y].cells[col - 1].width == 2 {
-            self.rows[y].erase(col - 1, col + 1, background, false);
+            self.erase_row_cells(y, col - 1, col + 1, background, false);
         }
     }
 
@@ -766,6 +1485,7 @@ impl Screen {
 
     pub(crate) fn push_history(&mut self, row: Row) {
         if self.limits.bytes == Some(0) {
+            self.release_row_styles(&row);
             self.discard_row(row.id);
             return;
         }
@@ -827,6 +1547,7 @@ impl Screen {
     fn discard_history_prefix(&mut self, count: usize) {
         for _ in 0..count {
             let row = self.history.pop_front().unwrap();
+            self.release_row_styles(&row);
             self.history_bytes = self.history_bytes.saturating_sub(row.storage_bytes());
             self.discard_row(row.id);
         }
@@ -871,17 +1592,12 @@ impl Screen {
                 (start, self.history.len() + self.rows.len())
             }
         };
-        for row in self
-            .history
-            .iter_mut()
-            .chain(&mut self.rows)
-            .skip(start)
-            .take(end - start)
-        {
-            // Native resize temporarily releases the cursor style before
-            // clearing, so these cells have the default background.
-            row.cells.fill(Cell::default());
-            row.dirty = true;
+        for absolute in start..end {
+            self.edit_physical_row(absolute, |row| {
+                // Native resize releases the cursor style before clearing.
+                row.cells.fill(Cell::default());
+                row.dirty = true;
+            });
         }
         if start < self.history.len() {
             self.history_bytes = self.history.iter().map(Row::storage_bytes).sum();
@@ -889,6 +1605,7 @@ impl Screen {
     }
 
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
+        self.release_cursor_style();
         let old_cols = self.columns;
         let columns_changed = cols != old_cols;
         if columns_changed {
@@ -1036,13 +1753,27 @@ impl Screen {
                             col: x,
                         }),
                     );
+                    let source_style = if cell.style_id == 0 {
+                        Style::default()
+                    } else {
+                        *source_page.styles.get(cell.style_id)
+                    };
+                    let native_id = self
+                        .reflow_style(&mut output, &mut line, source_style, cell.style_id)
+                        .unwrap_or(0);
                     let mut cell = cell.clone();
+                    cell.style_id = native_id;
+                    if native_id == 0 && source_style != Style::default() {
+                        cell.style = Style::default();
+                    }
                     if cols == 1 && cell.width == 2 {
                         cell.text.clear();
                     }
                     cell.width = width as u8;
                     line.cells[x] = cell.clone();
                     if width == 2 {
+                        let index = self.pages.page_index(output.len());
+                        self.pages.pages[index].styles.retain(cell.style_id);
                         cell.text.clear();
                         cell.width = 0;
                         line.cells[x + 1] = cell;
@@ -1104,7 +1835,8 @@ impl Screen {
                         && r.semantic == SemanticContent::Output
                 })
             {
-                output.pop();
+                let row = output.pop().unwrap();
+                self.release_row_styles(&row);
             }
             if self.pages.total_rows() > output.len() {
                 self.pages.truncate(output.len());
@@ -1148,14 +1880,7 @@ impl Screen {
                     has_head
                 })
                 .collect();
-            self.pages.resize_columns(cols as u16, &spacer_heads);
-            for row in &mut contents {
-                row.cells.resize(cols, Cell::default());
-                row.repair_wide(Color::Default);
-                if cols > old_cols {
-                    row.wrapped = false;
-                }
-            }
+            self.resize_owned_columns(&mut contents, cols, old_cols, &spacer_heads);
             mapped_cursor.col = mapped_cursor.col.min(cols - 1);
         }
         if !height_first {
@@ -1252,7 +1977,8 @@ impl Screen {
                     && r.cells.iter().all(|c| c.text.is_empty())
             })
         {
-            contents.pop();
+            let row = contents.pop().unwrap();
+            self.release_row_styles(&row);
             trim -= 1;
         }
         if self.pages.total_rows() > contents.len() {
@@ -1273,9 +1999,194 @@ impl Screen {
         let width = usize::from(self.pages.pages.back().unwrap().columns);
         contents.push(self.blank_row(width, Color::Default));
         for row in contents.drain(..removed) {
+            self.release_row_styles(&row);
             self.discard_row(row.id);
         }
     }
 }
 
 type GridPointKey = (u64, usize);
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+    use crate::Terminal;
+    use crate::page_layout::PageCapacity;
+
+    #[test]
+    fn failed_style_rebuild_preserves_original_ids_and_references() {
+        let rgb = |value: u32| Style {
+            foreground: Color::Rgb(value as u8, (value >> 8) as u8, (value >> 16) as u8),
+            ..Style::default()
+        };
+        let ordinary = (0..)
+            .map(rgb)
+            .find(|style| style.native_hash() & 127 > 32)
+            .unwrap();
+        let colliding: Vec<_> = (0..)
+            .map(rgb)
+            .filter(|style| style.native_hash() & 255 == 0)
+            .take(32)
+            .collect();
+        let capacity = PageCapacity {
+            cols: 80,
+            rows: 2,
+            ..PageCapacity::STANDARD
+        };
+        let mut pages = PageList::default();
+        pages.append(capacity, 2);
+        let mut original = pages.pages.pop_front().unwrap();
+        let ordinary_id = original.styles.acquire(ordinary).unwrap();
+        let mut rows = [
+            Row::new(0, 80, Color::Default),
+            Row::new(1, 80, Color::Default),
+        ];
+        for row in &mut rows {
+            row.style_page = Some(original.serial);
+        }
+        for (cell, style) in rows[0].cells.iter_mut().zip(colliding) {
+            cell.style = style;
+            cell.style_id = original.styles.acquire(style).unwrap();
+        }
+        rows[1].cells[0].style = ordinary;
+        rows[1].cells[0].style_id = ordinary_id;
+        let ids: Vec<_> = rows
+            .iter()
+            .flat_map(|row| row.cells.iter().map(|cell| cell.style_id))
+            .collect();
+
+        // The original admission order fits. Cloning in row order reaches
+        // PSL31 before the final noncolliding style, at either table size.
+        for grow in [false, true] {
+            let mut page = original.clone();
+            let mut copied_rows = rows.clone();
+            assert_eq!(
+                Screen::rebuild_style_page(&mut page, copied_rows.iter_mut(), grow),
+                Err(SetFull::OutOfMemory)
+            );
+            assert_eq!(page.capacity, capacity);
+            assert_eq!(
+                copied_rows
+                    .iter()
+                    .flat_map(|row| row.cells.iter().map(|cell| cell.style_id))
+                    .collect::<Vec<_>>(),
+                ids
+            );
+            for cell in copied_rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .filter(|cell| cell.style_id != 0)
+            {
+                assert_eq!(*page.styles.get(cell.style_id), cell.style);
+                assert_eq!(page.styles.reference_count(cell.style_id), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn viewport_keeps_resolved_styles_without_allocating_live_tables() {
+        let mut terminal = Terminal::new(8, 2, 20);
+        let page = &mut terminal.screen_mut().pages.pages[0];
+        page.capacity.styles = u16::MAX;
+        page.styles = StyleAdmission::new(page.capacity.metadata().unwrap().styles_layout);
+        terminal.feed(b"\x1b[1;31mred word\x1b[0m");
+        let before = crate::snapshot::encode_to_vec(&terminal).unwrap();
+        let source = terminal.screen();
+        assert_eq!(source.pages.pages[0].styles.allocated_buckets(), 65536);
+
+        let viewport = source.snapshot_viewport();
+        assert_eq!(viewport.pages.pages[0].styles.allocated_buckets(), 0);
+        assert_eq!(
+            viewport.pages.pages[0].capacity,
+            source.pages.pages[0].capacity
+        );
+        assert_eq!(viewport.pages.pages[0].rows, source.pages.pages[0].rows);
+        for (row, original) in viewport.rows.iter().zip(&source.rows) {
+            assert_eq!(row.cells, original.cells);
+            assert_eq!(row.style_page, None);
+            assert!(row.cells.iter().all(|cell| cell.style_id == 0));
+        }
+        let point = viewport.point(0, 1).unwrap();
+        assert_eq!(
+            viewport.select_word(point, crate::selection::DEFAULT_WORD_BOUNDARIES),
+            source.select_word(point, crate::selection::DEFAULT_WORD_BOUNDARIES)
+        );
+        assert_eq!(
+            viewport.search_literal(b"red"),
+            source.search_literal(b"red")
+        );
+        assert_eq!(crate::snapshot::encode_to_vec(&terminal).unwrap(), before);
+        assert_references(source);
+    }
+
+    fn assert_references(screen: &Screen) {
+        let mut expected: HashMap<(u64, u16), usize> = HashMap::new();
+        for (absolute, row) in screen.all_rows().enumerate() {
+            let serial = screen.pages.page_at(absolute).0.serial;
+            for cell in &row.cells {
+                if cell.style_id != 0 {
+                    assert_eq!(row.style_page, Some(serial));
+                    *expected.entry((serial, cell.style_id)).or_default() += 1;
+                }
+            }
+        }
+        if let Some((serial, id)) = screen.cursor_style {
+            assert_eq!(
+                serial,
+                screen
+                    .pages
+                    .page_at(screen.history.len() + screen.cursor.row)
+                    .0
+                    .serial
+            );
+            *expected.entry((serial, id)).or_default() += 1;
+        }
+        for page in &screen.pages.pages {
+            for (id, _) in page.styles.iter() {
+                assert_eq!(
+                    usize::from(page.styles.reference_count(id)),
+                    expected.remove(&(page.serial, id)).unwrap_or(0),
+                    "page {} style {id}",
+                    page.serial
+                );
+            }
+        }
+        assert!(expected.is_empty(), "cells referenced a dead style");
+    }
+
+    #[test]
+    fn live_style_references_survive_grid_edits_and_resize() {
+        for columns in [8, 80, 1024] {
+            let mut terminal = Terminal::with_limits(columns, 4, ScrollbackLimits::default());
+            for value in 0..160 {
+                terminal.feed(format!("\x1b[38;2;{value};0;0mX").as_bytes());
+            }
+            for sequence in [
+                b"\x1b[H\x1b[2@".as_slice(),
+                b"\x1b[2P",
+                b"\x1b[2X",
+                b"\x1b[2S",
+                b"\x1b[2T",
+                b"\x1b[2;4r\x1b[4;1H\n",
+                b"\x1b[r\x1b[H\x1b[44m\x1b[2J",
+                b"\x1b#8",
+                b"\x1b[22J",
+                b"\x1b[3J",
+            ] {
+                terminal.feed(sequence);
+                assert_references(terminal.screen());
+            }
+            for width in [12, 3, 32, columns] {
+                terminal.resize(width, 5);
+                assert_references(terminal.screen());
+                terminal.feed(b"\x1b[1;31mwide:\xe7\x95\x8c\x1b[0m\r\n");
+                assert_references(terminal.screen());
+            }
+            terminal.feed(b"\x1b[?7l");
+            for width in [3, 20, columns] {
+                terminal.resize(width, 3);
+                assert_references(terminal.screen());
+            }
+        }
+    }
+}

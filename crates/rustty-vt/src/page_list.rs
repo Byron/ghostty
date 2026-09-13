@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::page_layout::PageCapacity;
+use crate::page_resources::StyleAdmission;
 use crate::screen::ScrollbackLimits;
 
 /// A live page's physical dimensions and charged native allocation.
@@ -22,6 +23,7 @@ pub(crate) struct Page {
     pub columns: u16,
     pub rows: u16,
     pub serial: u64,
+    pub styles: StyleAdmission,
 }
 
 impl Page {
@@ -93,6 +95,16 @@ impl PageList {
         panic!("row is outside the page list");
     }
 
+    pub fn page_index(&self, mut row: usize) -> usize {
+        for (index, page) in self.pages.iter().enumerate() {
+            if row < usize::from(page.rows) {
+                return index;
+            }
+            row -= usize::from(page.rows);
+        }
+        panic!("row is outside the page list");
+    }
+
     pub fn append(&mut self, capacity: PageCapacity, rows: u16) {
         assert!(rows <= capacity.rows);
         self.pages.push_back(Page {
@@ -100,6 +112,7 @@ impl PageList {
             columns: capacity.cols,
             rows,
             serial: self.next_serial,
+            styles: StyleAdmission::new(capacity.metadata().unwrap().styles_layout),
         });
         self.next_serial = self.next_serial.wrapping_add(1);
     }
@@ -111,8 +124,29 @@ impl PageList {
             columns: capacity.cols,
             rows,
             serial: self.next_serial,
+            styles: StyleAdmission::new(capacity.metadata().unwrap().styles_layout),
         });
         self.next_serial = self.next_serial.wrapping_add(1);
+    }
+
+    pub fn split(&mut self, index: usize, row: u16) -> bool {
+        let source = &self.pages[index];
+        if source.rows <= 1 {
+            return false;
+        }
+        if row == 0 {
+            return true;
+        }
+        assert!(row < source.rows);
+        let columns = source.columns;
+        let count = source.rows - row;
+        let capacity = source.capacity;
+        self.append(capacity, count);
+        let mut target = self.pages.pop_back().unwrap();
+        target.columns = columns;
+        self.pages[index].rows = row;
+        self.pages.insert(index + 1, target);
+        true
     }
 
     pub fn effective_limits(
@@ -203,8 +237,6 @@ impl PageList {
                 count -= usize::from(self.pages.pop_front().unwrap().rows);
             } else {
                 page.rows -= count as u16;
-                page.serial = self.next_serial;
-                self.next_serial = self.next_serial.wrapping_add(1);
                 count = 0;
             }
         }
@@ -219,14 +251,13 @@ impl PageList {
                 remove -= usize::from(self.pages.pop_back().unwrap().rows);
             } else {
                 page.rows -= remove as u16;
-                page.serial = self.next_serial;
-                self.next_serial = self.next_serial.wrapping_add(1);
                 remove = 0;
             }
         }
     }
 
-    /// Copy a contiguous range using its existing page boundaries.
+    /// Copy allocation metadata for a detached viewport, preserving its page
+    /// boundaries without allocating the live page's resource tables.
     pub fn clone_range(&self, start: usize, rows: usize) -> Self {
         let mut result = Self::default();
         let mut offset = 0;
@@ -234,8 +265,14 @@ impl PageList {
             let end = offset + usize::from(page.rows);
             let count = end.min(start + rows).saturating_sub(offset.max(start));
             if count > 0 {
-                result.append(page.capacity, count as u16);
-                result.pages.back_mut().unwrap().columns = page.columns;
+                result.pages.push_back(Page {
+                    capacity: page.capacity,
+                    columns: page.columns,
+                    rows: count as u16,
+                    serial: result.next_serial,
+                    styles: StyleAdmission::default(),
+                });
+                result.next_serial = result.next_serial.wrapping_add(1);
             }
             offset = end;
         }

@@ -436,8 +436,10 @@ impl Terminal {
         self.primary
             .resize(cols.into(), rows.into(), self.modes.dec(7));
         self.primary.clear_prompt_for_redraw(prompt_redraw);
+        self.primary.sync_cursor_style();
         if let Some(alt) = &mut self.alternate {
             alt.resize(cols.into(), rows.into(), false);
+            alt.sync_cursor_style();
         }
         if cols != self.cols {
             self.tabstops = (0..cols).map(|i| i > 0 && i % 8 == 0).collect();
@@ -675,6 +677,7 @@ impl Terminal {
     }
 
     pub(crate) fn changed(&mut self) {
+        self.screen_mut().sync_cursor_style();
         self.generation = self.generation.wrapping_add(1);
     }
     fn reset_margins(&mut self) {
@@ -957,16 +960,17 @@ impl Terminal {
                 // Widening writes a spacer tail, which consumes the shift.
                 self.screen_mut().charset.single = None;
             }
-            let row = &mut self.screen_mut().rows[cursor.row];
-            row.cells[col].width = width;
-            if col < right {
-                row.cells[col + 1] = Cell::blank(cursor.style.background);
-                if width == 2 {
-                    row.cells[col + 1] = row.cells[col].clone();
-                    row.cells[col + 1].text.clear();
-                    row.cells[col + 1].width = 0;
+            self.screen_mut().edit_row(cursor.row, |row| {
+                row.cells[col].width = width;
+                if col < right {
+                    row.cells[col + 1] = Cell::blank(cursor.style.background);
+                    if width == 2 {
+                        row.cells[col + 1] = row.cells[col].clone();
+                        row.cells[col + 1].text.clear();
+                        row.cells[col + 1].width = 0;
+                    }
                 }
-            }
+            });
         }
         let row = self.screen().cursor.row;
         self.screen_mut().rows[row].cells[col].text.push(cp);
@@ -998,14 +1002,20 @@ impl Terminal {
             previous.cells.last_mut().unwrap().spacer_head = false;
             previous.dirty = true;
         }
-        let row = &mut self.screen_mut().rows[cursor.row];
-        row.erase(
+        self.screen_mut().erase_row_cells(
+            cursor.row,
             cursor.col,
             cursor.col + width as usize,
             cursor.style.background,
             false,
         );
+        let style_id = self.screen_mut().retain_cursor_style_for_cell();
+        if width == 2 {
+            self.screen_mut().retain_cursor_style_for_cell();
+        }
+        let row = &mut self.screen_mut().rows[cursor.row];
         let cell = Cell {
+            style_id,
             text,
             width,
             style: cursor.style,
@@ -1205,32 +1215,12 @@ impl Terminal {
         let m = self.margins;
         let cols = usize::from(self.cols);
         let full = m.left == 0 && m.right == cols - 1;
-        // Native cross-page copies keep the destination's physical width.
-        // Partial copies also retain its recycled suffix and wrap flags.
-        let copy_row = |row: &Row, recycled: Option<&Row>, columns: usize, limit: usize| {
-            let mut copied = row.clone();
-            let end = copied.cells.len().min(columns).min(limit);
-            copied.cells.truncate(end);
-            if end < columns {
-                if let Some(recycled) = recycled {
-                    copied
-                        .cells
-                        .extend_from_slice(&recycled.cells[end..columns]);
-                } else {
-                    copied.cells.resize(columns, Cell::default());
-                }
-                copied.wrapped = recycled.is_some_and(|row| row.wrapped);
-                copied.wrap_continuation = recycled.is_some_and(|row| row.wrap_continuation);
-            }
-            if columns > row.cells.len() {
-                copied.cells[row.cells.len() - 1].spacer_head = false;
-            }
-            copied
-        };
         if full && self.rows == 1 && self.screen().limits.bytes == Some(0) {
             let screen = self.screen_mut();
-            let row = &mut screen.rows[0];
-            *row = Row::new(row.id, row.cells.len(), screen.cursor.style.background);
+            let background = screen.cursor.style.background;
+            screen.edit_row(0, |row| {
+                *row = Row::new(row.id, row.cells.len(), background)
+            });
             return;
         }
         if !full || (m.top == 0 && (self.screen().limits.bytes != Some(0) || m.bottom == 0)) {
@@ -1258,6 +1248,7 @@ impl Terminal {
                 // list. At each boundary, native code copies into that page's
                 // recycled last row (or a fresh blank row after growing).
                 let mut page_start = 0;
+                let mut copies = Vec::new();
                 for page in &screen.pages.pages {
                     let page_end = page_start + usize::from(page.rows);
                     if page_start > bottom {
@@ -1265,16 +1256,21 @@ impl Terminal {
                         let columns = usize::from(page.columns);
                         let row = &screen.rows[target];
                         if row.cells.len() != columns || cols < columns {
-                            screen.rows[target] = copy_row(
-                                row,
-                                screen.rows.get(page_end - screen.history.len()),
-                                columns,
-                                cols,
-                            );
+                            copies.push((
+                                target,
+                                screen.prepare_row_copy(
+                                    target,
+                                    (page_end - screen.history.len() < screen.rows.len())
+                                        .then_some(page_end - screen.history.len()),
+                                    columns,
+                                    cols,
+                                ),
+                            ));
                         }
                     }
                     page_start = page_end;
                 }
+                screen.install_row_copies(copies, None);
             }
             return;
         }
@@ -1298,8 +1294,11 @@ impl Terminal {
                     let columns = usize::from(page.columns);
                     let row = &screen.rows[source];
                     if row.cells.len() != columns {
-                        let recycled = &screen.rows[page_start.max(top) - screen.history.len()];
-                        copies.push((source - 1, copy_row(row, Some(recycled), columns, columns)));
+                        let recycled = page_start.max(top) - screen.history.len();
+                        copies.push((
+                            source - 1,
+                            screen.prepare_row_copy(source, Some(recycled), columns, columns),
+                        ));
                     }
                 }
                 page_start = page_end;
@@ -1325,10 +1324,9 @@ impl Terminal {
         );
         let row = screen.rows.remove(m.top);
         screen.rows.insert(m.bottom, blank);
-        for (row, copy) in copies {
-            screen.rows[row] = copy;
-        }
         screen.discard_row(row.id);
+        screen.install_row_copies(copies, Some(row));
+        screen.sync_style_pages(false);
     }
 
     fn scroll_up(&mut self, count: usize, history: bool) {
@@ -1393,13 +1391,16 @@ impl Terminal {
                 if shift_history {
                     screen.push_history(row);
                 } else {
+                    screen.release_row_styles(&row);
                     screen.discard_row(row.id);
                 }
+                screen.sync_style_pages(false);
             } else {
                 for y in m.top..m.bottom {
                     self.copy_row_region(y + 1, y, m.left, m.right + 1, bg);
                 }
-                self.screen_mut().rows[m.bottom].erase(m.left, m.right + 1, bg, false);
+                self.screen_mut()
+                    .erase_row_cells(m.bottom, m.left, m.right + 1, bg, false);
             }
         }
         self.clamp_cursor();
@@ -1430,13 +1431,16 @@ impl Terminal {
                     .collect();
                 screen.remap_grid_rows(&pins);
                 let row = screen.rows.remove(m.bottom);
+                screen.release_row_styles(&row);
                 screen.discard_row(row.id);
                 screen.rows.insert(m.top, blank);
+                screen.sync_style_pages(true);
             } else {
                 for y in (m.top + 1..=m.bottom).rev() {
                     self.copy_row_region(y - 1, y, m.left, m.right + 1, bg);
                 }
-                self.screen_mut().rows[m.top].erase(m.left, m.right + 1, bg, false);
+                self.screen_mut()
+                    .erase_row_cells(m.top, m.left, m.right + 1, bg, false);
             }
         }
         self.clamp_cursor();
@@ -1477,22 +1481,8 @@ impl Terminal {
         end: usize,
         background: Color,
     ) {
-        let end = end.min(self.screen().rows[destination].cells.len());
-        if start >= end {
-            return;
-        }
-        let source = &self.screen().rows[source].cells;
-        let cells: Vec<_> = (start..end)
-            .map(|col| {
-                source
-                    .get(col)
-                    .cloned()
-                    .unwrap_or_else(|| Cell::blank(background))
-            })
-            .collect();
-        let destination = &mut self.screen_mut().rows[destination];
-        destination.cells[start..end].clone_from_slice(&cells);
-        destination.repair_wide(background);
+        self.screen_mut()
+            .copy_row_cells(source, destination, start, end, background);
     }
 
     fn tab(&mut self, count: usize, backward: bool) {
@@ -1534,10 +1524,11 @@ impl Terminal {
         }
         let end = (self.margins.right + 1).min(self.screen().rows[cur.row].cells.len());
         let count = count.max(1).min(end - cur.col);
-        let row = &mut self.screen_mut().rows[cur.row];
-        row.cells[cur.col..end].rotate_right(count);
-        row.cells[cur.col..cur.col + count].fill(Cell::blank(cur.style.background));
-        row.repair_wide(cur.style.background);
+        self.screen_mut().edit_row(cur.row, |row| {
+            row.cells[cur.col..end].rotate_right(count);
+            row.cells[cur.col..cur.col + count].fill(Cell::blank(cur.style.background));
+            row.repair_wide(cur.style.background);
+        });
         self.changed();
     }
 
@@ -1551,11 +1542,12 @@ impl Terminal {
         self.screen_mut().split_cell_boundary(cur.col);
         self.screen_mut().split_cell_boundary(cur.col + count);
         self.screen_mut().split_cell_boundary(end);
-        let row = &mut self.screen_mut().rows[cur.row];
-        row.cells[cur.col..end].rotate_left(count);
-        row.cells[end - count..end].fill(Cell::blank(cur.style.background));
-        row.repair_wide(cur.style.background);
-        row.wrapped = false;
+        self.screen_mut().edit_row(cur.row, |row| {
+            row.cells[cur.col..end].rotate_left(count);
+            row.cells[end - count..end].fill(Cell::blank(cur.style.background));
+            row.repair_wide(cur.style.background);
+            row.wrapped = false;
+        });
         self.screen_mut().cursor.pending_wrap = false;
         self.changed();
     }
@@ -1570,10 +1562,15 @@ impl Terminal {
             2 => (0, cols),
             _ => return,
         };
-        let row = &mut self.screen_mut().rows[cursor.row];
-        row.erase(start, end, cursor.style.background, protected);
+        self.screen_mut().erase_row_cells(
+            cursor.row,
+            start,
+            end,
+            cursor.style.background,
+            protected,
+        );
         if mode != 1 {
-            row.wrapped = false;
+            self.screen_mut().rows[cursor.row].wrapped = false;
         }
         self.screen_mut().cursor.pending_wrap = false;
         self.changed();
@@ -1616,8 +1613,10 @@ impl Terminal {
             }
             _ => return,
         };
-        for row in &mut self.screen_mut().rows[start..end] {
-            row.erase(0, row.cells.len(), cursor.style.background, protected);
+        for y in start..end {
+            self.screen_mut()
+                .erase_row_cells(y, 0, usize::MAX, cursor.style.background, protected);
+            let row = &mut self.screen_mut().rows[y];
             if !protected {
                 row.wrapped = false;
                 row.wrap_continuation = false;
@@ -1683,9 +1682,9 @@ impl Terminal {
         let screen = self.screen_mut();
         // DECRC restores only saved attributes. Hyperlinks, semantic content,
         // and cursor appearance retain their current state.
+        screen.set_cursor_style(saved.cursor.style);
         screen.cursor.col = saved.cursor.col.min(cols - 1);
         screen.cursor.row = saved.cursor.row.min(rows - 1);
-        screen.cursor.style = saved.cursor.style;
         screen.cursor.protected = saved.cursor.protected;
         screen.cursor.pending_wrap = saved.cursor.pending_wrap;
         screen.charset = saved.charset;
@@ -1862,17 +1861,32 @@ impl Terminal {
                     background: self.screen().cursor.style.background,
                     ..Style::default()
                 };
+                self.screen_mut().release_cursor_style();
                 self.screen_mut().cursor.style = style;
+                self.screen_mut().sync_cursor_style();
                 self.modes.set(true, 6, false);
                 self.reset_margins();
-                for row in &mut self.screen_mut().rows {
-                    for cell in &mut row.cells {
-                        *cell = Cell {
-                            text: "E".into(),
-                            style,
-                            ..Cell::default()
-                        };
+                self.cursor_position(1, 1);
+                for y in 0..usize::from(self.rows) {
+                    self.screen_mut()
+                        .erase_row_cells(y, 0, usize::MAX, Color::Default, false);
+                }
+                for y in 0..usize::from(self.rows) {
+                    self.screen_mut().cursor.row = y;
+                    self.screen_mut().sync_cursor_style();
+                    let count = self.screen().rows[y].cells.len();
+                    let mut style_id = 0;
+                    for _ in 0..count {
+                        style_id = self.screen_mut().retain_cursor_style_for_cell();
                     }
+                    let style = self.screen().cursor.style;
+                    let row = &mut self.screen_mut().rows[y];
+                    row.cells.fill(Cell {
+                        style_id,
+                        text: "E".into(),
+                        style,
+                        ..Cell::default()
+                    });
                     row.wrapped = false;
                     row.wrap_continuation = false;
                     row.semantic = SemanticContent::Output;
@@ -1990,7 +2004,8 @@ impl Terminal {
                 let end = cur.col.saturating_add(count).min(self.cols as usize);
                 self.screen_mut().split_cell_boundary(cur.col);
                 self.screen_mut().split_cell_boundary(end);
-                self.screen_mut().rows[cur.row].erase(
+                self.screen_mut().erase_row_cells(
+                    cur.row,
                     cur.col,
                     end,
                     cur.style.background,
@@ -2037,7 +2052,7 @@ impl Terminal {
                 }
             }
             ([], b'm') => {
-                sgr(&mut self.screen_mut().cursor.style, p, sep);
+                sgr(self.screen_mut(), p, sep);
                 self.changed();
             }
             ([b'>'], b'm') => self.modify_other_keys = n == 4 && second == 2,
@@ -2688,9 +2703,10 @@ pub fn default_palette() -> Vec<[u8; 3]> {
     colors
 }
 
-fn sgr(style: &mut Style, params: &[u16], separators: u32) {
+fn sgr(screen: &mut Screen, params: &[u16], separators: u32) {
+    let mut style = screen.cursor.style;
     if params.is_empty() {
-        *style = Style::default();
+        screen.set_cursor_style(Style::default());
         return;
     }
     let is_colon = |index: usize| separators & (1 << index) != 0;
@@ -2715,7 +2731,7 @@ fn sgr(style: &mut Style, params: &[u16], separators: u32) {
             continue;
         }
         match n {
-            0 => *style = Style::default(),
+            0 => style = Style::default(),
             1 => style.bold = true,
             2 => style.faint = true,
             3 => style.italic = true,
@@ -2804,5 +2820,7 @@ fn sgr(style: &mut Style, params: &[u16], separators: u32) {
             }
             _ => {}
         }
+        screen.set_cursor_style(style);
+        style = screen.cursor.style;
     }
 }

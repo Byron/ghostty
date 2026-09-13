@@ -173,6 +173,36 @@ runtime safety remains enabled, while debug-only full-page integrity scans on
 every edit would make large boundary cases quadratic. When reusing binaries with
 `--no-build`, build the oracle with `-Doptimize=ReleaseSafe` for these cases.
 
+`--pages --case pages/styles/` exercises live STYLE ownership: each SGR
+attribute, cursor movement, printed and erased cells, page migration, resize,
+restored sparse IDs and mixed-width IND copies. Rustty retains the native set's
+dead entries, reference counts and ID reuse history instead of reconstructing
+STYLE resources when a snapshot is requested. Growth and rehashing clone live
+cells in row order. Mixed-width copies preserve the separate owners of their
+source prefix and recycled suffix. Failed rehash/growth leaves source cell IDs
+and references unchanged. Rendering viewport copies keep resolved styles and
+page boundaries without allocating live STYLE tables. The first-IND matrix can
+be run separately with `--case pages/styles/mixed-ind/` (48 passing comparisons).
+
+The retained `pages/styles/max-capacity-split/2` case exposes a native cursor
+cache defect. A restored two-row page with 32 colliding STYLE entries at capacity
+65535 splits during SGR. `Screen.splitForCapacity` moves the cursor pin through
+`cursorChangePin` without refreshing cached `page_row`/`page_cell`; subsequent
+printing writes to the retired row. Native drops `X`, while Rustty writes it at
+the current cursor. A vertical cursor detour or snapshot restore fixes the
+native write; same-row movement, observation and snapshot encoding do not.
+This was independently reproduced with native binary SHA-256
+`760b71c042988ece0aee08e1202b3e3b255372e983f4fb451cb38cc3b9d84313`.
+The fixture remains a failure in broad and thorough runs; it is neither
+normalized nor marked as an expected pass.
+
+`pages/styles/mixed-ind-resume/` also retains continued-printing probes after
+the first IND. A native assertion in `printSliceFill`'s STYLE release occurs for
+restored widths 4/8/4 with logical width 8. These probes follow the ordinary
+STYLE matrices so a reference abort cannot hide their preceding comparisons.
+Complete resource-exhaustion combinations, especially splitting during reflow,
+remain unverified.
+
 Grid cases cover live writes, erasure, reflow, height changes, screen switches,
 resets, handle reuse and scrollback limits, including release of an inactive
 screen's tracked handle. Restoring a new terminal while

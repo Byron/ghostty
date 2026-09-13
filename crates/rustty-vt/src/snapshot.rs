@@ -337,7 +337,7 @@ fn encode_screen(screen: &Screen, key: usize, page_count: usize) -> io::Result<V
 
 fn encoding_capacity(
     mut capacity: PageCapacity,
-    styles: &[Style],
+    styles: Option<&[Style]>,
     links: &[Link],
     linked_cells: usize,
     suffixes: &[(usize, usize, Vec<u32>)],
@@ -368,7 +368,7 @@ fn encoding_capacity(
             .map_err(|_| invalid("invalid snapshot encoding capacity"))?;
         let mut changed = false;
         let mut style_set = StyleAdmission::new(layout.styles_layout);
-        if !styles.iter().all(|&style| style_set.admit(style)) {
+        if styles.is_some_and(|styles| !styles.iter().all(|&style| style_set.admit(style))) {
             capacity.styles = grow(u32::from(capacity.styles), u32::from(u16::MAX))? as u16;
             changed = true;
         }
@@ -418,7 +418,12 @@ fn encoding_capacity(
     }
 }
 
-fn encode_page(rows: &[&Row], capacity: PageCapacity, columns: u16) -> io::Result<Vec<u8>> {
+fn encode_page(
+    rows: &[&Row],
+    capacity: PageCapacity,
+    columns: u16,
+    native_styles: &StyleAdmission,
+) -> io::Result<Vec<u8>> {
     if rows
         .iter()
         .any(|row| row.cells.len() != usize::from(columns))
@@ -427,8 +432,12 @@ fn encode_page(rows: &[&Row], capacity: PageCapacity, columns: u16) -> io::Resul
             "snapshot rows do not match their physical page width",
         ));
     }
-    let mut styles = Vec::new();
-    let mut style_ids = HashMap::new();
+    let mut styles: Vec<_> = native_styles
+        .iter()
+        .map(|(id, value)| (usize::from(id), *value))
+        .collect();
+    let mut style_ids: HashMap<_, _> = styles.iter().map(|(id, value)| (*value, *id)).collect();
+    let mut owned_styles = true;
     let mut links = Vec::new();
     let mut link_ids = HashMap::new();
     let mut page_words = Vec::with_capacity(rows.len());
@@ -450,11 +459,12 @@ fn encode_page(rows: &[&Row], capacity: PageCapacity, columns: u16) -> io::Resul
                 ..Style::default()
             };
             let mut style_value = cell.style;
-            if cell.text.is_empty()
-                && cell.style == blank_style
-                && cell.width == 1
-                && !cell.spacer_head
-            {
+            let inline_background = if cell.style_id != 0 {
+                cell.style.background != native_styles.get(cell.style_id).background
+            } else {
+                cell.style == blank_style && cell.width == 1 && !cell.spacer_head
+            };
+            if cell.text.is_empty() && inline_background {
                 match cell.style.background {
                     Color::Indexed(index) => {
                         kind = 2;
@@ -469,12 +479,18 @@ fn encode_page(rows: &[&Row], capacity: PageCapacity, columns: u16) -> io::Resul
                     Color::Default => {}
                 }
             }
-            let style_id = if style_value == Style::default() {
+            let style_id = if cell.style_id != 0 {
+                usize::from(cell.style_id)
+            } else if style_value == Style::default() {
                 0
             } else {
+                // Callers may construct detached public Cell values directly.
+                // Their styles have no live page IDs yet.
+                owned_styles = false;
                 *style_ids.entry(style_value).or_insert_with(|| {
-                    styles.push(style_value);
-                    styles.len()
+                    let id = styles.last().map_or(1, |(id, _)| id + 1);
+                    styles.push((id, style_value));
+                    id
                 })
             };
             let link_id = if cell.hyperlink.is_some() {
@@ -511,7 +527,18 @@ fn encode_page(rows: &[&Row], capacity: PageCapacity, columns: u16) -> io::Resul
         }
         page_words.push(words);
     }
-    let capacity = encoding_capacity(capacity, &styles, &links, linked_cells, &suffixes)?;
+    let fallback_styles: Vec<_> = if owned_styles {
+        Vec::new()
+    } else {
+        styles.iter().map(|(_, style)| *style).collect()
+    };
+    let capacity = encoding_capacity(
+        capacity,
+        (!owned_styles).then_some(fallback_styles.as_slice()),
+        &links,
+        linked_cells,
+        &suffixes,
+    )?;
     let mut out = Vec::new();
     u16_bytes(&mut out, usize::from(columns))?;
     u16_bytes(&mut out, rows.len())?;
@@ -521,8 +548,8 @@ fn encode_page(rows: &[&Row], capacity: PageCapacity, columns: u16) -> io::Resul
     u16_bytes(&mut out, usize::from(capacity.hyperlink_bytes))?;
     u32_bytes(&mut out, capacity.grapheme_bytes as usize)?;
     u32_bytes(&mut out, capacity.string_bytes as usize)?;
-    for (i, value) in styles.into_iter().enumerate() {
-        u16_bytes(&mut out, i + 1)?;
+    for (id, value) in styles {
+        u16_bytes(&mut out, id)?;
         style(&mut out, value);
     }
     for (i, value) in links.into_iter().enumerate() {
@@ -600,7 +627,7 @@ pub fn encode(terminal: &Terminal, destination: &mut impl Write) -> io::Result<(
                 record(
                     destination,
                     3,
-                    &encode_page(&rows[start..end], page.capacity, page.columns)?,
+                    &encode_page(&rows[start..end], page.capacity, page.columns, &page.styles)?,
                 )?;
                 start = end;
             }
@@ -629,7 +656,7 @@ pub fn encode(terminal: &Terminal, destination: &mut impl Write) -> io::Result<(
                 record(
                     destination,
                     3,
-                    &encode_page(&rows[start..end], page.capacity, page.columns)?,
+                    &encode_page(&rows[start..end], page.capacity, page.columns, &page.styles)?,
                 )?;
             }
         }
@@ -825,6 +852,7 @@ struct Sequence {
 }
 
 struct DecodedPage {
+    styles: StyleAdmission,
     capacity: PageCapacity,
     rows: Vec<Row>,
 }
@@ -1175,8 +1203,13 @@ impl<R: Read> Decoder<R> {
         let mut contents = Vec::new();
         let mut pages = PageList::default();
         for _ in 0..count {
-            let page = self.page()?;
+            let mut page = self.page()?;
             pages.append(page.capacity, page.rows.len() as u16);
+            let resident = pages.pages.back_mut().unwrap();
+            resident.styles = page.styles;
+            for row in &mut page.rows {
+                row.style_page = Some(resident.serial);
+            }
             contents.extend(page.rows);
         }
         if contents.len() < usize::from(rows) {
@@ -1193,6 +1226,7 @@ impl<R: Read> Decoder<R> {
         screen.history = contents.into();
         screen.history_bytes = screen.history.iter().map(Row::storage_bytes).sum();
         screen.pages = pages;
+        screen.sync_cursor_style();
         Ok((key, screen, extent))
     }
 
@@ -1233,13 +1267,9 @@ impl<R: Read> Decoder<R> {
             let id = r.u16()?;
             let value = decode_style(&mut r)?;
             if id != 0 {
-                styles.entry(id).or_insert_with(|| {
-                    if style_admission.admit(value) {
-                        value
-                    } else {
-                        Style::default()
-                    }
-                });
+                styles
+                    .entry(id)
+                    .or_insert_with(|| style_admission.acquire(value).unwrap_or(0));
             }
         }
         let mut links = HashMap::new();
@@ -1283,7 +1313,11 @@ impl<R: Read> Decoder<R> {
                 let kind = word & 3;
                 let content = ((word >> 2) & 0xffffff) as u32;
                 let style_id = ((word >> 26) & 0xffff) as u16;
-                cell.style = styles.get(&style_id).copied().unwrap_or_default();
+                cell.style_id = styles.get(&style_id).copied().unwrap_or(0);
+                if cell.style_id != 0 {
+                    style_admission.retain(cell.style_id);
+                    cell.style = *style_admission.get(cell.style_id);
+                }
                 match kind {
                     0 | 1 => {
                         if content != 0 {
@@ -1387,7 +1421,13 @@ impl<R: Read> Decoder<R> {
             }
         }
         r.finish()?;
+        let mut temporary: Vec<_> = styles.into_iter().collect();
+        temporary.sort_unstable_by_key(|(wire_id, _)| *wire_id);
+        for (_, id) in temporary {
+            style_admission.release(id);
+        }
         Ok(DecodedPage {
+            styles: style_admission,
             capacity,
             rows: result,
         })
@@ -1442,7 +1482,10 @@ impl<R: Read> Decoder<R> {
                     if allowed {
                         count = rows.len();
                         screen.pages.prepend(page.capacity, count as u16);
+                        let resident = screen.pages.pages.front_mut().unwrap();
+                        resident.styles = page.styles;
                         for row in &mut rows {
+                            row.style_page = Some(resident.serial);
                             row.id = screen.next_row;
                             screen.next_row = screen.next_row.wrapping_add(1);
                         }

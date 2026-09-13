@@ -34,7 +34,7 @@
     {
       "id": "terminal.styles",
       "status": "partial",
-      "remaining": "Style comparison exists; all SGR/state transitions remain to be exercised."
+      "remaining": "Live STYLE admission, cursor/cell references, dead-ID reuse, rehash/growth, restored sparse IDs, resize and mixed-width IND copies have bounded coverage. Native max-capacity split cursor-cache and mixed-width continued-printing failures are retained. Complete SGR/state transitions and resource-exhaustion combinations remain."
     },
     {
       "id": "terminal.screens",
@@ -109,7 +109,7 @@
     {
       "id": "terminal.pages",
       "status": "partial",
-      "remaining": "Initialization, growth, whole-page pruning, clear/reset, dimension changes, reflow and snapshot admission compare native boundaries, capacities and allocation charges on macOS ARM64. Live managed-resource growth/splitting, compression and complete lifecycle combinations remain."
+      "remaining": "Initialization, growth, whole-page pruning, clear/reset, dimension changes, reflow and snapshot admission compare native boundaries, capacities and allocation charges on macOS ARM64. Live STYLE ownership, growth and mixed-width row copies have bounded coverage; native STYLE split and continued-printing defects remain visible. Other managed resources, splitting during reflow, compression and complete lifecycle combinations remain."
     },
     {
       "id": "terminal.tracked",

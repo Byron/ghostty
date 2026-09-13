@@ -347,6 +347,16 @@ pub struct Selection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TrackedPoint(u64);
 
+/// External handles belong to a live screen, never its copies or snapshots.
+#[derive(Debug, Default)]
+struct TrackedPoints(HashMap<u64, Option<GridPoint>>);
+
+impl Clone for TrackedPoints {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Charset {
     #[default]
@@ -393,9 +403,7 @@ pub struct Screen {
     pub(crate) history_bytes: usize,
     pub(crate) next_row: u64,
     #[serde(skip)]
-    tracked: HashMap<u64, Option<GridPoint>>,
-    #[serde(skip)]
-    next_track: u64,
+    tracked: TrackedPoints,
 }
 
 impl Screen {
@@ -441,8 +449,7 @@ impl Screen {
             limits,
             history_bytes: 0,
             next_row: rows as u64,
-            tracked: HashMap::new(),
-            next_track: 0,
+            tracked: TrackedPoints::default(),
         }
     }
 
@@ -477,8 +484,7 @@ impl Screen {
             limits: ScrollbackLimits::NONE,
             history_bytes: 0,
             next_row: self.next_row,
-            tracked: HashMap::new(),
-            next_track: 0,
+            tracked: TrackedPoints::default(),
         }
     }
 
@@ -499,21 +505,25 @@ impl Screen {
     }
 
     pub fn track(&mut self, point: GridPoint) -> TrackedPoint {
-        let id = self.next_track;
-        self.next_track = self.next_track.wrapping_add(1);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Handles must not alias across screens, terminal resets or clones.
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("tracked point IDs exhausted");
         let valid = self
             .row_by_id(point.row)
             .is_some_and(|r| point.col < r.cells.len());
-        self.tracked.insert(id, valid.then_some(point));
+        self.tracked.0.insert(id, valid.then_some(point));
         TrackedPoint(id)
     }
 
     pub fn resolve(&self, point: TrackedPoint) -> Option<GridPoint> {
-        self.tracked.get(&point.0).copied().flatten()
+        self.tracked.0.get(&point.0).copied().flatten()
     }
 
     pub fn untrack(&mut self, point: TrackedPoint) {
-        self.tracked.remove(&point.0);
+        self.tracked.0.remove(&point.0);
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -636,7 +646,7 @@ impl Screen {
 
     pub(crate) fn discard_row(&mut self, id: u64) {
         self.graphics.discard_row(id);
-        for point in self.tracked.values_mut() {
+        for point in self.tracked.0.values_mut() {
             if point.is_some_and(|p| p.row == id) {
                 *point = None;
             }
@@ -782,7 +792,7 @@ impl Screen {
                 if let Some(point) = &mut saved_point {
                     keep_pin(point);
                 }
-                for point in self.tracked.values_mut().flatten() {
+                for point in self.tracked.0.values_mut().flatten() {
                     keep_pin(point);
                 }
                 if let Some(selection) = &mut self.selection {
@@ -884,7 +894,7 @@ impl Screen {
                 mapped_cursor = *p;
             }
             saved_point = saved_point.and_then(|p| map.get(&(p.row, p.col)).copied());
-            for point in self.tracked.values_mut() {
+            for point in self.tracked.0.values_mut() {
                 *point = point.and_then(|p| map.get(&(p.row, p.col)).copied());
             }
             self.selection = self.selection.and_then(|s| {
@@ -902,6 +912,7 @@ impl Screen {
                         && !saved_point.is_some_and(|p| p.row == r.id)
                         && !self
                             .tracked
+                            .0
                             .values()
                             .any(|p| p.is_some_and(|p| p.row == r.id))
                         && r.used() == 0
@@ -1021,6 +1032,7 @@ impl Screen {
                     && !saved.is_some_and(|p| p.row == r.id)
                     && !self
                         .tracked
+                        .0
                         .values()
                         .any(|p| p.is_some_and(|p| p.row == r.id))
                     && r.cells.iter().all(|c| c.text.is_empty())

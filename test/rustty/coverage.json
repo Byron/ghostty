@@ -134,12 +134,12 @@
     {
       "id": "clipboard",
       "status": "partial",
-      "remaining": "OSC 52/5522 metadata, binary reads/writes, MIME filtering, streamed base64, aliases, statuses, callback absence, configured limits, session grants and one-time paste grants are compared; OSC 1337, allocation failures and complete capture/size limits remain."
+      "remaining": "OSC 52/5522 metadata, binary reads/writes, MIME filtering, streamed base64, aliases, statuses, callback absence, configured limits, session grants, one-time paste grants and exact 8 MiB OSC capture boundaries are compared; OSC 1337, allocation failures and complete size limits remain."
     },
     {
       "id": "drag-and-drop",
       "status": "partial",
-      "remaining": "OSC 72 metadata, registration/status chunks, callback-time state, host move/drop/leave, binary data replies, local-only errors, MIME/item limits, reset retention and snapshot omission are compared. The 8 MiB OSC capture boundary, allocation failures and direct utility APIs remain."
+      "remaining": "OSC 72 metadata, registration/status chunks, callback-time state, host move/drop/leave, binary data replies, local-only errors, MIME/item limits, exact 8 MiB capture boundaries, direct-reset capture continuation and snapshot omission are compared. Allocation failures and direct utility APIs remain."
     },
     {
       "id": "input.key",

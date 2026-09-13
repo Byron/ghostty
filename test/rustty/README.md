@@ -304,8 +304,9 @@ binary/plain response boundaries, MIME/item limits, local-only errors, RIS
 retention and both snapshot encodings. Callback records include state at each
 event, so multiple registrations in one input read cannot hide lost metadata.
 `EffectHandler::drag_and_drop` borrows that state synchronously; deferred `feed`
-returns event tags. The 8 MiB OSC capture boundary, allocation failures and direct
-utility APIs remain unverified.
+returns event tags. The 8 MiB capture boundary is compared for queries and pending
+registration/status chunks; allocation failures and direct utility APIs remain
+unverified.
 
 Mode fixtures read the available ANSI/DEC entries from the original source.
 `observe_modes` selects mode tags (`number`, `private`) whose current, saved,
@@ -348,6 +349,15 @@ including commands that can use all 2048 bytes without a NUL. The direct `title_
 call uncapped terminal setters and emit no callbacks. Raw values and pending
 captures are also exercised through both snapshot encodings and decoders.
 These cases compare snapshot continuation behavior, not peak parser allocation.
+
+`osc_strings.allocating_requests` retains 14 allocating-capture boundary cases
+(42 comparisons) for OSC 52, 72 and 5522. Native counts the bytes after the
+numeric-prefix semicolon; OSC 52 also reserves its parser-added NUL. Cases
+exercise exact and exceeded limits, longest-prefix capture, continued DND
+chunks and direct reset during capture. The raw parser's default and snapshot
+continuation budgets remain independently bounded. Case filtering precedes
+large-payload construction. OSC 66/99 semantics, allocator failures and peak
+allocation are still unverified.
 
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes

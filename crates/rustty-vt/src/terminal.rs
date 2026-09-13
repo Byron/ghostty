@@ -4,7 +4,7 @@ use crate::screen::*;
 use crate::unicode::{self, properties};
 use crate::{clipboard, dnd};
 use base64::Engine;
-use rustty_parser::{Event, Parser};
+use rustty_parser::{Event, MAX_OSC_BYTES, Parser};
 
 /// Host actions are returned in input order. The terminal never accesses the OS.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +158,10 @@ impl Terminal {
     pub fn with_limits(cols: u16, rows: u16, limits: ScrollbackLimits) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        let mut parser = Parser::new();
+        // Native capture starts after the command prefix. The raw parser also
+        // retains that prefix; OSC 5522 has the longest allocating one.
+        parser.set_osc_limit(MAX_OSC_BYTES + b"5522;".len());
         Self {
             metadata: crate::snapshot::TerminalMetadata::default(),
             cols,
@@ -193,7 +197,7 @@ impl Terminal {
             primary: Screen::new(cols.into(), rows.into(), limits),
             alternate: None,
             alternate_active: false,
-            parser: Parser::new(),
+            parser,
             tabstops: (0..cols).map(|i| i > 0 && i % 8 == 0).collect(),
             previous_char: None,
             grapheme_state: 0,
@@ -2221,6 +2225,10 @@ impl Terminal {
             // These fixed captures append a NUL before dispatch.
             0 | 2 | 7 | 8 | 777 | 1337 if !has_separator || data.len() >= 2048 => return,
             9 | 133 if !has_separator || data.len() > 2048 => return,
+            // Allocating captures count only bytes after the numeric prefix.
+            // OSC 52 and 66 reserve a byte for the parser's trailing NUL.
+            52 | 66 if !has_separator || data.len() >= MAX_OSC_BYTES => return,
+            72 | 99 | 5522 if !has_separator || data.len() > MAX_OSC_BYTES => return,
             _ => {}
         }
         match number {

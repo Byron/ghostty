@@ -546,6 +546,7 @@ def main():
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in osc_strings.requests()
                                 if not args.case or args.case in request["id"])
+                requests.extend(osc_strings.allocating_requests(args.case))
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())
             requests.extend((request, []) for request in generated_requests(args.seed, args.generated or (100 if args.thorough else 0)))

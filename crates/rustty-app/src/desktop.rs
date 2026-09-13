@@ -7,6 +7,7 @@ use rustty::{
     vt,
 };
 use rustty_app::{
+    accessibility::TerminalText,
     input,
     platform::{Platform, PlatformEvent},
     workspace::{Axis, Id, Peek, Rect, Tab, WindowState, Workspace},
@@ -107,6 +108,7 @@ struct Host {
     egui: egui_winit::State,
     fonts: rustty_render::Renderer,
     rects: BTreeMap<Id, egui::Rect>,
+    accessibility: BTreeMap<Id, TerminalText>,
     content: Rect,
     divider_drag: Option<(Id, Axis, Rect)>,
     modifiers: ModifiersState,
@@ -597,6 +599,7 @@ impl App {
             egui,
             fonts,
             rects: BTreeMap::new(),
+            accessibility: BTreeMap::new(),
             content: Rect::UNIT,
             divider_drag: None,
             modifiers: ModifiersState::empty(),
@@ -1552,6 +1555,7 @@ impl App {
             })
             .unwrap_or_else(|| "Rustty".into());
         host.window.set_title(&format!("{title} — Rustty"));
+        host.accessibility.clear();
         let mut output = context.run_ui(raw, |root_ui| {
             let ctx = &context;
             egui::Panel::top("tabs")
@@ -1818,22 +1822,22 @@ impl App {
                                         .opacity(1.0 - config.unfocused_split_opacity),
                                 ));
                             }
-                            let text = snapshot
-                                .screen
-                                .rows
-                                .iter()
-                                .map(|row| {
-                                    row.cells
-                                        .iter()
-                                        .filter(|c| c.width != 0)
-                                        .map(|c| if c.text.is_empty() { " " } else { &c.text })
-                                        .collect::<String>()
-                                        .trim_end()
-                                        .to_owned()
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            accessible.push((id, rect, text));
+                            host.accessibility.insert(
+                                id,
+                                TerminalText::new(
+                                    id,
+                                    &snapshot.screen,
+                                    [
+                                        rect.left() + padding[0] / scale,
+                                        rect.top() + padding[1] / scale,
+                                    ],
+                                    [
+                                        metrics.cell_width as f32 / scale,
+                                        metrics.cell_height as f32 / scale,
+                                    ],
+                                ),
+                            );
+                            accessible.push((id, rect));
                             if id == focused {
                                 let cursor = &snapshot.screen.cursor;
                                 let [x, y, width, height] = ime_cursor.unwrap_or([
@@ -1871,7 +1875,7 @@ impl App {
                             format,
                         },
                     ));
-                    for (id, rect, text) in accessible {
+                    for (id, rect) in accessible {
                         let response = ui.interact(
                             rect,
                             egui::Id::new(("terminal", id)),
@@ -1888,7 +1892,6 @@ impl App {
                                     .map(|p| p.title.as_str())
                                     .unwrap_or("Terminal"),
                             );
-                            node.set_value(text);
                             node.add_action(egui::accesskit::Action::Focus);
                             node.add_action(egui::accesskit::Action::ScrollUp);
                             node.add_action(egui::accesskit::Action::ScrollDown);
@@ -2122,6 +2125,11 @@ impl App {
         }
         for action in commands {
             self.action(event_loop, host, action, false);
+        }
+        if let Some(update) = &mut output.platform_output.accesskit_update {
+            for text in host.accessibility.values() {
+                text.append_to(update);
+            }
         }
         host.egui.handle_platform_output_with_event_loop(
             &host.window,
@@ -2449,15 +2457,71 @@ impl ApplicationHandler<Event> for App {
             }
             Event::Access(event) => {
                 use egui_winit::accesskit_winit::WindowEvent as AccessEvent;
-                if let Some(host) = self.windows.get_mut(&event.window_id) {
+                if let Some(mut host) = self.windows.remove(&event.window_id) {
                     match event.window_event {
                         AccessEvent::ActionRequested(request) => {
-                            host.egui.on_accesskit_action_request(request)
+                            let pane = host
+                                .accessibility
+                                .iter()
+                                .find(|(_, text)| text.contains(request.target_node))
+                                .map(|(&id, _)| id);
+                            let mut handled = false;
+                            if let Some(id) = pane {
+                                use egui::accesskit::{Action as AccessAction, ActionData};
+                                match request.action {
+                                    AccessAction::Focus => {
+                                        self.focus_pane(host.id, id);
+                                        host.window.focus_window();
+                                        handled = true;
+                                    }
+                                    AccessAction::ScrollUp | AccessAction::ScrollDown => {
+                                        if let Some(pane) = self.panes.get(&id)
+                                            && let Ok(mut terminal) = pane.session.terminal()
+                                        {
+                                            let amount = (terminal.rows as isize).max(1);
+                                            terminal.screen_mut().scroll_viewport(
+                                                if request.action == AccessAction::ScrollUp {
+                                                    amount
+                                                } else {
+                                                    -amount
+                                                },
+                                            );
+                                        }
+                                        handled = true;
+                                    }
+                                    AccessAction::SetTextSelection => {
+                                        if let Some(ActionData::SetTextSelection(range)) =
+                                            &request.data
+                                            && let Some(selection) =
+                                                host.accessibility[&id].selection(*range)
+                                            && let Some(pane) = self.panes.get(&id)
+                                            && let Ok(mut terminal) = pane.session.terminal()
+                                        {
+                                            // Ignore a row that was pruned between painting and the native callback.
+                                            if selection.is_none_or(|s| {
+                                                terminal.screen().row_by_id(s.start.row).is_some()
+                                                    && terminal
+                                                        .screen()
+                                                        .row_by_id(s.end.row)
+                                                        .is_some()
+                                            }) {
+                                                terminal.screen_mut().selection = selection;
+                                            }
+                                        }
+                                        handled = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if !handled {
+                                host.egui.on_accesskit_action_request(request);
+                            }
                         }
                         AccessEvent::InitialTreeRequested => self.context.enable_accesskit(),
                         AccessEvent::AccessibilityDeactivated => {}
                     }
                     host.repaint();
+                    self.windows.insert(event.window_id, host);
                 }
             }
         }

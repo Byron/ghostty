@@ -26,6 +26,14 @@ open-configuration actions. Tabs, splits, zoom, quadrant navigation, clipboard a
 search use the configured Ghostty keybindings. Window layouts and pane directories
 are saved separately under `com.rustty.app`.
 
+Tab colors apply to tab controls, split focus outlines and completion flashes;
+unassigned tabs use the macOS system accent. Inactive tabs and directory labels
+underline running commands, while `▶` counts panes explicitly reporting work
+through a leading activity spinner or progress report. Waiting-for-input titles
+do not count as active work. Each pane can trigger a short completion flash even
+while another pane remains busy. Quadrants share one directory label when every
+pane has the same basename; differing or missing directories keep individual labels.
+
 The terminal port is still undergoing differential compatibility work. A passing
 smoke test does not establish full libghostty-vt parity. The exhaustive coverage
 gate in `test/rustty/coverage.json` records unfinished protocol and snapshot work;

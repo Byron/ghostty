@@ -10,12 +10,15 @@ use rustty_app::{
     accessibility::TerminalText,
     input,
     platform::{Platform, PlatformEvent},
+    presentation::{
+        Activity, CompletionFlash, DirectoryLabel, TabAccent, common_directory_name, directory_name,
+    },
     workspace::{Axis, Id, Peek, Rect, Tab, WindowState, Workspace},
 };
 use rustty_font::{FontConfig, FontFeature};
 use rustty_render::{Frame, RenderOptions};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
@@ -59,6 +62,7 @@ struct Pane {
     title: String,
     cwd: PathBuf,
     running: Option<Instant>,
+    activity: Activity,
     unseen: bool,
     exited: bool,
     started: Instant,
@@ -152,6 +156,83 @@ impl Host {
     }
 }
 
+struct DirectoryBadge {
+    label: DirectoryLabel,
+    bounds: egui::Rect,
+    large: bool,
+    active: bool,
+    attention: bool,
+    flash: f32,
+    accent: Color32,
+}
+impl DirectoryBadge {
+    fn paint(self, ui: &egui::Ui) {
+        let color = if self.label.focused {
+            Color32::WHITE
+        } else {
+            ui.visuals().text_color()
+        };
+        let mut job = egui::text::LayoutJob::simple(
+            format!(
+                "{}{}",
+                self.label.name,
+                if self.attention { " ●" } else { "" }
+            ),
+            egui::FontId::proportional(if self.large { 22.0 } else { 12.0 }),
+            color,
+            (self.bounds.width() * 0.75 - 24.0).max(1.0),
+        );
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        if self.label.shows_activity(self.active) {
+            job.sections[0].format.underline = egui::Stroke::new(1.0, color);
+        }
+        let galley = ui.painter().layout_job(job);
+        let padding = if self.large {
+            Vec2::new(16.0, 10.0)
+        } else {
+            Vec2::new(8.0, 4.0)
+        };
+        let size = galley.size() + 2.0 * padding;
+        let bounds = if self.large {
+            egui::Rect::from_center_size(self.bounds.center(), size)
+        } else {
+            egui::Rect::from_min_size(
+                self.bounds.right_top() + Vec2::new(-size.x - 8.0, 8.0),
+                size,
+            )
+        };
+        let painter = ui.painter().with_clip_rect(self.bounds);
+        let rounding = if self.large { 10.0 } else { 6.0 };
+        painter.rect_filled(
+            bounds,
+            rounding,
+            if self.label.focused {
+                Color32::from_black_alpha(235)
+            } else {
+                ui.visuals().widgets.inactive.bg_fill
+            },
+        );
+        painter.rect_stroke(
+            bounds,
+            rounding,
+            egui::Stroke::new(
+                1.0,
+                if self.label.focused {
+                    self.accent
+                } else {
+                    ui.visuals().weak_text_color().gamma_multiply(0.35)
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        if self.flash > 0.0 {
+            painter.rect_filled(bounds, rounding, self.accent.gamma_multiply(self.flash));
+        }
+        painter.galley(bounds.min + padding, galley, color);
+    }
+}
+
 struct GpuRenderers(HashMap<Id, rustty_render_wgpu::Renderer>);
 struct TerminalPaint {
     window: Id,
@@ -203,6 +284,7 @@ struct App {
     resources: Option<PathBuf>,
     panes: HashMap<Id, Pane>,
     failed_panes: BTreeMap<Id, String>,
+    activity_flashes: HashMap<Id, CompletionFlash>,
     closing: Vec<Session>,
     windows: HashMap<WindowId, Host>,
     platform: Option<Platform>,
@@ -311,6 +393,7 @@ pub fn run() -> Result<()> {
         resources,
         panes: HashMap::new(),
         failed_panes: BTreeMap::new(),
+        activity_flashes: HashMap::new(),
         closing: Vec::new(),
         windows: HashMap::new(),
         platform: None,
@@ -526,6 +609,7 @@ impl App {
                 title: String::new(),
                 cwd: directory,
                 running: None,
+                activity: Activity::default(),
                 unseen: false,
                 exited: false,
                 started,
@@ -703,6 +787,7 @@ impl App {
             .iter()
             .any(|window| window.tabs.iter().any(|tab| tab.panes.contains_key(&id)));
         let mut close = false;
+        let mut stopped = false;
         let mut clipboard = Vec::new();
         let focused = self
             .windows
@@ -712,6 +797,12 @@ impl App {
         let Some(pane) = self.panes.get_mut(&id) else {
             return;
         };
+        let previous_title = pane.title.clone();
+        let previous_status = (
+            pane.activity.is_active(),
+            pane.activity.reported_active(),
+            pane.unseen,
+        );
         pane.wake_pending.store(false, Ordering::Release);
         if let Err(error) = pane.flush()
             && !pane.session.has_exited()
@@ -727,10 +818,18 @@ impl App {
         let events = pane.session.events().collect::<Vec<_>>();
         for event in events {
             match event {
+                SessionEvent::Effect(vt::Effect::Title(title)) => {
+                    pane.activity.title_changed(&title);
+                }
+                SessionEvent::Effect(vt::Effect::Progress { state, .. }) => {
+                    stopped |= pane.activity.progress_reported(state, Instant::now());
+                }
                 SessionEvent::Effect(vt::Effect::CommandStart) => {
-                    pane.running = Some(Instant::now())
+                    pane.running = Some(Instant::now());
+                    pane.activity.command_started();
                 }
                 SessionEvent::Effect(vt::Effect::CommandEnd { exit_code }) => {
+                    stopped |= pane.activity.command_finished();
                     let elapsed = pane.running.take().map(|start| start.elapsed());
                     if elapsed
                         .is_some_and(|elapsed| elapsed >= config.notify_on_command_finish_after)
@@ -793,7 +892,23 @@ impl App {
                 _ => {}
             }
         }
+        // The child waiter can report exit before the reader delivers its final effects.
+        if pane.exited {
+            pane.running = None;
+            stopped |= pane.activity.clear();
+        }
         let cwd = pane.cwd.clone();
+        let indicators_changed = stopped
+            || previous_title != pane.title
+            || previous_status
+                != (
+                    pane.activity.is_active(),
+                    pane.activity.reported_active(),
+                    pane.unseen,
+                );
+        if stopped {
+            self.activity_stopped(id, Instant::now());
+        }
         for request in clipboard {
             self.queue_clipboard(id, request);
         }
@@ -827,14 +942,77 @@ impl App {
                     .count(),
             );
         }
+        self.repaint_pane(id, indicators_changed);
+    }
+
+    fn repaint_pane(&self, pane: Id, indicators_changed: bool) {
         for host in self.windows.values() {
-            if self
-                .tab(host.id)
-                .is_some_and(|tab| tab.panes.contains_key(&id))
-            {
+            if self.index(host.id).is_some_and(|index| {
+                let window = &self.workspace.windows[index];
+                window.tabs.iter().enumerate().any(|(index, tab)| {
+                    tab.panes.contains_key(&pane)
+                        && (index == window.active_tab || indicators_changed)
+                })
+            }) {
+                // Plain output in hidden tabs does not invalidate the visible terminals.
                 host.repaint();
             }
         }
+    }
+
+    fn activity_stopped(&mut self, pane: Id, now: Instant) {
+        for window in &self.workspace.windows {
+            for (index, tab) in window.tabs.iter().enumerate() {
+                if !tab.panes.contains_key(&pane) {
+                    continue;
+                }
+                if index != window.active_tab {
+                    self.activity_flashes.entry(tab.id).or_default().start(now);
+                }
+                if pane != tab.focused {
+                    self.activity_flashes
+                        .entry(pane)
+                        .or_default()
+                        .start_if_idle(now);
+                }
+                if let Some(quadrant) = tab.root.quadrant(pane)
+                    && let Some(host) = self.windows.values().find(|host| host.id == window.id)
+                    && self.quadrant_label(tab, host, quadrant).is_some()
+                {
+                    self.activity_flashes
+                        .entry(quadrant)
+                        .or_default()
+                        .start_if_idle(now);
+                }
+            }
+        }
+    }
+
+    fn quadrant_label(&self, tab: &Tab, host: &Host, quadrant: Id) -> Option<DirectoryLabel> {
+        // A full-pane zoom does not display its containing quadrant's label.
+        let node = tab.visible_tree(host.peek.is_some()).node(quadrant)?;
+        let name = common_directory_name(
+            node.panes()
+                .iter()
+                .map(|id| self.panes.get(id).map(|pane| pane.cwd.as_path())),
+        );
+        let focused = host.peek.map_or(tab.focused, |peek| peek.target);
+        DirectoryLabel::new(
+            name,
+            node.contains(focused),
+            host.focused,
+            host.peek.is_some(),
+        )
+    }
+
+    fn flash_opacity(&self, id: Id, now: Instant, deadline: &mut Option<Instant>) -> f32 {
+        let Some(flash) = self.activity_flashes.get(&id) else {
+            return 0.0;
+        };
+        if let Some(next) = flash.next_repaint(now) {
+            *deadline = Some(deadline.map_or(next, |old| old.min(next)));
+        }
+        flash.opacity(now)
     }
 }
 
@@ -1732,8 +1910,25 @@ impl App {
             });
         }
         let context = self.context.clone();
+        let now = Instant::now();
+        let platform_accent = self
+            .platform
+            .as_ref()
+            .and_then(Platform::accent_color)
+            .unwrap_or_else(|| {
+                let [r, g, b, _] = context.global_style().visuals.selection.bg_fill.to_array();
+                [r, g, b]
+            });
+        let tab_accent = TabAccent::new(active.color, platform_accent);
+        let accent = Color32::from_rgb(
+            tab_accent.background[0],
+            tab_accent.background[1],
+            tab_accent.background[2],
+        );
+        self.activity_flashes.remove(&active.id);
         let mut commands = Vec::new();
         let mut tab_selection = None;
+        let mut presentation_changed = false;
         let mut retry_pane = None;
         let mut render_error = None;
         let format = self
@@ -1766,6 +1961,13 @@ impl App {
         host.accessibility.clear();
         let mut output = context.run_ui(raw, |root_ui| {
             let ctx = &context;
+            root_ui.visuals_mut().selection.bg_fill = accent;
+            root_ui.visuals_mut().selection.stroke.color = Color32::from_rgb(
+                tab_accent.foreground[0],
+                tab_accent.foreground[1],
+                tab_accent.foreground[2],
+            );
+            root_ui.visuals_mut().hyperlink_color = accent;
             egui::Panel::top("tabs")
                 .exact_size(38.0)
                 .frame(
@@ -1786,30 +1988,76 @@ impl App {
                                     pane.map(|p| p.title.as_str()).filter(|s| !s.is_empty())
                                 })
                                 .unwrap_or("Terminal");
-                            let running = tab
+                            let working = tab
                                 .panes
                                 .keys()
                                 .filter(|id| {
-                                    self.panes.get(id).is_some_and(|p| p.running.is_some())
+                                    self.panes
+                                        .get(id)
+                                        .is_some_and(|p| p.activity.reported_active())
                                 })
                                 .count();
                             let attention = tab
                                 .panes
                                 .keys()
                                 .any(|id| self.panes.get(id).is_some_and(|p| p.unseen));
-                            let suffix = if attention {
-                                " ●".into()
-                            } else if running > 0 {
-                                format!(" ▪ {running}")
-                            } else {
-                                String::new()
-                            };
+                            let is_active = tab.panes.keys().any(|id| {
+                                self.panes.get(id).is_some_and(|p| p.activity.is_active())
+                            });
+                            let suffix = format!(
+                                "{}{}",
+                                if attention { " ●" } else { "" },
+                                if working > 0 {
+                                    format!(" ▶ {working}")
+                                } else {
+                                    String::new()
+                                }
+                            );
                             let label = format!(
                                 "{}{suffix}{}",
                                 title.chars().take(26).collect::<String>(),
                                 if tab.zoom.is_some() { " ◩" } else { "" }
                             );
-                            let response = ui.selectable_label(index == state.active_tab, label);
+                            let selected = index == state.active_tab;
+                            let colors = TabAccent::new(tab.color, platform_accent);
+                            let color = Color32::from_rgb(
+                                colors.background[0],
+                                colors.background[1],
+                                colors.background[2],
+                            );
+                            let mut text = egui::RichText::new(label);
+                            if !selected && is_active {
+                                text = text.underline();
+                            }
+                            if selected {
+                                text = text.color(Color32::from_rgb(
+                                    colors.foreground[0],
+                                    colors.foreground[1],
+                                    colors.foreground[2],
+                                ));
+                            }
+                            let flash =
+                                self.flash_opacity(tab.id, now, &mut graphics_deadline) * 0.45;
+                            let fill = if selected {
+                                color
+                            } else {
+                                color.gamma_multiply(flash.max(if tab.color.is_some() {
+                                    0.12
+                                } else {
+                                    0.0
+                                }))
+                            };
+                            let response =
+                                ui.add(egui::Button::selectable(selected, text).fill(fill));
+                            if tab.color.is_some() {
+                                ui.painter().line_segment(
+                                    [
+                                        response.rect.left_top() + Vec2::new(4.0, 1.0),
+                                        response.rect.right_top() + Vec2::new(-4.0, 1.0),
+                                    ],
+                                    egui::Stroke::new(2.0, color),
+                                );
+                            }
                             if response.clicked() {
                                 tab_selection = Some(index);
                             }
@@ -1817,11 +2065,23 @@ impl App {
                                 let window_index = self.index(host.id).unwrap();
                                 let actual = &mut self.workspace.windows[window_index].tabs[index];
                                 ui.label("Tab title");
-                                ui.text_edit_singleline(
-                                    actual.title.get_or_insert_with(String::new),
-                                );
-                                let color = actual.color.get_or_insert([100, 150, 230]);
-                                ui.color_edit_button_srgb(color);
+                                let mut title = actual.title.clone().unwrap_or_default();
+                                if ui.text_edit_singleline(&mut title).changed() {
+                                    actual.title = (!title.is_empty()).then_some(title);
+                                    presentation_changed = true;
+                                }
+                                ui.label("Tab color");
+                                let mut color = actual.color.unwrap_or(platform_accent);
+                                if ui.color_edit_button_srgb(&mut color).changed() {
+                                    actual.color = Some(color);
+                                    presentation_changed = true;
+                                }
+                                if actual.color.is_some()
+                                    && ui.button("Use system accent").clicked()
+                                {
+                                    actual.color = None;
+                                    presentation_changed = true;
+                                }
                                 if ui.button("Close tab").clicked() {
                                     tab_selection = Some(index);
                                     commands.push(Action::CloseTab);
@@ -2122,7 +2382,7 @@ impl App {
                                 .map(|peek| peek.target == id)
                                 .unwrap_or(id == focused);
                             let color = if selected {
-                                Color32::from_rgb(112, 165, 245)
+                                accent
                             } else {
                                 config
                                     .split_divider_color
@@ -2135,45 +2395,6 @@ impl App {
                                 egui::Stroke::new(if selected { 1.5 } else { 0.5 }, color),
                                 egui::StrokeKind::Inside,
                             );
-                            if host.peek.is_none()
-                                && let Some(pane) = self.panes.get(&id)
-                            {
-                                let directory = pane
-                                    .cwd
-                                    .file_name()
-                                    .unwrap_or(pane.cwd.as_os_str())
-                                    .to_string_lossy();
-                                let label = format!(
-                                    "{}{}",
-                                    directory,
-                                    if pane.unseen {
-                                        " ●"
-                                    } else if pane.running.is_some() {
-                                        " ▪"
-                                    } else {
-                                        ""
-                                    }
-                                );
-                                let label_pos = rect.left_top() + Vec2::new(8.0, 4.0);
-                                let galley = ui.painter().layout_no_wrap(
-                                    label,
-                                    egui::FontId::proportional(11.0),
-                                    if selected {
-                                        Color32::WHITE
-                                    } else {
-                                        Color32::LIGHT_GRAY
-                                    },
-                                );
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(
-                                        label_pos - Vec2::splat(2.0),
-                                        galley.size() + Vec2::splat(4.0),
-                                    ),
-                                    3.0,
-                                    rgb(config.background).gamma_multiply(0.9),
-                                );
-                                ui.painter().galley(label_pos, galley, Color32::WHITE);
-                            }
                         }
                     }
                     for (&id, &rect) in &host.rects {
@@ -2209,58 +2430,98 @@ impl App {
                             ui.painter().galley(bounds.min, galley, Color32::WHITE);
                         }
                     }
-                    if let Some(peek) = host.peek {
-                        let mut quadrants = BTreeMap::<Id, egui::Rect>::new();
-                        for (&pane, &rect) in &host.rects {
-                            if let Some(quadrant) = active.root.quadrant(pane) {
-                                quadrants
-                                    .entry(quadrant)
-                                    .and_modify(|bounds| *bounds = bounds.union(rect))
-                                    .or_insert(rect);
-                            }
+                    let mut quadrants = BTreeMap::<Id, egui::Rect>::new();
+                    for (&pane, &rect) in &host.rects {
+                        if let Some(quadrant) = active.root.quadrant(pane) {
+                            quadrants
+                                .entry(quadrant)
+                                .and_modify(|bounds| *bounds = bounds.union(rect))
+                                .or_insert(rect);
                         }
-                        let selected = active.root.quadrant(peek.target);
-                        for (id, bounds) in quadrants {
+                    }
+                    let mut shared_labels = HashSet::new();
+                    for (id, bounds) in quadrants {
+                        let members = active.root.node(id).unwrap().panes();
+                        let attention = members
+                            .iter()
+                            .any(|id| self.panes.get(id).is_some_and(|pane| pane.unseen));
+                        if let Some(peek) = host.peek {
+                            let selected = active.root.quadrant(peek.target);
                             if !peek.navigation_used && Some(id) != selected {
                                 ui.painter().rect_filled(
                                     bounds,
                                     0.0,
-                                    Color32::from_black_alpha(
-                                        (config.quadrant_peek_opacity * 255.0) as u8,
-                                    ),
+                                    if attention {
+                                        accent
+                                    } else {
+                                        config
+                                            .unfocused_split_fill
+                                            .map(rgb)
+                                            .unwrap_or(Color32::BLACK)
+                                    }
+                                    .gamma_multiply(config.quadrant_peek_opacity),
                                 );
                             }
                             if Some(id) == selected {
                                 ui.painter().rect_stroke(
                                     bounds,
                                     0.0,
-                                    egui::Stroke::new(2.0, Color32::from_rgb(112, 165, 245)),
+                                    egui::Stroke::new(2.0, accent),
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            let pane =
-                                active.activate_quadrant(active.root.node(id).unwrap().panes()[0]);
-                            if let Some(pane) = pane.and_then(|id| self.panes.get(&id)) {
-                                let label = pane
-                                    .cwd
-                                    .file_name()
-                                    .unwrap_or(pane.cwd.as_os_str())
-                                    .to_string_lossy();
-                                let galley = ui.painter().layout_no_wrap(
-                                    label.into_owned(),
-                                    egui::FontId::proportional(18.0),
-                                    Color32::WHITE,
-                                );
-                                let label_bounds =
-                                    egui::Rect::from_center_size(bounds.center(), galley.size());
-                                ui.painter().rect_filled(
-                                    label_bounds.expand(7.0),
-                                    5.0,
-                                    Color32::from_black_alpha(220),
-                                );
-                                ui.painter()
-                                    .galley(label_bounds.min, galley, Color32::WHITE);
+                        }
+                        if let Some(label) = self.quadrant_label(active, host, id) {
+                            shared_labels.extend(members.iter().copied());
+                            DirectoryBadge {
+                                label,
+                                bounds,
+                                large: true,
+                                attention,
+                                accent,
+                                active: members.iter().any(|id| {
+                                    self.panes
+                                        .get(id)
+                                        .is_some_and(|pane| pane.activity.is_active())
+                                }),
+                                flash: self.flash_opacity(id, now, &mut graphics_deadline),
                             }
+                            .paint(ui);
+                        }
+                    }
+                    for (&id, &bounds) in &host.rects {
+                        if shared_labels.contains(&id) {
+                            continue;
+                        }
+                        let Some(pane) = self.panes.get(&id) else {
+                            continue;
+                        };
+                        let selected = host.peek.map_or(focused, |peek| peek.target) == id;
+                        if let Some(label) = DirectoryLabel::new(
+                            directory_name(&pane.cwd),
+                            selected,
+                            host.focused,
+                            false,
+                        ) {
+                            let large = label.large(
+                                active.quadrant_zoom.is_some()
+                                    && (host.peek.is_some() || active.zoom == active.quadrant_zoom),
+                            );
+                            let flash = if label.shows_flash(true, false) {
+                                self.flash_opacity(id, now, &mut graphics_deadline)
+                            } else {
+                                0.0
+                            };
+                            DirectoryBadge {
+                                label,
+                                bounds,
+                                large,
+                                flash,
+                                accent,
+                                active: pane.activity.is_active(),
+                                attention: pane.unseen,
+                            }
+                            .paint(ui);
                         }
                     }
                 });
@@ -2372,6 +2633,9 @@ impl App {
                     });
             }
         });
+        if presentation_changed {
+            self.changed();
+        }
         if let Some(error) = render_error
             && !self.errors.contains(&error)
         {
@@ -3103,6 +3367,24 @@ impl ApplicationHandler<Event> for App {
             }
         }
         let now = Instant::now();
+        let expired = self
+            .panes
+            .iter_mut()
+            .filter_map(|(&id, pane)| {
+                pane.activity
+                    .deadline()
+                    .filter(|&deadline| deadline <= now)
+                    .map(|_| (id, pane.activity.expire(now)))
+            })
+            .collect::<Vec<_>>();
+        for (id, stopped) in expired {
+            if stopped {
+                self.activity_stopped(id, now);
+            }
+            self.repaint_pane(id, true);
+        }
+        self.activity_flashes
+            .retain(|_, flash| flash.next_repaint(now).is_some());
         let count = self.history.len() + self.redo.len();
         self.history.retain(|(expires, _)| *expires > now);
         self.redo.retain(|(expires, _)| *expires > now);
@@ -3121,6 +3403,11 @@ impl ApplicationHandler<Event> for App {
             .save_at
             .into_iter()
             .chain(self.close_at)
+            .chain(
+                self.panes
+                    .values()
+                    .filter_map(|pane| pane.activity.deadline()),
+            )
             .chain((!self.closing.is_empty()).then_some(now + Duration::from_millis(20)))
             .chain(
                 self.history

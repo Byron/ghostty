@@ -20,6 +20,12 @@ impl ScrollbackLimits {
     };
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HyperlinkId {
+    Implicit(u32),
+    Explicit(Vec<u8>),
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Color {
     #[default]
@@ -71,6 +77,9 @@ pub struct Cell {
     pub width: u8,
     pub style: Style,
     pub hyperlink: Option<String>,
+    pub hyperlink_id: Option<HyperlinkId>,
+    /// Present only when the OSC 8 URI contains bytes that are not UTF-8.
+    pub hyperlink_raw: Option<Vec<u8>>,
     pub protected: bool,
     pub semantic: SemanticContent,
     /// Padding before a wide glyph that wrapped at the right edge.
@@ -84,6 +93,8 @@ impl Default for Cell {
             width: 1,
             style: Style::default(),
             hyperlink: None,
+            hyperlink_id: None,
+            hyperlink_raw: None,
             protected: false,
             semantic: SemanticContent::Output,
             spacer_head: false,
@@ -112,6 +123,7 @@ pub struct Row {
     pub id: u64,
     pub cells: Vec<Cell>,
     pub wrapped: bool,
+    pub wrap_continuation: bool,
     pub semantic: SemanticContent,
     pub dirty: bool,
 }
@@ -122,6 +134,7 @@ impl Row {
             id,
             cells: vec![Cell::blank(background); cols],
             wrapped: false,
+            wrap_continuation: false,
             semantic: SemanticContent::Output,
             dirty: true,
         }
@@ -143,13 +156,18 @@ impl Row {
         result
     }
 
-    fn storage_bytes(&self) -> usize {
+    pub(crate) fn storage_bytes(&self) -> usize {
         size_of::<Self>()
             .saturating_add(self.cells.capacity().saturating_mul(size_of::<Cell>()))
             .saturating_add(self.cells.iter().fold(0usize, |bytes, cell| {
                 bytes
                     .saturating_add(cell.text.capacity())
                     .saturating_add(cell.hyperlink.as_ref().map_or(0, String::capacity))
+                    .saturating_add(cell.hyperlink_raw.as_ref().map_or(0, Vec::capacity))
+                    .saturating_add(match &cell.hyperlink_id {
+                        Some(HyperlinkId::Explicit(id)) => id.capacity(),
+                        _ => 0,
+                    })
             }))
     }
 
@@ -221,6 +239,8 @@ pub struct Cursor {
     pub style: Style,
     pub protected: bool,
     pub hyperlink: Option<String>,
+    pub hyperlink_id: Option<HyperlinkId>,
+    pub hyperlink_raw: Option<Vec<u8>>,
     pub semantic: SemanticContent,
 }
 
@@ -236,6 +256,8 @@ impl Default for Cursor {
             style: Style::default(),
             protected: false,
             hyperlink: None,
+            hyperlink_id: None,
+            hyperlink_raw: None,
             semantic: SemanticContent::Output,
         }
     }
@@ -285,6 +307,8 @@ pub(crate) struct SavedCursor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
     #[serde(skip)]
+    pub(crate) metadata: crate::snapshot::ScreenMetadata,
+    #[serde(skip)]
     pub graphics: crate::graphics::Graphics,
     pub rows: Vec<Row>,
     pub history: VecDeque<Row>,
@@ -296,7 +320,7 @@ pub struct Screen {
     pub(crate) charset: CharsetState,
     pub(crate) iso_protection: bool,
     pub(crate) limits: ScrollbackLimits,
-    history_bytes: usize,
+    pub(crate) history_bytes: usize,
     pub(crate) next_row: u64,
     #[serde(skip)]
     tracked: HashMap<u64, Option<GridPoint>>,
@@ -307,6 +331,7 @@ pub struct Screen {
 impl Screen {
     pub(crate) fn new(cols: usize, rows: usize, limits: ScrollbackLimits) -> Self {
         Self {
+            metadata: crate::snapshot::ScreenMetadata::default(),
             graphics: crate::graphics::Graphics::default(),
             rows: (0..rows)
                 .map(|i| Row::new(i as u64, cols, Color::Default))
@@ -343,6 +368,7 @@ impl Screen {
         cursor.visible &= cursor.row < self.rows.len();
         cursor.row = cursor.row.min(self.rows.len() - 1);
         Self {
+            metadata: self.metadata.clone(),
             graphics: self.graphics.snapshot(self),
             rows: self.viewport().cloned().collect(),
             history: VecDeque::new(),
@@ -677,6 +703,7 @@ impl Screen {
                         line.wrapped = true;
                         output.push(line);
                         line = self.blank_row(cols, Color::Default);
+                        line.wrap_continuation = true;
                         x = 0;
                     }
                     map.insert(

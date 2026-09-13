@@ -40,6 +40,7 @@ pub struct Margins {
 
 #[derive(Clone, Debug)]
 pub struct Terminal {
+    pub(crate) metadata: crate::snapshot::TerminalMetadata,
     pub cols: u16,
     pub rows: u16,
     pub width_px: u32,
@@ -61,9 +62,9 @@ pub struct Terminal {
     pub(crate) alternate_active: bool,
     pub(crate) parser: Parser,
     pub(crate) tabstops: Vec<bool>,
-    previous_char: Option<char>,
+    pub(crate) previous_char: Option<char>,
     grapheme_state: u8,
-    status_display: bool,
+    pub(crate) status_display: bool,
     dcs: Vec<u8>,
     dcs_header: (Vec<u8>, Vec<u16>, u8),
     apc: Vec<u8>,
@@ -87,6 +88,7 @@ impl Terminal {
         let cols = cols.max(1);
         let rows = rows.max(1);
         Self {
+            metadata: crate::snapshot::TerminalMetadata::default(),
             cols,
             rows,
             width_px: 0,
@@ -210,12 +212,91 @@ impl Terminal {
             self.cursor_color,
             self.palette.clone(),
         );
+        let (width_px, height_px) = (self.width_px, self.height_px);
+        let mut metadata = self.metadata.clone();
+        metadata.cursor_is_default = true;
+        metadata.shell_redraw = 0;
+        metadata.mouse_shift_capture = None;
+        metadata.password_input = false;
+        metadata.title_raw = None;
+        metadata.pwd_raw = None;
+        let mut modes = self.modes.clone();
+        modes.reset();
         *self = Self::with_limits(self.cols, self.rows, limits);
+        self.width_px = width_px;
+        self.height_px = height_px;
+        self.metadata = metadata;
+        self.modes = modes;
         self.foreground = foreground;
         self.background = background;
         self.cursor_color = cursor;
         self.palette = palette;
+        self.set_cursor_style(0);
         self.changed();
+    }
+
+    /// Update configured colors while preserving application overrides.
+    /// Palette entries beyond the supplied slice retain their defaults.
+    pub fn set_default_colors(
+        &mut self,
+        foreground: [u8; 3],
+        background: [u8; 3],
+        cursor: Option<[u8; 3]>,
+        palette: &[[u8; 3]],
+    ) {
+        for (entry, value) in
+            self.metadata
+                .colors
+                .iter_mut()
+                .zip([Some(background), Some(foreground), cursor])
+        {
+            entry[0] = value;
+        }
+        self.background = self.metadata.colors[0][1].unwrap_or(background);
+        self.foreground = self.metadata.colors[1][1].unwrap_or(foreground);
+        self.cursor_color = self.metadata.colors[2][1].or(cursor);
+        for (i, &color) in palette.iter().take(256).enumerate() {
+            self.metadata.original_palette[i] = color;
+            if self.metadata.palette_overrides[i / 8] & (1 << (i % 8)) == 0 {
+                self.palette[i] = color;
+            }
+        }
+        self.changed();
+    }
+
+    /// Configuration changes apply immediately while the cursor follows its
+    /// default; an application-selected shape persists until CSI 0 SP q/reset.
+    pub fn set_default_cursor(&mut self, shape: CursorShape, blink: Option<bool>) {
+        self.metadata.cursor_default_shape = crate::snapshot::cursor_shape(shape);
+        self.metadata.cursor_default_blink = blink;
+        if self.metadata.cursor_is_default {
+            self.set_cursor_style(0);
+        }
+    }
+
+    fn set_cursor_style(&mut self, value: u16) {
+        self.metadata.cursor_is_default = value == 0;
+        let shape = match value {
+            0 => crate::snapshot::decode_shape(self.metadata.cursor_default_shape),
+            3 | 4 => CursorShape::Underline,
+            5 | 6 => CursorShape::Bar,
+            _ => CursorShape::Block,
+        };
+        let blink = if value == 0 {
+            self.metadata.cursor_default_blink.unwrap_or(true)
+        } else {
+            matches!(value, 1 | 3 | 5)
+        };
+        self.screen_mut().cursor.shape = shape;
+        self.set_mode(true, 12, blink);
+        self.changed();
+    }
+
+    fn end_hyperlink(&mut self) {
+        let cursor = &mut self.screen_mut().cursor;
+        cursor.hyperlink = None;
+        cursor.hyperlink_id = None;
+        cursor.hyperlink_raw = None;
     }
 
     pub fn plain_text(&self) -> String {
@@ -503,6 +584,8 @@ impl Terminal {
             width,
             style: cursor.style,
             hyperlink: cursor.hyperlink,
+            hyperlink_id: cursor.hyperlink_id,
+            hyperlink_raw: cursor.hyperlink_raw,
             protected: cursor.protected,
             semantic: cursor.semantic,
             spacer_head,
@@ -524,6 +607,10 @@ impl Terminal {
             self.screen_mut().rows[y].wrapped = true;
         }
         self.index();
+        if self.margins.left == 0 && self.margins.right == self.cols as usize - 1 {
+            let y = self.screen().cursor.row;
+            self.screen_mut().rows[y].wrap_continuation = true;
+        }
         self.screen_mut().cursor.col = self.margins.left;
         self.screen_mut().cursor.pending_wrap = false;
     }
@@ -860,8 +947,17 @@ impl Terminal {
                     self.cursor_position(1, 1);
                 }
                 6 => self.cursor_position(1, 1),
-                12 => self.screen_mut().cursor.blink = value,
-                25 => self.screen_mut().cursor.visible = value,
+                12 | 25 => {
+                    for screen in
+                        std::iter::once(&mut self.primary).chain(self.alternate.iter_mut())
+                    {
+                        if mode == 12 {
+                            screen.cursor.blink = value;
+                        } else {
+                            screen.cursor.visible = value;
+                        }
+                    }
+                }
                 47 | 1047 | 1049 => self.switch_screen(mode, value),
                 69 if !value => {
                     self.margins.left = 0;
@@ -891,7 +987,7 @@ impl Terminal {
         }
         let old_cursor = self.screen().cursor.clone();
         let charset = self.screen().charset.clone();
-        self.screen_mut().cursor.hyperlink = None;
+        self.end_hyperlink();
         let switched = self.alternate_active != enabled;
         if enabled && self.alternate.is_none() {
             self.alternate = Some(Screen::new(
@@ -908,7 +1004,7 @@ impl Terminal {
         }
         if switched {
             self.screen_mut().cursor = old_cursor;
-            self.screen_mut().cursor.hyperlink = None;
+            self.end_hyperlink();
         }
         if mode == 1049 && !enabled {
             self.restore_cursor();
@@ -934,6 +1030,13 @@ impl Terminal {
             ([], b'>') => self.set_mode(true, 66, false),
             ([], b'N') => self.screen_mut().charset.single = Some(2),
             ([], b'O') => self.screen_mut().charset.single = Some(3),
+            ([], b'V') => {
+                let screen = self.screen_mut();
+                screen.cursor.protected = true;
+                screen.iso_protection = true;
+                screen.metadata.protected_mode = 1;
+            }
+            ([], b'W') => self.screen_mut().cursor.protected = false,
             ([], b'n') => self.screen_mut().charset.gl = 2,
             ([], b'o') => self.screen_mut().charset.gl = 3,
             ([], b'~') => self.screen_mut().charset.gr = 1,
@@ -1104,20 +1207,19 @@ impl Terminal {
                 }
             }
             ([], b'u') => self.restore_cursor(),
-            ([b' '], b'q') if n <= 6 => {
-                self.screen_mut().cursor.shape = match n {
-                    3 | 4 => CursorShape::Underline,
-                    5 | 6 => CursorShape::Bar,
-                    _ => CursorShape::Block,
-                };
-                self.screen_mut().cursor.blink = matches!(n, 0 | 1 | 3 | 5);
-                self.changed();
+            ([b' '], b'q') if n <= 6 => self.set_cursor_style(n),
+            ([b'"'], b'q') if n <= 2 => {
+                let screen = self.screen_mut();
+                screen.cursor.protected = n == 1;
+                if n == 1 {
+                    screen.iso_protection = false;
+                    screen.metadata.protected_mode = 2;
+                }
             }
-            ([b'"'], b'q') => self.screen_mut().cursor.protected = n == 1,
             ([b'!'], b'p') => {
                 self.screen_mut().cursor.style = Style::default();
                 self.screen_mut().cursor.protected = false;
-                self.modes = Modes::default();
+                self.modes.reset();
                 self.reset_margins();
                 self.screen_mut().cursor.visible = true;
             }
@@ -1218,31 +1320,52 @@ impl Terminal {
     }
 
     fn osc(&mut self, data: &[u8], bell: bool, effects: &mut Vec<Effect>) {
-        let Some(split) = data.iter().position(|&b| b == b';') else {
-            return;
-        };
+        let split = data.iter().position(|&b| b == b';').unwrap_or(data.len());
         let Ok(number) = std::str::from_utf8(&data[..split])
             .unwrap_or("")
             .parse::<u16>()
         else {
             return;
         };
-        let data = &data[split + 1..];
+        let data = data.get(split + 1..).unwrap_or_default();
         let text = String::from_utf8_lossy(data);
         let terminator = if bell { "\x07" } else { "\x1b\\" };
         match number {
             0 | 2 => {
                 let tail = data.len().saturating_sub(2047);
                 self.title = String::from_utf8_lossy(&data[tail..]).into_owned();
+                self.metadata.title_raw = std::str::from_utf8(&data[tail..])
+                    .is_err()
+                    .then(|| data[tail..].to_vec());
                 effects.push(Effect::Title(self.title.clone()));
             }
             7 => {
                 self.working_directory = text.into_owned();
+                self.metadata.pwd_raw = std::str::from_utf8(data).is_err().then(|| data.to_vec());
                 effects.push(Effect::WorkingDirectory(self.working_directory.clone()));
             }
             8 => {
-                if let Some((_, uri)) = text.split_once(';') {
-                    self.screen_mut().cursor.hyperlink = (!uri.is_empty()).then(|| uri.to_owned());
+                if let Some(split) = data.iter().position(|&b| b == b';') {
+                    self.end_hyperlink();
+                    let uri = &data[split + 1..];
+                    if !uri.is_empty() {
+                        let explicit = data[..split]
+                            .split(|&b| b == b':')
+                            .find_map(|part| part.strip_prefix(b"id=").filter(|id| !id.is_empty()));
+                        let screen = self.screen_mut();
+                        let id = match explicit {
+                            Some(id) => HyperlinkId::Explicit(id.to_vec()),
+                            None => {
+                                let id = screen.metadata.hyperlink_implicit_id;
+                                screen.metadata.hyperlink_implicit_id = id.wrapping_add(1);
+                                HyperlinkId::Implicit(id)
+                            }
+                        };
+                        screen.cursor.hyperlink = Some(String::from_utf8_lossy(uri).into_owned());
+                        screen.cursor.hyperlink_raw =
+                            std::str::from_utf8(uri).is_err().then(|| uri.to_vec());
+                        screen.cursor.hyperlink_id = Some(id);
+                    }
                 }
             }
             9 => {
@@ -1318,6 +1441,7 @@ impl Terminal {
                             effects.push(Effect::Write(format!("\x1b]4;{index};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{terminator}").into_bytes()));
                         } else if let Some(color) = parse_color(value) {
                             self.palette[index as usize] = color;
+                            self.metadata.palette_overrides[index as usize / 8] |= 1 << (index % 8);
                             self.changed();
                         }
                     }
@@ -1338,6 +1462,11 @@ impl Terminal {
                         let [r, g, b] = color;
                         effects.push(Effect::Write(format!("\x1b]{target};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{terminator}").into_bytes()));
                     } else if let Some(color) = parse_color(value) {
+                        self.metadata.colors[match target {
+                            10 => 1,
+                            11 => 0,
+                            _ => 2,
+                        }][1] = Some(color);
                         match target {
                             10 => self.foreground = color,
                             11 => self.background = color,
@@ -1348,26 +1477,31 @@ impl Terminal {
                 }
             }
             104 => {
-                let default = default_palette();
                 if text.is_empty() {
-                    self.palette = default;
+                    self.palette.clone_from(&self.metadata.original_palette);
+                    self.metadata.palette_overrides = [0; 32];
                 } else {
                     for index in text.split(';').filter_map(|v| v.parse::<u8>().ok()) {
-                        self.palette[index as usize] = default[index as usize];
+                        self.palette[index as usize] =
+                            self.metadata.original_palette[index as usize];
+                        self.metadata.palette_overrides[index as usize / 8] &= !(1 << (index % 8));
                     }
                 }
                 self.changed();
             }
             110 => {
-                self.foreground = [255; 3];
+                self.metadata.colors[1][1] = None;
+                self.foreground = self.metadata.colors[1][0].unwrap_or([255; 3]);
                 self.changed();
             }
             111 => {
-                self.background = [0; 3];
+                self.metadata.colors[0][1] = None;
+                self.background = self.metadata.colors[0][0].unwrap_or([0; 3]);
                 self.changed();
             }
             112 => {
-                self.cursor_color = None;
+                self.metadata.colors[2][1] = None;
+                self.cursor_color = self.metadata.colors[2][0];
                 self.changed();
             }
             1 | 21 | 22 => {}
@@ -1395,7 +1529,7 @@ impl Terminal {
                 b" q" => {
                     let cursor = &self.screen().cursor;
                     let shape = match cursor.shape {
-                        CursorShape::Block => 2,
+                        CursorShape::Block | CursorShape::HollowBlock => 2,
                         CursorShape::Underline => 4,
                         CursorShape::Bar => 6,
                     };

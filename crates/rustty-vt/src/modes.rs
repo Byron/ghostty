@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub struct Modes {
     values: BTreeMap<(bool, u16), bool>,
     saved: BTreeMap<(bool, u16), bool>,
+    defaults: BTreeMap<(bool, u16), bool>,
 }
 
 const ANSI: &[u16] = &[2, 4, 12, 20];
@@ -25,13 +26,46 @@ impl Default for Modes {
             values.insert((true, mode), matches!(mode, 7 | 25 | 1007 | 1035 | 1036));
         }
         Self {
+            defaults: values.clone(),
+            saved: values.clone(),
             values,
-            saved: BTreeMap::new(),
         }
     }
 }
 
 impl Modes {
+    pub(crate) fn packed(&self) -> [u64; 3] {
+        [&self.values, &self.saved, &self.defaults].map(|values| {
+            ANSI.iter()
+                .map(|&n| (false, n))
+                .chain(DEC.iter().map(|&n| (true, n)))
+                .enumerate()
+                .fold(0u64, |bits, (i, key)| {
+                    bits | (u64::from(
+                        values
+                            .get(&key)
+                            .copied()
+                            .unwrap_or_else(|| self.defaults.get(&key).copied().unwrap_or(false)),
+                    ) << i)
+                })
+        })
+    }
+
+    pub(crate) fn from_packed(bits: [u64; 3]) -> Self {
+        let [values, saved, defaults] = bits.map(|bits| {
+            ANSI.iter()
+                .map(|&n| (false, n))
+                .chain(DEC.iter().map(|&n| (true, n)))
+                .enumerate()
+                .map(|(i, key)| (key, bits & (1 << i) != 0))
+                .collect()
+        });
+        Self {
+            values,
+            saved,
+            defaults,
+        }
+    }
     pub fn get(&self, private: bool, mode: u16) -> bool {
         self.values.get(&(private, mode)).copied().unwrap_or(false)
     }
@@ -53,6 +87,18 @@ impl Modes {
         let value = self.saved.get(&(private, mode)).copied().unwrap_or(false);
         self.set(private, mode, value);
         value
+    }
+    /// Set a configurable mode's current value and reset default.
+    pub fn set_default(&mut self, private: bool, mode: u16, value: bool) -> bool {
+        if !self.set(private, mode, value) {
+            return false;
+        }
+        self.defaults.insert((private, mode), value);
+        true
+    }
+    pub fn reset(&mut self) {
+        self.values.clone_from(&self.defaults);
+        self.saved = Self::default().saved;
     }
     pub fn report(&self, private: bool, mode: u16) -> u8 {
         if private && mode == 117 {

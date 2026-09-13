@@ -385,25 +385,28 @@ fn enqueue(
 }
 
 fn apply_appearance(terminal: &mut Terminal, config: &Config) {
-    terminal.foreground = config.foreground.to_array();
-    terminal.background = config.background.to_array();
-    terminal.palette = config
+    let palette: Vec<_> = config
         .palette
         .iter()
         .map(|color| color.to_array())
         .collect();
-    terminal.cursor_color = config.cursor_color.and_then(|color| match color {
+    let cursor_color = config.cursor_color.and_then(|color| match color {
         TerminalColor::Rgb(color) => Some(color.to_array()),
         _ => None,
     });
-    let cursor = &mut terminal.screen_mut().cursor;
-    cursor.shape = match config.cursor_style {
+    terminal.set_default_colors(
+        config.foreground.to_array(),
+        config.background.to_array(),
+        cursor_color,
+        &palette,
+    );
+    let shape = match config.cursor_style {
         CursorStyle::Bar => CursorShape::Bar,
         CursorStyle::Underline => CursorShape::Underline,
+        CursorStyle::BlockHollow => CursorShape::HollowBlock,
         _ => CursorShape::Block,
     };
-    cursor.blink = config.cursor_style_blink.unwrap_or(false);
-    terminal.generation = terminal.generation.wrapping_add(1);
+    terminal.set_default_cursor(shape, config.cursor_style_blink);
 }
 
 fn command(config: &Config, options: &SessionOptions) -> io::Result<CommandBuilder> {

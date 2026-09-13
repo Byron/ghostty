@@ -601,8 +601,21 @@ impl Platform {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
             Err(e) => return Err(e.to_string()),
         }
-        let path = path.to_str().ok_or("config path is not valid UTF-8")?;
-        open_native_url(&NSURL::fileURLWithPath(&NSString::from_str(path)))
+        // Legacy Ghostty/Rustty extensions may have no Launch Services handler.
+        // `-t` selects the user's default text editor instead of the file type.
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg("-t")
+            .arg(path)
+            .status()
+            .map_err(|error| format!("Could not open settings in a text editor: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "The text editor could not open {} ({status})",
+                path.display()
+            ))
+        }
     }
 }
 

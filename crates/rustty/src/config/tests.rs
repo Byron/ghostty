@@ -80,6 +80,29 @@ fn no_config_returns_defaults_without_creating_any_settings() {
     assert!(!home.loader.home.exists());
     assert!(!loaded.own_config_path.exists());
     assert_eq!(loaded.edit_config_path, loaded.own_config_path);
+    assert_eq!(loaded.own_config_path.file_name().unwrap(), "rustty.txt");
+}
+
+#[test]
+fn rustty_text_settings_take_precedence_with_legacy_paths_still_supported() {
+    let home = TestHome::new();
+    home.local("font-size=30\n");
+    home.write(".config/rustty/config.rustty", "font-size=11\n");
+    let text = home.write(".config/rustty/rustty.txt", "font-size=12\n");
+    let loaded = home.loader.load();
+    assert_eq!(loaded.family, ConfigFamily::Rustty);
+    assert_eq!(loaded.own_config_path, text);
+    assert_eq!(loaded.edit_config_path, text);
+    assert_eq!(loaded.config.font_size, 12.0);
+    home.own("font-size=13\n");
+    assert_eq!(home.loader.load().config.font_size, 13.0);
+    let text = home.write(
+        "Library/Application Support/com.rustty.app/rustty.txt",
+        "font-size=14\n",
+    );
+    let loaded = home.loader.load();
+    assert_eq!(loaded.edit_config_path, text);
+    assert_eq!(loaded.config.font_size, 14.0);
 }
 
 #[test]

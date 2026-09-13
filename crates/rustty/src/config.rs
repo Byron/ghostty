@@ -680,7 +680,7 @@ impl ConfigLoader {
             .rev()
             .find(|p| present(p))
             .cloned()
-            .unwrap_or_else(|| own_app.join("config.rustty"));
+            .unwrap_or_else(|| own_app.join("rustty.txt"));
         let mut result = LoadedConfig {
             config: Config::default(),
             family: ConfigFamily::Defaults,
@@ -1094,12 +1094,19 @@ fn push_diagnostic(
     });
 }
 fn candidates(xdg: &Path, app: &Path, extension: &str) -> Vec<PathBuf> {
-    vec![
-        xdg.join("config"),
-        xdg.join(format!("config.{extension}")),
-        app.join("config"),
-        app.join(format!("config.{extension}")),
-    ]
+    [xdg, app]
+        .into_iter()
+        .flat_map(|directory| {
+            let mut paths = vec![
+                directory.join("config"),
+                directory.join(format!("config.{extension}")),
+            ];
+            if extension == "rustty" {
+                paths.push(directory.join("rustty.txt"));
+            }
+            paths
+        })
+        .collect()
 }
 fn present(path: &Path) -> bool {
     !matches!(fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)

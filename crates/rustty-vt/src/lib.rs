@@ -1,5 +1,6 @@
 //! Headless terminal state and protocol handling.
 
+pub mod graphics;
 pub mod input;
 pub mod modes;
 pub mod screen;

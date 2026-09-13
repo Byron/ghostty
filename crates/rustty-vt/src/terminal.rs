@@ -289,10 +289,12 @@ impl Terminal {
                 }
             }
             Event::ApcEnd => {
-                if !self.apc.is_empty() {
-                    effects.push(Effect::UnknownSequence("APC".into()));
+                let mut apc = std::mem::take(&mut self.apc);
+                if !self.string_overflow {
+                    self.graphics_command(&apc, effects);
                 }
-                self.apc.clear();
+                apc.clear();
+                self.apc = apc;
             }
             Event::OscOverflow => {
                 effects.push(Effect::UnknownSequence("OSC exceeded capture limit".into()))
@@ -757,7 +759,10 @@ impl Terminal {
                 self.erase_line(1, protected);
                 (0, cursor.row)
             }
-            2 => (0, rows),
+            2 => {
+                self.screen_mut().clear_visible_images();
+                (0, rows)
+            }
             3 => {
                 while let Some(row) = self.screen_mut().history.pop_front() {
                     self.screen_mut().discard_row(row.id);

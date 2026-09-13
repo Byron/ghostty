@@ -14,7 +14,7 @@
     {
       "id": "terminal.resize",
       "status": "partial",
-      "remaining": "Reflow, height changes, scrollback pruning and tracked references need complete cases."
+      "remaining": "Row prompt metadata and OSC 133 redraw policies are compared across resize and snapshots; complete reflow, height changes, scrollback pruning and tracked-reference cases remain."
     },
     {
       "id": "terminal.reset",

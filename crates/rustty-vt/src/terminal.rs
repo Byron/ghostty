@@ -412,8 +412,10 @@ impl Terminal {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        let prompt_redraw = self.shell_prompt_redraw();
         self.primary
             .resize(cols.into(), rows.into(), self.modes.dec(7));
+        self.primary.clear_prompt_for_redraw(prompt_redraw);
         if let Some(alt) = &mut self.alternate {
             alt.resize(cols.into(), rows.into(), false);
         }

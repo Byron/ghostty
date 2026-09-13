@@ -1,5 +1,8 @@
 """Checks that the differential runner cannot hide missing coverage or state."""
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 import parity
 
 
@@ -52,6 +55,21 @@ class HarnessTests(unittest.TestCase):
     def test_generated_cases_are_reproducible(self):
         self.assertEqual(list(parity.generated_requests(42, 3)), list(parity.generated_requests(42, 3)))
         self.assertNotEqual(list(parity.generated_requests(41, 3)), list(parity.generated_requests(42, 3)))
+
+    def test_parser_corpus_keeps_its_first_byte(self):
+        data = b"\x1b[31m"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("parser-initial", "parser-cmin"):
+                corpus = root / "test/fuzz-libghostty/corpus" / name
+                corpus.mkdir(parents=True)
+                (corpus / "escape").write_bytes(data)
+            with patch.object(parity, "ROOT", root):
+                requests = [r for r, _ in parity.parser_requests() if "/corpus/" in r["id"]]
+        self.assertEqual(2, len(requests))
+        for request in requests:
+            for variant in parity.variants(request, exhaustive=True):
+                self.assertEqual(data, b"".join(bytes.fromhex(op["data"]) for op in variant["operations"]))
 
 
 if __name__ == "__main__":

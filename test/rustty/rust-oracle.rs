@@ -6,6 +6,8 @@ use std::io::{self, BufRead, Read, Write};
 
 #[path = "rust-input.rs"]
 mod input;
+#[path = "rust-parser.rs"]
+mod parser;
 
 const CAPABILITIES: &[&str] = &[
     "terminal.write",
@@ -24,6 +26,7 @@ const CAPABILITIES: &[&str] = &[
     "input.key",
     "input.mouse",
     "input.focus-paste",
+    "parser.raw-events",
 ];
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -101,13 +104,17 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[]})
+        "observations":[],"events":[],"widths":[],"parser":null})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
     let mut result = response(&request.id, None);
     match request.kind.as_str() {
         "capabilities" => return Ok(result),
+        "parser" => {
+            result["parser"] = parser::run(&request.operations)?;
+            return Ok(result);
+        }
         "unicode" => {
             let mut widths = Vec::new();
             for &cp in &request.codepoints {

@@ -3,15 +3,17 @@
 const std = @import("std");
 const vt = @import("ghostty-vt");
 const input_adapter = @import("zig-input.zig");
+const parser_adapter = @import("zig-parser.zig");
 const Allocator = std.mem.Allocator;
 
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
-    "terminal.write", "terminal.resize", "terminal.reset",   "terminal.observe",
-    "terminal.cells", "terminal.styles", "terminal.screens", "terminal.cursor",
-    "effects.pty",    "effects.title",   "effects.pwd",      "effects.bell",
-    "unicode.width",  "input.key",       "input.mouse",      "input.focus-paste",
+    "terminal.write",    "terminal.resize", "terminal.reset",   "terminal.observe",
+    "terminal.cells",    "terminal.styles", "terminal.screens", "terminal.cursor",
+    "effects.pty",       "effects.title",   "effects.pwd",      "effects.bell",
+    "unicode.width",     "input.key",       "input.mouse",      "input.focus-paste",
+    "parser.raw-events",
 };
 
 const Operation = struct {
@@ -84,6 +86,7 @@ const Response = struct {
     observations: []Observation = &.{},
     events: []Event = &.{},
     widths: []const i8 = &.{},
+    parser: ?parser_adapter.Result = null,
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -157,6 +160,10 @@ pub fn main(init: std.process.Init) !void {
 fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     var response: Response = .{ .id = request.id };
     if (std.mem.eql(u8, request.kind, "capabilities")) return response;
+    if (std.mem.eql(u8, request.kind, "parser")) {
+        response.parser = try parser_adapter.run(alloc, request.operations);
+        return response;
+    }
     if (std.mem.eql(u8, request.kind, "unicode")) {
         const widths = try alloc.alloc(i8, request.codepoints.len);
         for (request.codepoints, widths) |cp, *width| {

@@ -72,9 +72,14 @@
       "remaining": "Selected codepoints covered; exhaustive Unicode scalar comparison remains."
     },
     {
+      "id": "parser.raw-events",
+      "status": "partial",
+      "remaining": "Raw parser/UTF-8 events and inherited parser corpora are compared; exhaustive transition/boundary combinations and capture-limit behavior remain. Raw OSC observation does not validate command semantics."
+    },
+    {
       "id": "parser.events",
       "status": "pending",
-      "remaining": "Normalize raw parser events and validated OSC semantics without dropping coverage."
+      "remaining": "Validated OSC semantics, command-specific limits and malformed command behavior still require terminal/protocol comparisons."
     },
     {
       "id": "terminal.modes",

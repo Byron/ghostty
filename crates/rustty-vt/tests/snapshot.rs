@@ -285,7 +285,8 @@ fn restored_defaults_survive_configuration_changes_and_protocol_resets() {
 #[test]
 fn invalid_utf8_metadata_and_links_survive_without_loss() {
     let mut terminal = Terminal::new(5, 3, 10);
-    terminal.feed(b"\x1b]2;title\xff\x07\x1b]7;file:///\xfe\x07\x1b]8;id=\xff;https://x/\xfd\x07z");
+    terminal.set_title(b"title\xff");
+    terminal.feed(b"\x1b]7;file:///\xfe\x07\x1b]8;id=\xff;https://x/\xfd\x07z");
     let encoded = encode_to_vec(&terminal).unwrap();
     let restored = decode(encoded.as_slice(), DecodeOptions::default()).unwrap();
     same_terminal(&terminal, &restored);

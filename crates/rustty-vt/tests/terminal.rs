@@ -346,11 +346,11 @@ fn byte_budget_accounts_for_hyperlinks_and_reflow_allocations() {
     linked.feed(
         format!(
             "\x1b]8;;https://example.org/{}\x07a\x1b]8;;\x07\r\nb\r\nc",
-            "x".repeat(4096)
+            "x".repeat(1024)
         )
         .as_bytes(),
     );
-    assert!(linked.screen().history_bytes() > plain.screen().history_bytes() + 4096);
+    assert!(linked.screen().history_bytes() > plain.screen().history_bytes() + 1024);
     let limit = plain.screen().storage_bytes();
     linked.set_limits(ScrollbackLimits {
         bytes: Some(limit),

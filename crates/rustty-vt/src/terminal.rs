@@ -10,8 +10,8 @@ use rustty_parser::{Event, Parser};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Write(Vec<u8>),
-    Title(String),
-    WorkingDirectory(String),
+    Title(Vec<u8>),
+    WorkingDirectory(Vec<u8>),
     Bell,
     ClipboardRead(clipboard::Read),
     ClipboardWrite(clipboard::Write),
@@ -213,6 +213,40 @@ impl Terminal {
     }
     pub fn tabstops(&self) -> &[bool] {
         &self.tabstops
+    }
+
+    /// Raw title bytes, including non-UTF-8 bytes retained by direct setters
+    /// or a stream title truncated in the middle of a character.
+    pub fn title_bytes(&self) -> &[u8] {
+        self.metadata
+            .title_raw
+            .as_deref()
+            .unwrap_or(self.title.as_bytes())
+    }
+
+    pub fn working_directory_bytes(&self) -> &[u8] {
+        self.metadata
+            .pwd_raw
+            .as_deref()
+            .unwrap_or(self.working_directory.as_bytes())
+    }
+
+    /// Replace raw host state without stream length limits or host effects.
+    /// An empty value clears the title; `title` remains its display string.
+    pub fn set_title(&mut self, title: &[u8]) {
+        self.title = String::from_utf8_lossy(title).into_owned();
+        self.metadata.title_raw = std::str::from_utf8(title).is_err().then(|| title.to_vec());
+        self.changed();
+    }
+
+    /// Replace the raw working directory without parsing or decoding its URI.
+    /// An empty value clears it. This direct setter emits no host effects.
+    pub fn set_working_directory(&mut self, directory: &[u8]) {
+        self.working_directory = String::from_utf8_lossy(directory).into_owned();
+        self.metadata.pwd_raw = std::str::from_utf8(directory)
+            .is_err()
+            .then(|| directory.to_vec());
+        self.changed();
     }
 
     /// Feed input with runtime `query_defaults` and return deferred host effects.
@@ -1647,12 +1681,7 @@ impl Terminal {
                 }
                 21 if p.len() == 1 && self.title_report => {
                     let mut reply = b"\x1b]l".to_vec();
-                    reply.extend_from_slice(
-                        self.metadata
-                            .title_raw
-                            .as_deref()
-                            .unwrap_or(self.title.as_bytes()),
-                    );
+                    reply.extend_from_slice(self.title_bytes());
                     reply.extend_from_slice(b"\x1b\\");
                     effects.push(Effect::Write(reply));
                 }
@@ -1681,10 +1710,11 @@ impl Terminal {
         else {
             return;
         };
+        if data[..split] != *number.to_string().as_bytes() {
+            return;
+        }
+        let has_separator = split < data.len();
         if matches!(number, 4 | 5 | 10..=19 | 21 | 104 | 105 | 110..=119) {
-            if data[..split] != *number.to_string().as_bytes() {
-                return;
-            }
             let reply = crate::color::osc(
                 self,
                 number,
@@ -1697,20 +1727,26 @@ impl Terminal {
             return;
         }
         let data = data.get(split + 1..).unwrap_or_default();
+        match number {
+            // These fixed captures append a NUL before dispatch.
+            0 | 2 | 7 | 8 | 777 | 1337 if !has_separator || data.len() >= 2048 => return,
+            9 if !has_separator || data.len() > 2048 => return,
+            _ => {}
+        }
         let text = String::from_utf8_lossy(data);
         match number {
             0 | 2 => {
-                let tail = data.len().saturating_sub(2047);
-                self.title = String::from_utf8_lossy(&data[tail..]).into_owned();
-                self.metadata.title_raw = std::str::from_utf8(&data[tail..])
-                    .is_err()
-                    .then(|| data[tail..].to_vec());
-                effects.push(Effect::Title(self.title.clone()));
+                // The stream validates the full title before the host handler
+                // keeps its first 1024 bytes, even across a UTF-8 boundary.
+                if std::str::from_utf8(data).is_err() {
+                    return;
+                }
+                self.set_title(&data[..data.len().min(1024)]);
+                effects.push(Effect::Title(self.title_bytes().to_vec()));
             }
             7 => {
-                self.working_directory = text.into_owned();
-                self.metadata.pwd_raw = std::str::from_utf8(data).is_err().then(|| data.to_vec());
-                effects.push(Effect::WorkingDirectory(self.working_directory.clone()));
+                self.set_working_directory(data);
+                effects.push(Effect::WorkingDirectory(data.to_vec()));
             }
             8 => {
                 if let Some(split) = data.iter().position(|&b| b == b';') {
@@ -1736,27 +1772,7 @@ impl Terminal {
                     }
                 }
             }
-            9 => {
-                if let Some(progress) = data.strip_prefix(b"4;")
-                    && let Some(&state @ b'0'..=b'4') = progress.first()
-                {
-                    let state = state - b'0';
-                    let value = match state {
-                        0 | 3 => None,
-                        _ if progress.get(1) == Some(&b';') => {
-                            parse_unsigned(&progress[2..]).map(|v| v.min(100) as u8)
-                        }
-                        1 => Some(0),
-                        _ => None,
-                    };
-                    effects.push(Effect::Progress { state, value });
-                } else {
-                    effects.push(Effect::Notification {
-                        title: Vec::new(),
-                        body: data.to_vec(),
-                    });
-                }
-            }
+            9 => self.osc9(data, effects),
             777 => {
                 if let Some(notification) = data.strip_prefix(b"notify;")
                     && let Some(split) = notification.iter().position(|&b| b == b';')
@@ -1765,6 +1781,16 @@ impl Terminal {
                         title: notification[..split].to_vec(),
                         body: notification[split + 1..].to_vec(),
                     });
+                }
+            }
+            1337 => {
+                if let Some(split) = data.iter().position(|&byte| byte == b'=')
+                    && data[..split].eq_ignore_ascii_case(b"CurrentDir")
+                    && split + 1 < data.len()
+                {
+                    let directory = &data[split + 1..];
+                    self.set_working_directory(directory);
+                    effects.push(Effect::WorkingDirectory(directory.to_vec()));
                 }
             }
             52 => {
@@ -1838,6 +1864,66 @@ impl Terminal {
             },
             1 | 22 => {}
             _ => effects.push(Effect::UnknownSequence(format!("OSC {number}"))),
+        }
+    }
+
+    fn osc9(&mut self, data: &[u8], effects: &mut Vec<Effect>) {
+        if data.starts_with(b"12") {
+            let col = self.screen().cursor.col;
+            let left = if col < self.margins.left {
+                0
+            } else {
+                self.margins.left
+            };
+            if col != left {
+                self.carriage_return();
+                self.index();
+            }
+            let screen = self.screen_mut();
+            screen.cursor.semantic = SemanticContent::Prompt;
+            screen.metadata.cursor_clear_eol = false;
+            screen.rows[screen.cursor.row].semantic = SemanticContent::Prompt;
+            return;
+        }
+        if let Some(progress) = data.strip_prefix(b"4;")
+            && let Some(&state @ b'0'..=b'4') = progress.first()
+        {
+            let state = state - b'0';
+            let value = match state {
+                0 | 3 => None,
+                _ if progress.get(1) == Some(&b';') => {
+                    parse_unsigned(&progress[2..]).map(|v| v.min(100) as u8)
+                }
+                1 => Some(0),
+                _ => None,
+            };
+            effects.push(Effect::Progress { state, value });
+            return;
+        }
+        if let Some(directory) = data.strip_prefix(b"9;") {
+            if data.len() < 2048 {
+                self.set_working_directory(directory);
+                effects.push(Effect::WorkingDirectory(directory.to_vec()));
+            }
+            return;
+        }
+        if matches!(
+            data,
+            [b'1', b';', ..]
+                | [b'1', b'0']
+                | [b'1', b'0', b';', b'0'..=b'3', ..]
+                | [b'1', b'1', b';', ..]
+                | [b'2' | b'3' | b'6' | b'7' | b'8', b';', ..]
+                | [b'5', ..]
+        ) {
+            // Recognized ConEmu extensions are ignored by libghostty.
+            return;
+        }
+        if data.len() < 2048 {
+            effects.push(Effect::Notification {
+                title: Vec::new(),
+                body: data.to_vec(),
+            });
         }
     }
 

@@ -709,7 +709,7 @@ mod tests {
             for event in session.events() {
                 match event {
                     SessionEvent::Effect(Effect::Title(title)) => {
-                        effects.push(format!("title:{title}"))
+                        effects.push(format!("title:{}", String::from_utf8_lossy(&title)))
                     }
                     SessionEvent::Effect(Effect::CommandStart) => effects.push("start".into()),
                     SessionEvent::Effect(Effect::CommandEnd { .. }) => effects.push("end".into()),

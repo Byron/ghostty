@@ -11,7 +11,8 @@ use rustty_app::{
     input,
     platform::{Platform, PlatformEvent},
     presentation::{
-        Activity, CompletionFlash, DirectoryLabel, TabAccent, common_directory_name, directory_name,
+        Activity, CompletionFlash, DirectoryLabel, FocusHint, TabAccent, common_directory_name,
+        directory_name,
     },
     workspace::{self, Axis, Id, Peek, Rect, SavedPane, Tab, WindowState, Workspace},
 };
@@ -197,6 +198,7 @@ struct Host {
     mouse_button: Option<vt::MouseButton>,
     selection_drag: Option<input::SelectionDrag>,
     focused: bool,
+    focus_hint: FocusHint,
     visible: bool,
     occluded: bool,
     deadline: Option<Instant>,
@@ -237,14 +239,17 @@ struct DirectoryBadge {
     active: bool,
     attention: bool,
     flash: f32,
-    accent: Color32,
+    accent: TabAccent,
 }
 impl DirectoryBadge {
     fn paint(self, ui: &egui::Ui) {
+        let [r, g, b] = self.accent.background;
+        let accent = Color32::from_rgb(r, g, b);
         let color = if self.label.focused {
-            Color32::WHITE
+            let [r, g, b] = self.accent.foreground;
+            Color32::from_rgb(r, g, b)
         } else {
-            ui.visuals().text_color()
+            ui.visuals().strong_text_color()
         };
         let mut job = egui::text::LayoutJob::simple(
             format!(
@@ -258,6 +263,10 @@ impl DirectoryBadge {
         );
         job.wrap.max_rows = 1;
         job.wrap.break_anywhere = true;
+        job.sections[0]
+            .format
+            .coords
+            .push("wght", if self.large { 600.0 } else { 500.0 });
         if self.label.shows_activity(self.active) {
             job.sections[0].format.underline = egui::Stroke::new(1.0, color);
         }
@@ -282,7 +291,7 @@ impl DirectoryBadge {
             bounds,
             rounding,
             if self.label.focused {
-                Color32::from_black_alpha(235)
+                accent
             } else {
                 ui.visuals().widgets.inactive.bg_fill
             },
@@ -290,18 +299,11 @@ impl DirectoryBadge {
         painter.rect_stroke(
             bounds,
             rounding,
-            egui::Stroke::new(
-                1.0,
-                if self.label.focused {
-                    self.accent
-                } else {
-                    ui.visuals().weak_text_color().gamma_multiply(0.35)
-                },
-            ),
+            egui::Stroke::new(1.0, color.gamma_multiply(0.35)),
             egui::StrokeKind::Inside,
         );
         if self.flash > 0.0 {
-            painter.rect_filled(bounds, rounding, self.accent.gamma_multiply(self.flash));
+            painter.rect_filled(bounds, rounding, accent.gamma_multiply(self.flash));
         }
         painter.galley(bounds.min + padding, galley, color);
     }
@@ -439,6 +441,7 @@ pub fn run() -> Result<()> {
     let context = egui::Context::default();
     context.enable_accesskit();
     context.set_theme(ui_theme(&loaded.config));
+    configure_ui_fonts(&context);
     let repaint = proxy.clone();
     context.set_request_repaint_callback(move |info| {
         if let Some(deadline) = Instant::now().checked_add(info.delay) {
@@ -616,6 +619,20 @@ impl App {
         visible
     }
     fn sync_host_state(&mut self) {
+        let now = Instant::now();
+        for host in self.windows.values_mut() {
+            let focused = self
+                .workspace
+                .windows
+                .iter()
+                .find(|window| window.id == host.id)
+                .and_then(|window| window.tabs.get(window.active_tab))
+                .map(|tab| tab.focused)
+                .filter(|_| host.focused && host.visible);
+            if host.focus_hint.focus(focused, now) {
+                host.repaint();
+            }
+        }
         let visible = self.visible_panes();
         let scheme = color_scheme(self.config_loader.dark_mode);
         for (&id, pane) in &mut self.panes {
@@ -848,6 +865,7 @@ impl App {
             mouse_button: None,
             selection_drag: None,
             focused: false,
+            focus_hint: FocusHint::default(),
             visible: !quick,
             occluded: false,
             deadline: None,
@@ -927,6 +945,16 @@ impl App {
             self.errors.push(error.to_string());
         }
     }
+    fn dismiss_focus_hint(&self, host: &mut Host, pane: Id) {
+        let focused = self
+            .focused(host.id)
+            .filter(|_| host.focused && host.visible);
+        host.focus_hint.focus(focused, Instant::now());
+        if focused == Some(pane) {
+            host.focus_hint.dismiss();
+            host.repaint();
+        }
+    }
     fn paste_target_exists(&self, window: Id, pane: Id) -> bool {
         self.index(window)
             .is_some_and(|index| window_contains_pane(&self.workspace.windows[index], pane))
@@ -955,6 +983,7 @@ impl App {
         terminal.screen_mut().viewport_offset = 0;
         terminal.screen_mut().selection = None;
         drop(terminal);
+        self.dismiss_focus_hint(host, paste.pane);
         self.write(paste.pane, bytes);
         host.repaint();
     }
@@ -1473,6 +1502,9 @@ impl App {
             Action::Unbind => return false,
             Action::Text(bytes) => {
                 if let Some(id) = focused {
+                    if !bytes.is_empty() {
+                        self.dismiss_focus_hint(host, id);
+                    }
                     self.write(id, bytes);
                 }
             }
@@ -1722,7 +1754,7 @@ impl App {
                         vt::clipboard::Location::Standard
                     };
                     match self.paste_event(host.id, id, location) {
-                        Ok(true) => {}
+                        Ok(true) => self.dismiss_focus_hint(host, id),
                         Err(error) => self.errors.push(error),
                         Ok(false) => {
                             let text = if action == Action::PasteFromSelection {
@@ -1768,6 +1800,7 @@ impl App {
             }
             Action::ClearScreen => {
                 if let Some(id) = focused {
+                    self.dismiss_focus_hint(host, id);
                     self.write(id, b"\x0c".to_vec());
                 }
             }
@@ -2154,6 +2187,11 @@ impl App {
                     if binding.flags.all
                         && let Action::Text(bytes) = action
                     {
+                        if !bytes.is_empty()
+                            && let Some(id) = self.focused(host.id)
+                        {
+                            self.dismiss_focus_hint(host, id);
+                        }
                         for id in self
                             .workspace
                             .windows
@@ -2209,6 +2247,9 @@ impl App {
             Some(terminal.encode_key_with_options(&event, options))
         });
         if let Some(bytes) = bytes {
+            if key.state == ElementState::Pressed && !bytes.is_empty() {
+                self.dismiss_focus_hint(host, id);
+            }
             self.write(id, bytes);
         }
         host.repaint();
@@ -2837,7 +2878,7 @@ impl App {
                                 bounds,
                                 large: true,
                                 attention,
-                                accent,
+                                accent: tab_accent,
                                 active: members.iter().any(|id| {
                                     self.panes
                                         .get(id)
@@ -2860,7 +2901,7 @@ impl App {
                             directory_name(&pane.cwd),
                             selected,
                             host.focused,
-                            false,
+                            host.focus_hint.visible(id, now),
                         ) {
                             let large = label.large(
                                 active.quadrant_zoom.is_some()
@@ -2876,7 +2917,7 @@ impl App {
                                 bounds,
                                 large,
                                 flash,
-                                accent,
+                                accent: tab_accent,
                                 active: pane.activity.is_active(),
                                 attention: pane.unseen,
                             }
@@ -3106,6 +3147,9 @@ impl App {
         );
         host.frames += 1;
         host.deadline = graphics_deadline;
+        if let Some(deadline) = host.focus_hint.deadline(now) {
+            host.deadline = Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
+        }
         if let Some((_, deadline)) = host.navigation_warning {
             host.deadline = Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
         }
@@ -3824,6 +3868,11 @@ impl ApplicationHandler<Event> for App {
             WindowEvent::Ime(ime) if !host.ui_input() => {
                 match ime {
                     Ime::Preedit(text, selection) => {
+                        if !text.is_empty()
+                            && let Some(pane) = self.focused(host.id)
+                        {
+                            self.dismiss_focus_hint(&mut host, pane);
+                        }
                         host.composing = !text.is_empty();
                         host.preedit = text;
                         host.preedit_selection = selection;
@@ -3833,6 +3882,9 @@ impl ApplicationHandler<Event> for App {
                         host.preedit.clear();
                         host.preedit_selection = None;
                         if let Some(pane) = self.focused(host.id) {
+                            if !text.is_empty() {
+                                self.dismiss_focus_hint(&mut host, pane);
+                            }
                             self.write(pane, text.into_bytes());
                         }
                     }
@@ -3920,6 +3972,7 @@ impl ApplicationHandler<Event> for App {
                         .get(&id)
                         .and_then(|p| p.session.terminal().ok().map(|t| t.encode_paste(&escaped)));
                     if let Some(bytes) = bytes {
+                        self.dismiss_focus_hint(&mut host, id);
                         self.write(id, bytes);
                     }
                 }
@@ -4298,6 +4351,23 @@ fn initial_visible_panes(window: &WindowState, native: Option<(bool, bool, bool)
     window_visible_panes(window, visible, occluded, peek)
 }
 
+fn configure_ui_fonts(context: &egui::Context) {
+    // Use the installed macOS UI font; egui's bundled fonts remain fallbacks.
+    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/SFNS.ttf") {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "macos-system".into(),
+            Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .unwrap()
+            .insert(0, "macos-system".into());
+        context.set_fonts(fonts);
+    }
+}
+
 fn ui_theme(config: &Config) -> egui::ThemePreference {
     match config.window_theme {
         config::WindowTheme::System => egui::ThemePreference::System,
@@ -4319,6 +4389,64 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_badges_are_centered_and_readable_with_the_native_font() {
+        let context = egui::Context::default();
+        configure_ui_fonts(&context);
+        let bounds = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 240.0));
+        let accent = TabAccent::new(Some([230, 185, 60]), [0; 3]);
+        for focused in [false, true] {
+            for theme in [egui::ThemePreference::Dark, egui::ThemePreference::Light] {
+                context.set_theme(theme);
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(bounds),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let label = DirectoryLabel::new(Some("rustty".into()), focused, true, true)
+                            .unwrap();
+                        DirectoryBadge {
+                            large: label.large(true),
+                            label,
+                            bounds,
+                            active: false,
+                            attention: false,
+                            flash: 0.0,
+                            accent,
+                        }
+                        .paint(ui);
+                    },
+                );
+                output.textures_delta.clear();
+                let text = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) => Some(text),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!((text.pos + text.galley.size() / 2.0 - bounds.center()).length() < 1.0);
+                assert_eq!(
+                    text.galley.job.sections[0].format.color,
+                    if focused || theme == egui::ThemePreference::Light {
+                        Color32::BLACK
+                    } else {
+                        Color32::WHITE
+                    }
+                );
+                if focused {
+                    assert!(output.shapes.iter().any(|shape| {
+                        matches!(&shape.shape, egui::Shape::Rect(rect)
+                            if rect.fill == Color32::from_rgb(230, 185, 60)
+                                && rect.rect.center() == bounds.center())
+                    }));
+                }
+            }
+        }
+    }
 
     #[test]
     fn saved_layout_picker_opens_the_selected_path_and_cancels() {

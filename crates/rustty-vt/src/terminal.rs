@@ -218,6 +218,8 @@ impl Terminal {
 
     pub fn reset(&mut self) {
         let limits = self.primary.limits;
+        let primary_identity = self.primary.metadata.identity;
+        let reflow_generation = self.primary.metadata.reflow_generation;
         let (foreground, background, cursor, palette) = (
             self.foreground,
             self.background,
@@ -235,6 +237,10 @@ impl Terminal {
         let mut modes = self.modes.clone();
         modes.reset();
         *self = Self::with_limits(self.cols, self.rows, limits);
+        // RIS resets the existing primary screen. A streaming restore may
+        // still deliver older history into that same screen afterward.
+        self.primary.metadata.identity = primary_identity;
+        self.primary.metadata.reflow_generation = reflow_generation;
         self.width_px = width_px;
         self.height_px = height_px;
         self.metadata = metadata;

@@ -545,7 +545,9 @@ mod tests {
         assert!(
             bitmap
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|p| p[3] > 0 && (p[0] != p[1] || p[1] != p[2]))
         );
     }

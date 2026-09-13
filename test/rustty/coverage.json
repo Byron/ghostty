@@ -169,7 +169,7 @@
     {
       "id": "snapshot.cross-decode",
       "status": "partial",
-      "remaining": "Both encodings are decoded in both peers and compared to uninterrupted continuation; complete metadata, lazy mixed-width PAGEs and all state transitions still need coverage."
+      "remaining": "Both encodings and uninterrupted continuation are compared; PAGE STYLE/LINK admission, hyperlink string lifetimes/deduplication and linked-cell limits have bounded coverage. Native short-bitmap snapshot cases still abort. Complete metadata, lazy mixed-width PAGEs and all state transitions remain."
     },
     {
       "id": "snapshot.streaming",

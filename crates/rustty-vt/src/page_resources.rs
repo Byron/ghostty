@@ -2,11 +2,12 @@
 use crate::page_layout::{BitmapLayout, SetLayout};
 use crate::screen::Style;
 
-/// The insertion-only phase of native PAGE reference-counted set decoding.
+/// Admission into a native PAGE reference-counted set.
 ///
 /// Every accepted wire ID retains its reference until all styles and cells
-/// have been decoded. No item can die during admission, but reference counts
-/// still decide ties when Robin Hood insertion displaces an existing item.
+/// have been decoded. Rejected LINK wire IDs can leave a dead final entry,
+/// reclaimed before the next admission. Reference counts decide ties when
+/// Robin Hood insertion displaces an existing item.
 pub(crate) struct SetAdmission<T> {
     table: Vec<u16>,
     entries: Vec<SetEntry<T>>,
@@ -40,6 +41,10 @@ impl<T: Eq> SetAdmission<T> {
     }
 
     pub fn admit_hashed(&mut self, value: T, hash: u64) -> bool {
+        self.acquire_hashed(value, hash).is_some()
+    }
+
+    fn acquire_hashed(&mut self, value: T, hash: u64) -> Option<u16> {
         let hash = hash as usize;
         let mask = self.table.len().saturating_sub(1);
         if !self.table.is_empty() {
@@ -53,15 +58,16 @@ impl<T: Eq> SetAdmission<T> {
                     break;
                 }
                 if entry.psl == psl && entry.value == value {
+                    assert!(entry.references > 0, "reclaim discarded LINK entries first");
                     entry.references += 1;
-                    return true;
+                    return Some(id);
                 }
             }
         }
-        // ID zero is reserved. With no releases, the largest PSL never falls,
+        // ID zero is reserved. Reclaiming the dead tail recomputes max_psl,
         // so this is equivalent to native's nonempty psl_stats[31] check.
         if self.max_psl == 31 || self.entries.len() + 1 >= self.capacity {
-            return false;
+            return None;
         }
 
         let new_id = u16::try_from(self.entries.len() + 1).unwrap();
@@ -91,7 +97,134 @@ impl<T: Eq> SetAdmission<T> {
             self.entries[usize::from(held_id) - 1].psl += 1;
         }
         self.entries[usize::from(new_id) - 1].references = 1;
-        true
+        Some(new_id)
+    }
+
+    fn release(&mut self, id: u16) {
+        let index = usize::from(id) - 1;
+        let entry = &mut self.entries[index];
+        assert!(entry.references > 0);
+        entry.references -= 1;
+        // Accepted wire IDs remain referenced until grid decoding ends. Only
+        // a newly created, immediately discarded LINK can become dead here.
+        assert!(entry.references > 0 || index + 1 == self.entries.len());
+    }
+
+    fn pop_unused(&mut self) -> Option<T> {
+        if self.entries.last()?.references != 0 {
+            return None;
+        }
+        let id = u16::try_from(self.entries.len()).unwrap();
+        let mut hole = self.table.iter().position(|&entry| entry == id).unwrap();
+        let mask = self.table.len() - 1;
+        let mut next = (hole + 1) & mask;
+        while self.table[next] != 0 {
+            let entry = &mut self.entries[usize::from(self.table[next]) - 1];
+            if entry.psl == 0 {
+                break;
+            }
+            entry.psl -= 1;
+            self.table[hole] = self.table[next];
+            hole = next;
+            next = (next + 1) & mask;
+        }
+        self.table[hole] = 0;
+        let entry = self.entries.pop().unwrap();
+        self.max_psl = self
+            .entries
+            .iter()
+            .map(|entry| entry.psl)
+            .max()
+            .unwrap_or(0);
+        Some(entry.value)
+    }
+}
+
+/// PAGE LINK decoding reserves new strings before reclaiming a discarded
+/// final set entry, exactly as native decodePage/addContext do.
+pub(crate) struct HyperlinkAdmission {
+    set: SetAdmission<HyperlinkEntry>,
+    strings: BitmapAllocator<32>,
+}
+
+struct HyperlinkEntry {
+    id: crate::screen::HyperlinkId,
+    uri: Vec<u8>,
+    id_allocation: Option<(usize, usize)>,
+    uri_allocation: (usize, usize),
+}
+
+impl PartialEq for HyperlinkEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.uri == other.uri
+    }
+}
+
+impl Eq for HyperlinkEntry {}
+
+impl HyperlinkAdmission {
+    pub fn new(set: SetLayout, strings: BitmapLayout) -> Self {
+        Self {
+            set: SetAdmission::new(set),
+            strings: BitmapAllocator::new(strings),
+        }
+    }
+
+    /// `retain` is false for zero or duplicate wire IDs. Those entries are
+    /// still decoded/admitted before their temporary reference is released.
+    pub fn admit(&mut self, id: &crate::screen::HyperlinkId, uri: &[u8], retain: bool) -> bool {
+        use crate::screen::HyperlinkId;
+        if uri.is_empty() || matches!(id, HyperlinkId::Explicit(value) if value.is_empty()) {
+            return false;
+        }
+        let id_allocation = if let HyperlinkId::Explicit(value) = id {
+            let Some(offset) = self.strings.alloc(value.len()) else {
+                return false;
+            };
+            Some((offset, value.len()))
+        } else {
+            None
+        };
+        let Some(offset) = self.strings.alloc(uri.len()) else {
+            if let Some((offset, len)) = id_allocation {
+                self.strings.free(offset, len);
+            }
+            return false;
+        };
+        let uri_allocation = (offset, uri.len());
+
+        while let Some(entry) = self.set.pop_unused() {
+            self.free_strings(entry.id_allocation, entry.uri_allocation);
+        }
+        let prior_entries = self.set.entries.len();
+        let acquired = self.set.acquire_hashed(
+            HyperlinkEntry {
+                id: id.clone(),
+                uri: uri.to_vec(),
+                id_allocation,
+                uri_allocation,
+            },
+            hyperlink_hash(id, uri),
+        );
+        // A duplicate value or failed admission frees the incoming strings.
+        if acquired.is_none_or(|id| usize::from(id) <= prior_entries) {
+            self.free_strings(id_allocation, uri_allocation);
+        }
+        if let Some(id) = acquired {
+            if !retain {
+                self.set.release(id);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn free_strings(&mut self, id: Option<(usize, usize)>, uri: (usize, usize)) {
+        if let Some((offset, len)) = id {
+            self.strings.free(offset, len);
+        }
+        self.strings.free(uri.0, uri.1);
     }
 }
 
@@ -336,6 +469,82 @@ mod tests {
     use super::*;
     use crate::page_layout::PageCapacity;
     use crate::screen::Color;
+
+    fn hyperlink_admission() -> HyperlinkAdmission {
+        let layout = PageCapacity::STANDARD.metadata().unwrap();
+        HyperlinkAdmission::new(layout.hyperlink_set_layout, layout.string_alloc_layout)
+    }
+
+    #[test]
+    fn discarded_hyperlink_reserves_incoming_strings_before_reclaim() {
+        use crate::screen::HyperlinkId;
+        let mut links = hyperlink_admission();
+        assert!(links.admit(&HyperlinkId::Implicit(1), &vec![b'x'; 2048], false));
+        assert!(!links.admit(&HyperlinkId::Implicit(2), b"x", true));
+        assert_eq!(links.strings.used_bytes(), 2048);
+        assert_eq!(links.set.entries[0].references, 0);
+
+        let mut links = hyperlink_admission();
+        assert!(links.admit(&HyperlinkId::Implicit(1), &vec![b'x'; 1984], false));
+        assert!(links.admit(&HyperlinkId::Explicit(b"id".to_vec()), b"x", true));
+        assert_eq!(links.strings.used_bytes(), 64);
+        assert_eq!(links.set.entries.len(), 1);
+        assert_eq!(links.set.entries[0].references, 1);
+    }
+
+    #[test]
+    fn hyperlink_deduplication_and_failed_uri_free_temporary_strings() {
+        use crate::screen::HyperlinkId;
+        let mut links = hyperlink_admission();
+        let uri = vec![b'x'; 2016];
+        assert!(links.admit(&HyperlinkId::Implicit(1), &uri, true));
+        assert!(!links.admit(&HyperlinkId::Implicit(1), &uri, true));
+        assert_eq!(links.set.entries[0].references, 1);
+
+        let mut links = hyperlink_admission();
+        let uri = vec![b'x'; 992];
+        assert!(links.admit(&HyperlinkId::Implicit(1), &uri, true));
+        assert!(links.admit(&HyperlinkId::Implicit(1), &uri, true));
+        assert_eq!(links.strings.used_bytes(), 992);
+        assert_eq!(links.set.entries[0].references, 2);
+
+        let mut links = hyperlink_admission();
+        assert!(links.admit(&HyperlinkId::Implicit(1), &vec![b'x'; 1984], true));
+        assert!(!links.admit(&HyperlinkId::Explicit(b"id".to_vec()), &[b'x'; 65], true));
+        assert!(links.admit(&HyperlinkId::Implicit(2), &[b'x'; 64], true));
+        assert_eq!(links.strings.used_bytes(), 2048);
+    }
+
+    #[test]
+    fn discarded_set_tail_restores_probe_chain_and_collision_capacity() {
+        let layout = PageCapacity {
+            styles: 64,
+            ..PageCapacity::STANDARD
+        }
+        .metadata()
+        .unwrap()
+        .styles_layout;
+        for bucket in [0, 63] {
+            let mut set = SetAdmission::new(layout);
+            assert_eq!(set.acquire_hashed(1, bucket), Some(1));
+            assert_eq!(set.acquire_hashed(2, (bucket + 1) & 63), Some(2));
+            assert_eq!(set.acquire_hashed(3, bucket), Some(3));
+            set.release(3);
+            assert_eq!(set.pop_unused(), Some(3));
+            assert_eq!(set.table[bucket as usize], 1);
+            assert_eq!(set.table[((bucket + 1) & 63) as usize], 2);
+            assert_eq!(set.max_psl, 0);
+        }
+        let mut set = SetAdmission::new(layout);
+        for value in 0..32 {
+            assert!(set.admit_hashed(value, 0));
+        }
+        assert!(!set.admit_hashed(100, 40));
+        set.release(32);
+        assert_eq!(set.pop_unused(), Some(31));
+        assert_eq!(set.max_psl, 30);
+        assert!(set.admit_hashed(100, 40));
+    }
 
     #[test]
     fn hyperlink_hash_matches_native_page_entry_vectors() {

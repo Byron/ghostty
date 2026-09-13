@@ -5,7 +5,7 @@
 //! do not control native allocation. Version 1 excludes graphics and selection.
 //! Mixed-width PAGEs currently require a separate reflow step and are rejected.
 use crate::modes::Modes;
-use crate::screen::{Charset, CharsetState, SavedCursor};
+use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
     Cell, Color, Cursor, CursorShape, HyperlinkId, Margins, Row, Screen, ScrollbackLimits,
     SemanticContent, Style, Terminal, Underline, default_palette,
@@ -300,18 +300,8 @@ fn encode_screen(screen: &Screen, key: usize) -> io::Result<Vec<u8>> {
     } else {
         m.protected_mode
     });
-    let mut flags = m.keyboard_flags;
-    let mut index = usize::from(m.keyboard_index);
-    let current = flags[..=index].to_vec();
-    if current != screen.kitty_keyboard && !(screen.kitty_keyboard.is_empty() && current == [0]) {
-        flags = [0; 8];
-        index = screen.kitty_keyboard.len().saturating_sub(1).min(7);
-        for (dst, &src) in flags.iter_mut().zip(screen.kitty_keyboard.iter()) {
-            *dst = src & 31;
-        }
-    }
-    out.push(index as u8);
-    out.extend_from_slice(&flags);
+    out.push(screen.kitty_keyboard.index);
+    out.extend_from_slice(&screen.kitty_keyboard.flags);
     out.extend_from_slice(&m.semantic_click);
     out.push(u8::from(screen.saved_cursor.is_some()));
     debug_assert_eq!(out.len(), 53);
@@ -1008,15 +998,15 @@ impl<R: Read> Decoder<R> {
             _ => 0,
         };
         screen.iso_protection = m.protected_mode == 1;
-        m.keyboard_index = match r.u8()? {
+        let index = match r.u8()? {
             v @ 0..=7 => v,
             _ => 0,
         };
-        m.keyboard_flags = r.array()?;
-        for flags in &mut m.keyboard_flags {
+        let mut flags = r.array()?;
+        for flags in &mut flags {
             *flags &= 31;
         }
-        screen.kitty_keyboard = m.keyboard_flags[..=usize::from(m.keyboard_index)].to_vec();
+        screen.kitty_keyboard = KittyKeyboard { flags, index };
         let click = r.array::<2>()?;
         m.semantic_click = if matches!(click, [0, 0] | [1, 0..=1] | [2, 0..=2]) {
             click
@@ -1348,8 +1338,6 @@ pub(crate) struct ScreenMetadata {
     pub identity: u64,
     pub hyperlink_implicit_id: u32,
     pub protected_mode: u8,
-    pub keyboard_index: u8,
-    pub keyboard_flags: [u8; 8],
     pub semantic_click: [u8; 2],
     pub cursor_clear_eol: bool,
 }
@@ -1361,8 +1349,6 @@ impl Default for ScreenMetadata {
             identity: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             hyperlink_implicit_id: 0,
             protected_mode: 0,
-            keyboard_index: 0,
-            keyboard_flags: [0; 8],
             semantic_click: [0; 2],
             cursor_clear_eol: false,
         }

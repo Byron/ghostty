@@ -105,11 +105,14 @@ fn logical_lines(screen: &Screen) -> Vec<Line> {
 }
 
 impl Screen {
+    /// Matches in terminal search order, from newest (bottom/right) to oldest.
     pub fn search(&self, regex: &Regex) -> Vec<Match> {
-        logical_lines(self)
+        let mut matches: Vec<_> = logical_lines(self)
             .into_iter()
             .flat_map(|line| line.matches(regex))
-            .collect()
+            .collect();
+        matches.reverse();
+        matches
     }
 }
 
@@ -223,6 +226,24 @@ impl Default for LinkMatcher {
 mod tests {
     use super::*;
     use crate::Terminal;
+    #[test]
+    fn search_starts_with_the_latest_match_including_history_and_soft_wraps() {
+        let mut terminal = Terminal::new(8, 2, 100);
+        terminal.feed(b"cat cat\r\ncatcatcat\r\ncat");
+        let screen = terminal.screen();
+        let matches = screen.search(&Regex::new("cat").unwrap());
+        let points: Vec<_> = matches
+            .iter()
+            .map(|found| {
+                let index = screen
+                    .all_rows()
+                    .position(|row| row.id == found.start.row)
+                    .unwrap();
+                (index, found.start.col)
+            })
+            .collect();
+        assert_eq!(points, [(3, 0), (1, 6), (1, 3), (1, 0), (0, 4), (0, 0)]);
+    }
     #[test]
     fn cached_links_follow_current_cells_and_explicit_links_across_wraps() {
         let mut terminal = Terminal::new(40, 3, 10);

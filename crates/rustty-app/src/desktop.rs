@@ -825,7 +825,8 @@ impl App {
         for event in events {
             match event {
                 SessionEvent::Effect(vt::Effect::Title(title)) => {
-                    pane.activity.title_changed(&title);
+                    pane.activity
+                        .title_changed(&String::from_utf8_lossy(&title));
                 }
                 SessionEvent::Effect(vt::Effect::Progress { state, .. }) => {
                     stopped |= pane.activity.progress_reported(state, Instant::now());

@@ -2816,6 +2816,25 @@ impl ApplicationHandler<Event> for App {
         let Some(mut host) = self.windows.remove(&window) else {
             return;
         };
+        if let Some(smoke) = &mut self.smoke {
+            let input = match &event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    let position = position.to_logical::<f32>(host.window.scale_factor());
+                    host.mouse != Pos2::new(position.x, position.y)
+                }
+                WindowEvent::KeyboardInput {
+                    is_synthetic: false,
+                    ..
+                }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::Touch(_) => true,
+                _ => false,
+            };
+            if input {
+                smoke.input(host.frames);
+            }
+        }
         let response = host.egui.on_window_event(&host.window, &event);
         if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
             host.repaint();

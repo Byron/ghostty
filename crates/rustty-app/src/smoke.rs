@@ -45,6 +45,14 @@ impl Smoke {
             idle_frames: 0,
         }))
     }
+    pub fn input(&mut self, frames: u64) {
+        if self.stage == 4 {
+            // A developer can keep using an unlocked Mac during this check.
+            // Measure a full quiet interval, rather than calling input redraws idle.
+            self.idle_frames = frames;
+            self.next = Instant::now() + Duration::from_millis(1500);
+        }
+    }
     pub fn step(&mut self, app: &mut App, event_loop: &ActiveEventLoop) -> Result<bool> {
         if Instant::now() > self.deadline {
             return Err(format!(
@@ -93,7 +101,7 @@ impl Smoke {
                 }
                 self.original = Some(pane);
                 app.write(pane, b"printf '\\122USTTY_INPUT_OK\\n'\r".to_vec());
-                eprintln!("Native smoke: shell window rendered");
+                eprintln!("Native smoke: shell output received");
                 self.stage = 1;
             }
             1 => {

@@ -51,6 +51,9 @@ pub struct Terminal {
     pub foreground: [u8; 3],
     pub background: [u8; 3],
     pub cursor_color: Option<[u8; 3]>,
+    /// Host's actual TERM name, used for XTGETTCAP TN. Unset or names longer
+    /// than 128 bytes leave TN unanswered. This host setting is not persisted.
+    pub terminfo_name: Option<String>,
     pub title: String,
     pub working_directory: String,
     pub generation: u64,
@@ -104,6 +107,7 @@ impl Terminal {
             foreground: [255; 3],
             background: [0; 3],
             cursor_color: None,
+            terminfo_name: None,
             title: String::new(),
             working_directory: String::new(),
             generation: 0,
@@ -220,6 +224,7 @@ impl Terminal {
         let limits = self.primary.limits;
         let primary_identity = self.primary.metadata.identity;
         let reflow_generation = self.primary.metadata.reflow_generation;
+        let terminfo_name = self.terminfo_name.take();
         let (foreground, background, cursor, palette) = (
             self.foreground,
             self.background,
@@ -241,6 +246,7 @@ impl Terminal {
         // still deliver older history into that same screen afterward.
         self.primary.metadata.identity = primary_identity;
         self.primary.metadata.reflow_generation = reflow_generation;
+        self.terminfo_name = terminfo_name;
         self.width_px = width_px;
         self.height_px = height_px;
         self.metadata = metadata;
@@ -392,7 +398,12 @@ impl Terminal {
                 self.dcs_header = (intermediates.to_vec(), params.to_vec(), final_byte);
             }
             Event::DcsPut(byte) => {
-                if self.dcs.len() < 8192 {
+                let limit = if self.dcs_header.0 == b"$" && self.dcs_header.2 == b'q' {
+                    2
+                } else {
+                    1024 * 1024
+                };
+                if self.dcs.len() < limit {
                     self.dcs.push(byte);
                 } else {
                     self.string_overflow = true;
@@ -1534,13 +1545,13 @@ impl Terminal {
         }
         if self.dcs_header.0 == b"$" && self.dcs_header.2 == b'q' {
             let value = match self.dcs.as_slice() {
-                b"m" => Some("0m".to_owned()),
+                b"m" => Some(sgr_report(self.screen().cursor.style)),
                 b"r" => Some(format!(
                     "{};{}r",
                     self.margins.top + 1,
                     self.margins.bottom + 1
                 )),
-                b"s" => Some(format!(
+                b"s" if self.modes.dec(69) => Some(format!(
                     "{};{}s",
                     self.margins.left + 1,
                     self.margins.right + 1
@@ -1554,18 +1565,97 @@ impl Terminal {
                     };
                     Some(format!("{} q", shape - u8::from(cursor.blink)))
                 }
-                b"\"q" => Some(format!("{}\"q", u8::from(self.screen().cursor.protected))),
                 _ => None,
             };
             effects.push(Effect::Write(match value {
                 Some(value) => format!("\x1bP1$r{value}\x1b\\").into_bytes(),
                 None => b"\x1bP0$r\x1b\\".to_vec(),
             }));
+        } else if self.dcs_header.0 == b"+" && self.dcs_header.2 == b'q' {
+            let queries = String::from_utf8_lossy(&self.dcs).to_ascii_uppercase();
+            for key in queries.split(';') {
+                let value = if key == "544E" {
+                    let Some(name) = self
+                        .terminfo_name
+                        .as_ref()
+                        .filter(|name| !name.is_empty() && name.len() <= 128)
+                    else {
+                        continue;
+                    };
+                    name.as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02X}"))
+                        .collect::<String>()
+                } else {
+                    let table = crate::terminfo::CAPABILITIES;
+                    let Ok(index) = table.binary_search_by_key(&key, |(name, _)| *name) else {
+                        continue;
+                    };
+                    table[index].1.to_owned()
+                };
+                effects.push(Effect::Write(
+                    if value.is_empty() {
+                        format!("\x1bP1+r{key}\x1b\\")
+                    } else {
+                        format!("\x1bP1+r{key}={value}\x1b\\")
+                    }
+                    .into_bytes(),
+                ));
+            }
         } else {
             effects.push(Effect::UnknownSequence("DCS".into()));
         }
         self.dcs.clear();
     }
+}
+
+fn sgr_report(style: Style) -> String {
+    let mut result = String::from("0");
+    for (enabled, code) in [(style.bold, 1), (style.faint, 2), (style.italic, 3)] {
+        if enabled {
+            result.push_str(&format!(";{code}"));
+        }
+    }
+    match style.underline {
+        Underline::None => {}
+        Underline::Single => result.push_str(";4"),
+        underline => result.push_str(&format!(
+            ";4:{}",
+            match underline {
+                Underline::Double => 2,
+                Underline::Curly => 3,
+                Underline::Dotted => 4,
+                Underline::Dashed => 5,
+                _ => unreachable!(),
+            }
+        )),
+    }
+    for (enabled, code) in [
+        (style.overline, 53),
+        (style.blink, 5),
+        (style.inverse, 7),
+        (style.invisible, 8),
+        (style.strikethrough, 9),
+    ] {
+        if enabled {
+            result.push_str(&format!(";{code}"));
+        }
+    }
+    for (color, base) in [(style.foreground, 30), (style.background, 40)] {
+        match color {
+            Color::Default => {}
+            Color::Indexed(index) if index < 8 => {
+                result.push_str(&format!(";{}", base + u16::from(index)))
+            }
+            Color::Indexed(index) if index < 16 => {
+                result.push_str(&format!(";{}", base + 60 + u16::from(index) - 8))
+            }
+            Color::Indexed(index) => result.push_str(&format!(";{}:5:{index}", base + 8)),
+            Color::Rgb(r, g, b) => result.push_str(&format!(";{}:2::{r}:{g}:{b}", base + 8)),
+        }
+    }
+    result.push('m');
+    result
 }
 
 fn map_charset(cp: char, set: Charset) -> char {

@@ -1574,7 +1574,12 @@ impl Terminal {
                     self.carriage_return();
                 }
             }
-            ([], b'S') => self.scroll_up(count, true),
+            ([], b'S') => {
+                // SU defaults to one only when the parameter is omitted.
+                if p.is_empty() || n != 0 {
+                    self.scroll_up(count, true);
+                }
+            }
             ([], b'T') => self.scroll_down(count),
             ([], b'b') => {
                 if let Some(cp) = self.previous_char {

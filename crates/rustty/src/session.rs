@@ -189,7 +189,9 @@ impl Session {
                                     let _ = read_events.send(SessionEvent::Error(e.to_string()));
                                 }
                             }
-                            Effect::Title(_) | Effect::WorkingDirectory(_) => {}
+                            // The UI needs ordered title changes to distinguish
+                            // working/waiting reports across command boundaries.
+                            Effect::WorkingDirectory(_) => {}
                             effect => {
                                 read_wake();
                                 if read_events.send(SessionEvent::Effect(effect)).is_err() {
@@ -585,6 +587,50 @@ fn command(config: &Config, options: &SessionOptions) -> io::Result<CommandBuild
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn activity_title_effects_keep_their_order_around_command_boundaries() {
+        let session = Session::spawn(
+            &Config::default(),
+            SessionOptions {
+                command: Some(Command::Direct(vec![
+                    "/bin/sh".into(), "-c".into(),
+                    r"printf '\033]133;C\007\033]0;working\007\033]9;4;1;23\007\033]133;D;0\007\033]0;ready\007'".into(),
+                ])),
+                ..SessionOptions::default()
+            },
+            Arc::new(|| {}),
+        ).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut effects = Vec::new();
+        let mut closed = false;
+        while !closed && Instant::now() < deadline {
+            for event in session.events() {
+                match event {
+                    SessionEvent::Effect(Effect::Title(title)) => {
+                        effects.push(format!("title:{title}"))
+                    }
+                    SessionEvent::Effect(Effect::CommandStart) => effects.push("start".into()),
+                    SessionEvent::Effect(Effect::CommandEnd { .. }) => effects.push("end".into()),
+                    SessionEvent::Effect(Effect::Progress { state, .. }) => {
+                        effects.push(format!("progress:{state}"))
+                    }
+                    SessionEvent::OutputClosed => closed = true,
+                    SessionEvent::Error(error) => panic!("{error}"),
+                    _ => {}
+                }
+            }
+            if !closed {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(closed, "child did not finish its terminal output");
+        assert_eq!(
+            effects,
+            ["start", "title:working", "progress:1", "end", "title:ready"]
+        );
+    }
 
     #[test]
     fn exec_failure_is_reported_by_spawn() {

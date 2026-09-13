@@ -27,7 +27,7 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSApplicationActivationOptions, NSColor, NSEvent,
+    NSAccessibility, NSApplication, NSApplicationActivationOptions, NSColor, NSColorSpace, NSEvent,
     NSFloatingWindowLevel, NSPasteboard, NSPasteboardAccessBehavior, NSPasteboardItem,
     NSPasteboardTypeString, NSRunningApplication, NSScreen, NSUserInterfaceItemIdentification,
     NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowTabbingMode,
@@ -167,6 +167,20 @@ impl Platform {
             self.global_keys = Some(GlobalKeys::new(self.mtm, bindings, self.callback.clone()));
         }
         Ok(())
+    }
+
+    /// Resolve the user's current accent into portable sRGB for tab-owned UI.
+    pub fn accent_color(&self) -> Option<[u8; 3]> {
+        let color =
+            NSColor::controlAccentColor().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+        Some(
+            [
+                color.redComponent(),
+                color.greenComponent(),
+                color.blueComponent(),
+            ]
+            .map(|component| (component.clamp(0.0, 1.0) * 255.0).round() as u8),
+        )
     }
 
     pub fn configure_window(

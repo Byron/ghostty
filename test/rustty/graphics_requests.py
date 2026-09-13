@@ -79,3 +79,31 @@ def requests():
         raw = bytes(range(2 * channels))
         yield case(f"raw/{format_}", upload(raw, f"f={format_},a=t,i=1,s=2,v=1".encode()))
     yield case("png/both-screens", upload(data) + b"\x1b[?1049h" + upload(samples[0][1]) + b"\x1b[?1049l")
+
+    def raw(options=b"", data=b"\x01\x02\x03\xff"):
+        return upload(data, b"f=32,s=1,v=1" + (b"," + options if options else b""))
+
+    identities = {
+        "implicit": raw() * 3,
+        "numbered": raw(b"I=7") * 3,
+        "collision": raw(b"i=2147483647") + raw(b"i=2147483648") + raw() * 2,
+        "number-hole": raw(b"i=1") + raw(b"i=3") + raw(b"I=7")
+            + b"\x1b_Ga=d,d=I,i=2\x1b\\" + raw(b"I=8") + raw(),
+        "implicit-delete": raw() + b"\x1b_Ga=d,d=I,i=2147483647\x1b\\" + raw(),
+        "failed-data": raw(data=b"\x01") + raw(),
+        "failed-format": raw(b"f=99") + raw(),
+        "failed-dimensions": raw(b"s=0") + raw(),
+        "number-failed": raw(b"I=9", b"\x01") + raw(b"I=9") + raw(),
+        "chunks": raw(b"m=1", b"\x01\x02") + raw(b"a=q,i=19")
+            + b"\x1b_Gm=0;A/8=\x1b\\" + raw(),
+        "number-chunks": raw(b"i=1") + raw(b"I=9,m=1", b"\x01\x02")
+            + b"\x1b_Ga=d,d=I,i=1\x1b\\" + b"\x1b_Gm=0;A/8=\x1b\\" + raw(b"I=9"),
+        "failed-chunks": raw(b"m=1", b"\x01") + b"\x1b_Gm=0;\x1b\\" + raw(),
+        "query": raw(b"a=q,i=123") + raw(),
+        "implicit-display-error": raw(b"a=T,P=123") + raw(),
+    }
+    for alternate in (False, True):
+        for name, data in identities.items():
+            prefix = b"\x1b[?1049h" if alternate else b""
+            request, _ = case(f"ids/{alternate}/{name}", prefix + data)
+            yield request, ["graphics.kitty", "effects.pty"]

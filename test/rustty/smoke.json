@@ -517,5 +517,102 @@
     "corpus_sources": [
       "stream-cmin/id_000411,time_0,execs_0,orig_id_000865,src_000000,time_7600,execs_44042,op_havoc,rep_7"
     ]
+  },
+  {
+    "request": {
+      "id": "corpus/csi-zero-scroll-up",
+      "cols": 4,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "671b5b3053"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.screens"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000820,src_000002,time_2743,execs_23483,op_havoc,rep_2,+cov"
+    ]
+  },
+  {
+    "request": {
+      "id": "corpus/erase-empty-scroll-clear",
+      "cols": 4,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b32324a"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.screens"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000537,time_0,execs_0,orig_id_001012,src_000003,time_10526,execs_59900,op_havoc,rep_3"
+    ]
+  },
+  {
+    "request": {
+      "id": "corpus/sgr-indexed-overflow",
+      "cols": 4,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b33383b353b3936306d721b5b6d"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.styles"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000855,src_000002,time_3365,execs_27742,op_havoc,rep_1,+cov",
+      "stream-cmin/id_000864,src_000002,time_3552,execs_28950,op_havoc,rep_2"
+    ]
+  },
+  {
+    "request": {
+      "id": "corpus/sgr-mixed-separators",
+      "cols": 4,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b34383a323b3b3b306d671b5b6d"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.styles"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000861,src_000002,time_3534,execs_28837,op_havoc,rep_2"
+    ]
+  },
+  {
+    "request": {
+      "id": "corpus/sgr-incomplete-rgb",
+      "cols": 4,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b33383b353b316d1b5b34383b323b3b6d671b5b6d"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.styles"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000761,src_000002,time_2155,execs_19700,op_havoc,rep_1,+cov",
+      "stream-cmin/id_000860,src_000002,time_3517,execs_28704,op_havoc,rep_1"
+    ]
   }
 ]

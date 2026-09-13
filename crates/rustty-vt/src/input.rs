@@ -36,6 +36,8 @@ impl Modifiers {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
+    /// A host key without a terminal-specific identity; text and layout data still apply.
+    Unidentified,
     Char(char),
     Enter,
     Backspace,
@@ -51,6 +53,13 @@ pub enum Key {
     PageDown,
     Insert,
     Delete,
+    Help,
+    ContextMenu,
+    CapsLock,
+    NumLock,
+    ScrollLock,
+    PrintScreen,
+    Pause,
     Function(u8),
     Keypad(u8),
     KeypadEnter,
@@ -59,10 +68,27 @@ pub enum Key {
     KeypadSubtract,
     KeypadMultiply,
     KeypadDivide,
+    KeypadEqual,
+    KeypadSeparator,
+    KeypadLeft,
+    KeypadRight,
+    KeypadUp,
+    KeypadDown,
+    KeypadPageUp,
+    KeypadPageDown,
+    KeypadHome,
+    KeypadEnd,
+    KeypadInsert,
+    KeypadDelete,
+    KeypadBegin,
     Shift,
     Control,
     Alt,
     Super,
+    ShiftRight,
+    ControlRight,
+    AltRight,
+    SuperRight,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -357,6 +383,7 @@ fn is_control_text(text: &str) -> bool {
 fn physical_codepoint(key: Key) -> Option<char> {
     match key {
         Key::Char(cp) => Some(cp),
+        Key::KeypadEqual => Some('='),
         Key::KeypadEnter => None,
         key => keypad(key).map(|(_, plain)| plain),
     }
@@ -428,12 +455,13 @@ fn control_sequence(event: &KeyEvent) -> Option<u8> {
 fn pc_key(t: &Terminal, key: Key, mods: Modifiers) -> Option<Vec<u8>> {
     let number = mods.number();
     if let Some(final_byte) = match key {
-        Key::Up => Some('A'),
-        Key::Down => Some('B'),
-        Key::Right => Some('C'),
-        Key::Left => Some('D'),
-        Key::Home => Some('H'),
-        Key::End => Some('F'),
+        Key::Up | Key::KeypadUp => Some('A'),
+        Key::Down | Key::KeypadDown => Some('B'),
+        Key::Right | Key::KeypadRight => Some('C'),
+        Key::Left | Key::KeypadLeft => Some('D'),
+        Key::KeypadBegin => Some('E'),
+        Key::Home | Key::KeypadHome => Some('H'),
+        Key::End | Key::KeypadEnd => Some('F'),
         _ => None,
     } {
         return Some(
@@ -506,10 +534,12 @@ fn pc_key(t: &Terminal, key: Key, mods: Modifiers) -> Option<Vec<u8>> {
 
 fn functional(key: Key) -> Option<(u32, char)> {
     Some(match key {
-        Key::Insert => (2, '~'),
-        Key::Delete => (3, '~'),
-        Key::PageUp => (5, '~'),
-        Key::PageDown => (6, '~'),
+        Key::Insert | Key::KeypadInsert => (2, '~'),
+        Key::Delete | Key::KeypadDelete => (3, '~'),
+        Key::PageUp | Key::KeypadPageUp => (5, '~'),
+        Key::PageDown | Key::KeypadPageDown => (6, '~'),
+        Key::Help => (28, '~'),
+        Key::ContextMenu => (29, '~'),
         Key::Function(1) => (1, 'P'),
         Key::Function(2) => (1, 'Q'),
         Key::Function(3) => (13, '~'),
@@ -540,7 +570,19 @@ fn keypad(key: Key) -> Option<(char, char)> {
 fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
     let all = flags & 8 != 0;
     let report_events = flags & 2 != 0;
-    let modifier_key = matches!(event.key, Key::Shift | Key::Control | Key::Alt | Key::Super);
+    let modifier_key = matches!(
+        event.key,
+        Key::Shift
+            | Key::Control
+            | Key::Alt
+            | Key::Super
+            | Key::ShiftRight
+            | Key::ControlRight
+            | Key::AltRight
+            | Key::SuperRight
+            | Key::CapsLock
+            | Key::NumLock
+    );
     if event.action == KeyAction::Release
         && (!report_events || !all && matches!(event.key, Key::Enter | Key::Tab | Key::Backspace))
         || event.composing && !modifier_key
@@ -576,7 +618,6 @@ fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
         return Vec::new();
     }
     let code = match event.key {
-        Key::Char(_) => event.unshifted.map(|cp| (cp as u32, 'u')),
         Key::Enter => Some((13, 'u')),
         Key::Tab => Some((9, 'u')),
         Key::Backspace => Some((127, 'u')),
@@ -587,6 +628,11 @@ fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
         Key::Left => Some((1, 'D')),
         Key::Home => Some((1, 'H')),
         Key::End => Some((1, 'F')),
+        Key::CapsLock => Some((57358, 'u')),
+        Key::ScrollLock => Some((57359, 'u')),
+        Key::NumLock => Some((57360, 'u')),
+        Key::PrintScreen => Some((57361, 'u')),
+        Key::Pause => Some((57362, 'u')),
         Key::Function(f @ 13..=25) => Some((57376 + u32::from(f - 13), 'u')),
         Key::Keypad(n @ 0..=9) => Some((57399 + u32::from(n), 'u')),
         Key::KeypadDecimal => Some((57409, 'u')),
@@ -595,11 +641,34 @@ fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
         Key::KeypadSubtract => Some((57412, 'u')),
         Key::KeypadAdd => Some((57413, 'u')),
         Key::KeypadEnter => Some((57414, 'u')),
+        Key::KeypadEqual => Some((57415, 'u')),
+        Key::KeypadSeparator => Some((57416, 'u')),
+        Key::KeypadLeft => Some((57417, 'u')),
+        Key::KeypadRight => Some((57418, 'u')),
+        Key::KeypadUp => Some((57419, 'u')),
+        Key::KeypadDown => Some((57420, 'u')),
+        Key::KeypadPageUp => Some((57421, 'u')),
+        Key::KeypadPageDown => Some((57422, 'u')),
+        Key::KeypadHome => Some((57423, 'u')),
+        Key::KeypadEnd => Some((57424, 'u')),
+        Key::KeypadInsert => Some((57425, 'u')),
+        Key::KeypadDelete => Some((57426, 'u')),
+        Key::KeypadBegin => Some((57427, 'u')),
         Key::Shift => Some((57441, 'u')),
         Key::Control => Some((57442, 'u')),
         Key::Alt => Some((57443, 'u')),
         Key::Super => Some((57444, 'u')),
-        _ => functional(event.key),
+        Key::ShiftRight => Some((57447, 'u')),
+        Key::ControlRight => Some((57448, 'u')),
+        Key::AltRight => Some((57449, 'u')),
+        Key::SuperRight => Some((57450, 'u')),
+        Key::Insert | Key::Delete | Key::PageUp | Key::PageDown | Key::Function(1..=12) => {
+            functional(event.key)
+        }
+        _ => event
+            .unshifted
+            .filter(|&cp| cp != '\0')
+            .map(|cp| (cp as u32, 'u')),
     };
     let Some((code, final_byte)) = code else {
         return if event.action == KeyAction::Release {

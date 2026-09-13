@@ -134,7 +134,7 @@
     {
       "id": "input.key",
       "status": "partial",
-      "remaining": "Legacy and Kitty matrix passes for current Rust keys, modifiers, text consumption and IME; remaining named/right-side keys and macOS Option policy require complete coverage."
+      "remaining": "All named keys in the native legacy/Kitty tables, right-side modifiers, text fallback and IME are compared; host key mapping, modifier-side bits and macOS Option policy still require complete coverage."
     },
     {
       "id": "input.mouse",

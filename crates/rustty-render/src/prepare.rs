@@ -272,7 +272,7 @@ impl Renderer {
                 let w = metrics.cell_width as f32;
                 let h = metrics.cell_height as f32;
                 let color = Color::rgb(options.cursor_color);
-                if !options.focused {
+                if !options.focused || screen.cursor.shape == CursorShape::HollowBlock {
                     for rect in [
                         [x, top, w, 1.0],
                         [x, top + h - 1.0, w, 1.0],
@@ -707,6 +707,17 @@ mod tests {
                 .count(),
             4
         );
+        terminal.screen_mut().cursor.shape = CursorShape::HollowBlock;
+        let focused = renderer
+            .prepare(
+                terminal.screen(),
+                &RenderOptions {
+                    focused: true,
+                    ..options
+                },
+            )
+            .unwrap();
+        assert_eq!(focused.quads, frame.quads);
     }
 
     #[test]

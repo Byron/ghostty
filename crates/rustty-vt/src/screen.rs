@@ -205,6 +205,7 @@ impl Row {
 pub enum CursorShape {
     #[default]
     Block,
+    HollowBlock,
     Bar,
     Underline,
 }

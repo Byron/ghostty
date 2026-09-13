@@ -25,6 +25,10 @@ pub const Operation = struct {
     delta: i32 = 0,
     lines: ?usize = null,
     bytes: ?usize = null,
+    boundary_codepoints: ?[]const u32 = null,
+    whitespace: ?[]const u32 = null,
+    trim_line: ?bool = null,
+    semantic_prompt_boundary: ?bool = null,
 };
 const Location = struct {
     screen: ?[2]u32,
@@ -39,6 +43,7 @@ const Selection = struct {
     text: ?[]const u8,
 };
 const Match = struct { start: ?Location, end: ?Location };
+const Bounds = struct { start: ?Location, end: ?Location, rectangle: bool };
 const Tracked = struct {
     id: u32,
     screen: []const u8,
@@ -51,6 +56,7 @@ pub const Result = struct {
     active_screen: []const u8,
     viewport_top: ?[2]u32,
     selection: ?Selection,
+    selection_result: ?Bounds,
     tracked: []const Tracked,
 };
 const Handle = struct {
@@ -83,6 +89,7 @@ pub const Context = struct {
     pub fn run(self: *Context, alloc: Allocator, terminal: *vt.Terminal, op: Operation) !Result {
         var status: []const u8 = "ok";
         var matches: ?[]const Match = null;
+        var selection_result: ?Bounds = null;
         const screen = terminal.screens.active;
         if (std.mem.eql(u8, op.action, "observe")) {
             // Reading is explicit so writes retain their original boundaries.
@@ -94,6 +101,46 @@ pub const Context = struct {
             } else status = "invalid";
         } else if (std.mem.eql(u8, op.action, "clear_selection")) {
             screen.clearSelection();
+        } else if (std.mem.eql(u8, op.action, "select_word") or
+            std.mem.eql(u8, op.action, "select_word_between") or
+            std.mem.eql(u8, op.action, "select_line") or
+            std.mem.eql(u8, op.action, "select_all"))
+        {
+            // The native selectWord API takes an explicit boundary set; these
+            // are selection_codepoints.default_word_boundaries.
+            const defaults = [_]u21{ 0, ' ', '\t', '\'', '"', '│', '`', '|', ':', ';', ',', '(', ')', '[', ']', '{', '}', '<', '>', '$' };
+            const boundaries = (try codepoints(alloc, op.boundary_codepoints)) orelse &defaults;
+            const whitespace = try codepoints(alloc, op.whitespace);
+            const selected: ?vt.Selection = if (std.mem.eql(u8, op.action, "select_all"))
+                screen.selectAll()
+            else if (std.mem.eql(u8, op.action, "select_word_between")) selected: {
+                const start = screen.pages.pin(op.start.native()) orelse {
+                    status = "invalid";
+                    break :selected null;
+                };
+                const end = screen.pages.pin(op.end.native()) orelse {
+                    status = "invalid";
+                    break :selected null;
+                };
+                break :selected screen.selectWordBetween(start, end, boundaries);
+            } else selected: {
+                const pin = screen.pages.pin(op.point.native()) orelse {
+                    status = "invalid";
+                    break :selected null;
+                };
+                if (std.mem.eql(u8, op.action, "select_word")) break :selected screen.selectWord(pin, boundaries);
+                var options: vt.Screen.SelectLine = .{ .pin = pin };
+                if (!(op.trim_line orelse true)) options.whitespace = null else if (whitespace) |value| options.whitespace = value;
+                options.semantic_prompt_boundary = op.semantic_prompt_boundary orelse true;
+                break :selected screen.selectLine(options);
+            };
+            if (selected) |selection| {
+                selection_result = .{
+                    .start = location(screen, selection.start()),
+                    .end = location(screen, selection.end()),
+                    .rectangle = selection.rectangle,
+                };
+            } else if (std.mem.eql(u8, status, "ok")) status = "no_value";
         } else if (std.mem.eql(u8, op.action, "track")) {
             const duplicate = for (self.handles.items) |handle| {
                 if (handle.id == op.id) break true;
@@ -170,10 +217,21 @@ pub const Context = struct {
             .active_screen = @tagName(terminal.screens.active_key),
             .viewport_top = coordinate(active, .screen, active.pages.getTopLeft(.viewport)),
             .selection = selection,
+            .selection_result = selection_result,
             .tracked = tracked,
         };
     }
 };
+
+fn codepoints(alloc: Allocator, values: ?[]const u32) !?[]const u21 {
+    const source = values orelse return null;
+    const result = try alloc.alloc(u21, source.len);
+    for (source, result) |value, *destination| {
+        if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return error.InvalidCodepoint;
+        destination.* = @intCast(value);
+    }
+    return result;
+}
 
 fn coordinate(screen: *vt.Screen, tag: vt.point.Tag, pin: vt.Pin) ?[2]u32 {
     if (pin.garbage) return null;

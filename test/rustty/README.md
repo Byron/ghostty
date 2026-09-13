@@ -85,7 +85,8 @@ minimized inherited failures with their original corpus source identifiers.
 
 `--grid` compares direct selection, literal search and tracked-reference APIs.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,
-`clear_selection`, `track`, `untrack`, `viewport`, `limits`, `search` and `observe`.
+`clear_selection`, `select_word`, `select_word_between`, `select_line`,
+`select_all`, `track`, `untrack`, `viewport`, `limits`, `search` and `observe`.
 Points name `active`, `viewport`, `screen` or `history` coordinates. Observations
 translate each implementation's own handles to those coordinates and include
 cell codepoints, selected text and viewport position. Raw row IDs are not shared.
@@ -96,6 +97,20 @@ native formatter coordinates, including reversed maps for adjacent spaces.
 Partial UTF-8 needles map each endpoint to the cell containing that byte. The
 regex search and link APIs keep their existing semantics. Match order and
 endpoints are compared without sorting, deduplication or normalization.
+
+`--grid --case grid/selectors/` compares `Screen::select_word`,
+`select_word_between`, `select_line` and `select_all` against the native queries.
+Their inclusive bounds appear in `selection_result`, independently of the active
+`selection`; querying never replaces it. Word queries accept custom
+`boundary_codepoints`. Line queries accept `whitespace`, `trim_line` and
+`semantic_prompt_boundary`; defaults trim NUL/space/tab and stop at semantic
+transitions. Disabling trimming includes unwritten cells, while an empty
+whitespace set trims only unwritten cells. `selection_requests.py` retains 83
+fixtures that passed 249 whole-buffer, scalar and varied-delivery comparisons.
+They cover hard and soft wraps, wide spacers, custom boundaries, semantic
+transitions within rows, history and alternate screens, and restored pages whose
+physical widths differ from the terminal width. Bounds are compared directly,
+including native hard-edge and row-inclusive trimming behavior.
 
 Literal search formats each retained page separately and follows native active
 and history traversal, including repeated soft-wrap matches and trimmed blank
@@ -153,9 +168,10 @@ Grid cases cover live writes, erasure, reflow, height changes, screen switches,
 resets, handle reuse and scrollback limits, including release of an inactive
 screen's tracked handle. Restoring a new terminal while
 the adapter owns tracked handles is explicitly unsupported; those external
-lifetimes need a separate API comparison. Incremental search, search selection,
-word/line/output selection, gestures and styled selection formatting remain
-uncovered. The failing grid cases remain part of `--grid` and `--thorough`.
+lifetimes need a separate API comparison. Complete selection mutation lifetimes,
+output selection, adjustments, gestures and styled selection formatting remain
+uncovered, as do incremental search and search selection. The failing grid cases
+remain part of `--grid` and `--thorough`.
 
 Native libghostty-vt updates OSC 133 semantic state without command lifecycle
 callbacks. `Terminal::shell_command_events` explicitly enables Rustty's

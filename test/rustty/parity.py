@@ -29,6 +29,7 @@ import osc_strings
 import glyph_requests
 import reset_stream
 import dnd_requests
+import selection_requests
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -480,6 +481,10 @@ def main():
                                 if not args.case or args.case in request["id"])
             if args.grid or args.thorough:
                 requests.extend((request, covers) for request, covers in grid_requests.requests()
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in selection_requests.requests()
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in selection_requests.snapshot_requests(peers[0])
                                 if not args.case or args.case in request["id"])
             if args.page_layout or args.thorough:
                 requests.extend((request, covers) for request, covers in page_layout_requests.requests()

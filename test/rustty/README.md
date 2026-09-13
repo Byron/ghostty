@@ -255,9 +255,13 @@ split comparisons pass. The fixture remains in broad and thorough runs without
 normalization; compatibility is measured against this repaired reference.
 
 `pages/styles/mixed-ind-resume/` also retains continued-printing probes after
-the first IND. A native assertion in `printSliceFill`'s STYLE release occurs for
-restored widths 4/8/4 with logical width 8. These probes follow the ordinary
-STYLE matrices so a reference abort cannot hide their preceding comparisons.
+the first IND. Restored widths 4/8/4 with logical width 8 exposed a native
+out-of-bounds cursor followed by an assertion in `printSliceFill`'s STYLE release.
+The reference now widens physical pages before editing logical columns. It
+prepares replacement pages before moving tracked pins, preserving the source on
+allocation failure. Read-only access and untouched pages retain their widths.
+The original scalar and batched failures remain recorded; Rust migration to
+the corrected reference behavior is tracked separately.
 Complete resource-exhaustion combinations, especially splitting during reflow,
 remain unverified.
 

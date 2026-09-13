@@ -88,3 +88,46 @@ fn csi_parameter_validation_preserves_optional_and_variable_length_commands() {
     assert!(!terminal.modes.dec(1));
     assert!(!terminal.modes.dec(25));
 }
+
+#[test]
+fn relative_position_commands_distinguish_zero_from_omitted_counts() {
+    let mut terminal = Terminal::new(10, 6, 0);
+    terminal.feed(b"\x1b[3;4H\x1b[0a\x1b[0e\x1b[;a\x1b[;e");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (2, 3)
+    );
+    terminal.feed(b"\x1b[a\x1b[e");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (3, 4)
+    );
+    terminal.feed(b"\x1b[10GX");
+    assert!(terminal.screen().cursor.pending_wrap);
+    terminal.feed(b"\x1b[0a");
+    assert!(!terminal.screen().cursor.pending_wrap);
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (3, 9)
+    );
+}
+
+#[test]
+fn relative_position_commands_use_absolute_position_margin_rules() {
+    let mut terminal = Terminal::new(10, 8, 0);
+    terminal.feed(b"\x1b[?69h\x1b[3;7s\x1b[3;6r\x1b[4;5H\x1b[99a\x1b[99e");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (7, 9)
+    );
+    terminal.feed(b"\x1b[?6h\x1b[2;2H\x1b[0a");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (5, 5)
+    );
+    terminal.feed(b"\x1b[0e");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (5, 6)
+    );
+}

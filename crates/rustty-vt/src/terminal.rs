@@ -1501,8 +1501,8 @@ impl Terminal {
         let private = i.first() == Some(&b'?');
         match (i, byte) {
             ([], b'A') => self.cursor_vertical(count, false),
-            ([], b'B' | b'e') => self.cursor_vertical(count, true),
-            ([], b'C' | b'a') => self.cursor_right(count),
+            ([], b'B') => self.cursor_vertical(count, true),
+            ([], b'C') => self.cursor_right(count),
             ([], b'D') => self.cursor_left(count),
             ([], b'E' | b'F') => {
                 self.cursor_vertical(count, byte == b'E');
@@ -1510,6 +1510,16 @@ impl Terminal {
             }
             ([], b'G' | b'`') => self.cursor_position(self.screen().cursor.row + 1, count),
             ([], b'd') => self.cursor_position(count, self.screen().cursor.col + 1),
+            ([], b'a' | b'e') => {
+                // HPR/VPR retain an explicit zero and apply the same origin
+                // offsets and bounds as absolute cursor positioning.
+                let amount = usize::from(p.first().copied().unwrap_or(1));
+                let cursor = &self.screen().cursor;
+                self.cursor_position(
+                    cursor.row + 1 + if byte == b'e' { amount } else { 0 },
+                    cursor.col + 1 + if byte == b'a' { amount } else { 0 },
+                );
+            }
             ([], b'H' | b'f') => self.cursor_position(count, second.max(1).into()),
             ([], b'I') => self.tab(count, false),
             ([], b'Z') => self.tab(count, true),

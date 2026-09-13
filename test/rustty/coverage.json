@@ -68,8 +68,8 @@
     },
     {
       "id": "unicode.width",
-      "status": "partial",
-      "remaining": "Selected codepoints covered; exhaustive Unicode scalar comparison remains."
+      "status": "complete",
+      "remaining": "All 1,112,064 valid Unicode scalar widths are compared; invalid scalar boundaries are rejected. Grapheme composition is tracked under terminal.cells."
     },
     {
       "id": "parser.raw-events",

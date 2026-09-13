@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import snapshots
+import protocols
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -349,6 +350,7 @@ def main():
     parser.add_argument("--parser", action="store_true", help="compare raw parser events and inherited parser corpus")
     parser.add_argument("--snapshots", action="store_true", help="cross-decode both snapshot encodings and resume terminal input")
     parser.add_argument("--snapshot-wire", action="store_true", help="compare snapshot fixtures, streaming, malformed input and mixed PAGE widths")
+    parser.add_argument("--protocols", action="store_true", help="compare terminal protocol queries and host effects")
     parser.add_argument("--max-failures", type=int, default=20)
     parser.add_argument("--artifacts", type=Path, default=ARTIFACTS, help="isolated output directory for concurrent suites")
     parser.add_argument("--zig-bin", type=Path, default=ROOT / "zig-out/bin/vt-oracle")
@@ -396,6 +398,9 @@ def main():
                 requests.extend((request, covers) for request, covers in snapshots.invalid_requests(ROOT)
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in snapshots.wire_requests(ROOT, peers[0])
+                                if not args.case or args.case in request["id"])
+            if args.protocols or args.thorough:
+                requests.extend((request, covers) for request, covers in protocols.requests(ROOT)
                                 if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())

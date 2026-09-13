@@ -37,6 +37,7 @@ python3 test/rustty/parity.py --no-build --input
 python3 test/rustty/parity.py --no-build --parser
 python3 test/rustty/parity.py --no-build --snapshots
 python3 test/rustty/parity.py --no-build --snapshot-wire
+python3 test/rustty/parity.py --no-build --protocols
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
@@ -77,6 +78,12 @@ advanced cases currently expose differences and original Zig assertions;
 An expected rejection must be `InvalidSnapshot`; an unrelated adapter error
 or an unexpected successful decode still fails the case.
 
+`--protocols` compares terminal-level DCS replies. Capability names are read
+from the original Zig terminfo source; the Rust table is not used to select
+the test cases. It checks every advertised capability, the extra Co/RGB/TN
+keys, malformed and multiple keys, and DECRQSS style, cursor and margin
+queries. The current adapters leave the host terminfo name unset.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;
@@ -85,7 +92,7 @@ An oracle crash, invalid response, unsupported operation or timeout fails the
 run. Requests are limited to 16 MiB and responses to 128 MiB. Graphics file,
 temporary-file and shared-memory transports are disabled in the Zig oracle.
 
-`--thorough` additionally exercises input, parser and both snapshot suites, all split points
+`--thorough` additionally exercises input, parser, protocol and both snapshot suites, all split points
 for short writes, the inherited stream corpus and generated operations. The
 stream corpus's first byte is its original delivery selector, so it is removed
 from the terminal input.

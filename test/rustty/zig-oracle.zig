@@ -9,11 +9,27 @@ const Allocator = std.mem.Allocator;
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
-    "terminal.write",    "terminal.resize",       "terminal.reset",     "terminal.observe",
-    "terminal.cells",    "terminal.styles",       "terminal.screens",   "terminal.cursor",
-    "effects.pty",       "effects.title",         "effects.pwd",        "effects.bell",
-    "unicode.width",     "input.key",             "input.mouse",        "input.focus-paste",
-    "parser.raw-events", "snapshot.cross-decode", "snapshot.streaming", "snapshot.fixtures",
+    "protocol.dcs",
+    "terminal.write",
+    "terminal.resize",
+    "terminal.reset",
+    "terminal.observe",
+    "terminal.cells",
+    "terminal.styles",
+    "terminal.screens",
+    "terminal.cursor",
+    "effects.pty",
+    "effects.title",
+    "effects.pwd",
+    "effects.bell",
+    "unicode.width",
+    "input.key",
+    "input.mouse",
+    "input.focus-paste",
+    "parser.raw-events",
+    "snapshot.cross-decode",
+    "snapshot.streaming",
+    "snapshot.fixtures",
 };
 
 const Operation = struct {

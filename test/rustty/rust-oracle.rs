@@ -30,6 +30,7 @@ const CAPABILITIES: &[&str] = &[
     "snapshot.cross-decode",
     "snapshot.streaming",
     "snapshot.fixtures",
+    "protocol.dcs",
 ];
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 

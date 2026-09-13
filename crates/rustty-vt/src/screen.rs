@@ -64,6 +64,60 @@ pub struct Style {
     pub underline: Underline,
 }
 
+impl Style {
+    /// Hash the native packed representation used by page style admission.
+    pub(crate) fn native_hash(self) -> u64 {
+        let mut packed = 0u128;
+        for (i, color) in [self.foreground, self.background, self.underline_color]
+            .into_iter()
+            .enumerate()
+        {
+            let (tag, data): (u128, u128) = match color {
+                Color::Default => (0, 0),
+                Color::Indexed(index) => (1, index.into()),
+                Color::Rgb(r, g, b) => (
+                    2,
+                    u128::from(r) | (u128::from(g) << 8) | (u128::from(b) << 16),
+                ),
+            };
+            packed |= tag << (i * 8);
+            packed |= data << (24 + i * 24);
+        }
+        let underline = match self.underline {
+            Underline::None => 0u128,
+            Underline::Single => 1,
+            Underline::Double => 2,
+            Underline::Curly => 3,
+            Underline::Dotted => 4,
+            Underline::Dashed => 5,
+        };
+        let mut flags = underline << 8;
+        for (bit, set) in [
+            self.bold,
+            self.italic,
+            self.faint,
+            self.blink,
+            self.inverse,
+            self.invisible,
+            self.strikethrough,
+            self.overline,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            flags |= u128::from(set) << bit;
+        }
+        packed |= flags << 96;
+        let mut hash = packed as u64 ^ (packed >> 64) as u64;
+        // Zig std.hash.int(u64).
+        const MULTIPLIER: u64 = 0xbea225f9eb34556d;
+        hash = (hash ^ (hash >> 32)).wrapping_mul(MULTIPLIER);
+        hash = (hash ^ (hash >> 29)).wrapping_mul(MULTIPLIER);
+        hash = (hash ^ (hash >> 32)).wrapping_mul(MULTIPLIER);
+        hash ^ (hash >> 29)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SemanticContent {
     #[default]

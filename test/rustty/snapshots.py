@@ -37,6 +37,7 @@ def frame(records):
 def wire_requests(root, reference):
     import snapshot_resources
     yield from snapshot_resources.requests(reference)
+    yield from snapshot_resources.style_requests(reference)
 
     data = fixture(root / "src/terminal/snapshot/testdata/complete-v1.hex")
     if frame(records(data)) != data:

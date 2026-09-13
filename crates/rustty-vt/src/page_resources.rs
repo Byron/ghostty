@@ -1,5 +1,94 @@
 //! Page resource allocation offsets without native backing memory.
-use crate::page_layout::BitmapLayout;
+use crate::page_layout::{BitmapLayout, SetLayout};
+use crate::screen::Style;
+
+/// The insertion-only phase of native PAGE style decoding.
+///
+/// Every accepted wire ID retains its reference until all styles and cells
+/// have been decoded. No item can die during admission, but reference counts
+/// still decide ties when Robin Hood insertion displaces an existing item.
+pub(crate) struct StyleAdmission {
+    table: Vec<u16>,
+    entries: Vec<StyleEntry>,
+    capacity: usize,
+    max_psl: u8,
+}
+
+struct StyleEntry {
+    value: Style,
+    references: u16,
+    psl: u8,
+}
+
+impl StyleAdmission {
+    pub fn new(layout: SetLayout) -> Self {
+        Self {
+            table: vec![0; layout.table_cap],
+            entries: Vec::new(),
+            capacity: layout.cap,
+            max_psl: 0,
+        }
+    }
+
+    /// Default styles need no resource; existing styles take another reference.
+    pub fn admit(&mut self, value: Style) -> bool {
+        if value == Style::default() {
+            return true;
+        }
+        let hash = value.native_hash() as usize;
+        let mask = self.table.len().saturating_sub(1);
+        if !self.table.is_empty() {
+            for psl in 0..=self.max_psl {
+                let id = self.table[hash.wrapping_add(usize::from(psl)) & mask];
+                if id == 0 {
+                    break;
+                }
+                let entry = &mut self.entries[usize::from(id) - 1];
+                if entry.psl < psl {
+                    break;
+                }
+                if entry.psl == psl && entry.value == value {
+                    entry.references += 1;
+                    return true;
+                }
+            }
+        }
+        // ID zero is reserved. With no releases, the largest PSL never falls,
+        // so this is equivalent to native's nonempty psl_stats[31] check.
+        if self.max_psl == 31 || self.entries.len() + 1 >= self.capacity {
+            return false;
+        }
+
+        let new_id = u16::try_from(self.entries.len() + 1).unwrap();
+        self.entries.push(StyleEntry {
+            value,
+            references: 0,
+            psl: 0,
+        });
+        let mut held_id = new_id;
+        for distance in 0..self.table.len() - 1 {
+            let bucket = hash.wrapping_add(distance) & mask;
+            let id = self.table[bucket];
+            let held = &self.entries[usize::from(held_id) - 1];
+            if id == 0 {
+                self.table[bucket] = held_id;
+                self.max_psl = self.max_psl.max(held.psl);
+                break;
+            }
+            let resident = &self.entries[usize::from(id) - 1];
+            if resident.psl < held.psl
+                || (resident.psl == held.psl && resident.references < held.references)
+            {
+                self.table[bucket] = held_id;
+                self.max_psl = self.max_psl.max(held.psl);
+                held_id = id;
+            }
+            self.entries[usize::from(held_id) - 1].psl += 1;
+        }
+        self.entries[usize::from(new_id) - 1].references = 1;
+        true
+    }
+}
 
 /// Bookkeeping for `terminal/bitmap_allocator.zig`.
 ///
@@ -149,6 +238,101 @@ fn find_free_chunks(bitmaps: &[u64], count: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::page_layout::PageCapacity;
+    use crate::screen::Color;
+
+    fn style_set(capacity: u16) -> StyleAdmission {
+        StyleAdmission::new(
+            PageCapacity {
+                styles: capacity,
+                ..PageCapacity::STANDARD
+            }
+            .metadata()
+            .unwrap()
+            .styles_layout,
+        )
+    }
+
+    fn numbered_style(number: u32) -> Style {
+        Style {
+            foreground: Color::Rgb(number as u8, (number >> 8) as u8, (number >> 16) as u8),
+            ..Style::default()
+        }
+    }
+
+    fn styles_in_bucket(mask: u64, bucket: u64, count: usize) -> Vec<Style> {
+        (0..0x1000000)
+            .map(numbered_style)
+            .filter(|style| style.native_hash() & mask == bucket)
+            .take(count)
+            .collect()
+    }
+
+    #[test]
+    fn style_admission_reserves_zero_and_reuses_live_values_when_full() {
+        for capacity in [0, 1, 2, 3, 4, 8, 16, 64, 128] {
+            let mut styles = style_set(capacity);
+            assert!(styles.admit(Style::default()));
+            assert!(styles.entries.is_empty());
+            let live_capacity = styles.capacity.saturating_sub(1);
+            // Use distinct home buckets to make capacity the only limit.
+            for bucket in 0..live_capacity {
+                let value = styles_in_bucket((styles.table.len() - 1) as u64, bucket as u64, 1)[0];
+                assert!(styles.admit(value));
+                assert!(styles.admit(value));
+                assert_eq!(styles.entries[bucket].references, 2);
+            }
+            let rejected = if styles.table.is_empty() {
+                numbered_style(0)
+            } else {
+                styles_in_bucket((styles.table.len() - 1) as u64, live_capacity as u64, 1)[0]
+            };
+            assert!(!styles.admit(rejected));
+            assert_eq!(styles.entries.len(), live_capacity);
+            if let Some(entry) = styles.entries.first() {
+                let value = entry.value;
+                assert!(styles.admit(value));
+                assert_eq!(styles.entries[0].references, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn style_admission_collision_limit_rejects_even_unrelated_new_values() {
+        for bucket in [0, 250, 255] {
+            let mut styles = style_set(256);
+            let values = styles_in_bucket(255, bucket, 33);
+            for value in &values[..32] {
+                assert!(styles.admit(*value));
+            }
+            assert_eq!(styles.max_psl, 31);
+            assert!(styles.entries.len() + 1 < styles.capacity);
+            assert!(!styles.admit(values[32]));
+            assert!(!styles.admit(styles_in_bucket(255, (bucket + 80) & 255, 1)[0]));
+            // Lookup precedes both the PSL and capacity checks.
+            for value in values[..32].iter().rev() {
+                assert!(styles.admit(*value));
+            }
+            assert!(styles.entries.iter().all(|entry| entry.references == 2));
+        }
+    }
+
+    #[test]
+    fn style_admission_refcounts_break_displacement_ties() {
+        let mut styles = style_set(16);
+        let home_zero = styles_in_bucket(15, 0, 2);
+        let home_one = styles_in_bucket(15, 1, 2);
+        assert!(styles.admit(home_zero[0]));
+        for _ in 0..5 {
+            assert!(styles.admit(home_one[0]));
+        }
+        assert!(styles.admit(home_one[1]));
+        assert!(styles.admit(home_zero[1]));
+        // The displaced, frequently referenced style wins the equal-PSL tie.
+        assert_eq!(&styles.table[..4], &[1, 4, 2, 3]);
+        assert_eq!(styles.entries[1].psl, 1);
+        assert_eq!(styles.entries[2].psl, 2);
+        assert_eq!(styles.max_psl, 2);
+    }
 
     fn allocator<const CHUNK: usize>(words: usize) -> BitmapAllocator<CHUNK> {
         BitmapAllocator::new(BitmapLayout {

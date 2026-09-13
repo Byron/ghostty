@@ -243,6 +243,8 @@ impl Platform {
             OptionAsAlt::Right => WinitOptionAsAlt::OnlyRight,
         });
         let native = native_window(window)?;
+        // Rustty manages tabs itself; AppKit must keep workspace windows separate.
+        native.setTabbingMode(NSWindowTabbingMode::Disallowed);
         native.setTitlebarAppearsTransparent(true);
         native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         native.setMovableByWindowBackground(false);
@@ -271,7 +273,6 @@ impl Platform {
                 config.quick_terminal_space_behavior,
             ));
             native.setExcludedFromWindowsMenu(true);
-            native.setTabbingMode(NSWindowTabbingMode::Disallowed);
             native.setRestorable(false);
             native.setAnimationBehavior(NSWindowAnimationBehavior::None);
             // Native auto-hide would bypass the host's visibility state.

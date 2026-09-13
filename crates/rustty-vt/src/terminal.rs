@@ -1236,10 +1236,7 @@ impl Terminal {
                 return;
             }
             22 => {
-                let m = self.margins;
-                self.reset_margins();
-                self.scroll_up(rows, true);
-                self.margins = m;
+                self.scroll_clear();
                 return;
             }
             _ => return,
@@ -1249,6 +1246,40 @@ impl Terminal {
             row.wrapped = false;
         }
         self.screen_mut().cursor.pending_wrap = false;
+        self.changed();
+    }
+
+    fn scroll_clear(&mut self) {
+        let cols = usize::from(self.cols);
+        let count = self
+            .screen()
+            .rows
+            .iter()
+            .rposition(|row| {
+                row.cells.iter().take(cols).any(|cell| {
+                    !cell.text.is_empty()
+                        || cell.width != 1
+                        || cell.spacer_head
+                        || cell.style.background != Color::Default
+                })
+            })
+            .map_or(0, |row| row + 1);
+        let screen = self.screen_mut();
+        for _ in 0..count {
+            let row = screen.rows.remove(0);
+            screen.push_history(row);
+            let blank = screen.blank_row(cols, Color::Default);
+            screen.rows.push(blank);
+        }
+        if screen.cursor.row < count {
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
+        } else {
+            screen.cursor.row -= count;
+        }
+        screen.cursor.pending_wrap = false;
+        screen.clear_visible_images();
+        self.clamp_cursor();
         self.changed();
     }
 

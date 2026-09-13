@@ -104,9 +104,14 @@ impl Smoke {
     }
     pub fn step(&mut self, app: &mut App, event_loop: &ActiveEventLoop) -> Result<bool> {
         if Instant::now() > self.deadline {
+            let windows: Vec<_> = app
+                .windows
+                .values()
+                .map(|host| Platform::window_diagnostics(&host.window))
+                .collect();
             return Err(format!(
-                "native smoke timed out at stage {}: {:?}",
-                self.stage, app.errors
+                "native smoke timed out at stage {}: {:?}; windows: {:?}",
+                self.stage, app.errors, windows
             )
             .into());
         }

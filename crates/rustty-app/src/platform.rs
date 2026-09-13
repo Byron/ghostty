@@ -83,6 +83,24 @@ pub struct Platform {
 }
 
 impl Platform {
+    /// Native state for an explicitly requested smoke-test failure report.
+    pub fn window_diagnostics(window: &Window) -> Result<String, String> {
+        let native = native_window(window)?;
+        let app = NSApplication::sharedApplication(native.mtm());
+        Ok(format!(
+            "visible={}, key={}, minimized={}, active_space={}, occlusion={:?}, frame={:?}, app_active={}, app_hidden={}, activation_policy={:?}",
+            native.isVisible(),
+            native.isKeyWindow(),
+            native.isMiniaturized(),
+            native.isOnActiveSpace(),
+            native.occlusionState(),
+            native.frame(),
+            app.isActive(),
+            app.isHidden(),
+            app.activationPolicy(),
+        ))
+    }
+
     /// Read application appearance after Winit has initialized NSApplication.
     pub fn system_theme() -> Option<Theme> {
         let app = NSApplication::sharedApplication(MainThreadMarker::new()?);

@@ -2595,12 +2595,13 @@ fn splitForCapacity(
     // cursorChangePin to move to the new pin. The old node is guaranteed
     // to still exist, just not the row.
     //
-    // Note that page_row and all that will be invalid, it points to the
-    // new node, but at the time of writing this we don't need any of that
-    // to be right in cursorChangePin.
+    // The cached row and cell still point to the retired row in the old node.
     const new_cursor = self.cursor.page_pin.*;
     self.cursor.page_pin.* = old_cursor;
     self.cursorChangePin(new_cursor);
+    const rac = self.cursor.page_pin.rowAndCell();
+    self.cursor.page_row = rac.row;
+    self.cursor.page_cell = rac.cell;
 }
 
 /// Append a grapheme to the given cell within the current cursor row.
@@ -11591,6 +11592,14 @@ test "Screen setAttribute splits page on OutOfSpace at max styles" {
         node_before_set.prev != null or
         s.cursor.page_pin.node != original_node;
     try testing.expect(page_was_split);
+
+    // Printing after the split must use the cursor's new page.
+    const cursor_rac = s.cursor.page_pin.rowAndCell();
+    try testing.expectEqual(cursor_rac.row, s.cursor.page_row);
+    try testing.expectEqual(cursor_rac.cell, s.cursor.page_cell);
+    try s.testWriteString("X");
+    try testing.expectEqual(@as(u21, 'X'), cursor_rac.cell.codepoint());
+    try testing.expectEqual(s.cursor.style_id, cursor_rac.cell.style_id);
 }
 
 test "Screen: promptClickMove line right basic" {

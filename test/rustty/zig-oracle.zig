@@ -23,6 +23,7 @@ const capabilities = [_][]const u8{
     "effects.pwd",
     "effects.bell",
     "effects.host",
+    "clipboard",
     "unicode.width",
     "input.key",
     "input.mouse",
@@ -48,6 +49,20 @@ const Request = struct {
     scalar: bool = false,
     operations: []const Operation = &.{},
     codepoints: []const u32 = &.{},
+    clipboard_replies: []const ClipboardReply = &.{},
+};
+const ClipboardStatus = enum { success, denied, unsupported, busy, invalid_data, io_error, none };
+const ClipboardReply = struct {
+    status: ClipboardStatus = .success,
+    contents: []const ClipboardContent = &.{},
+    available: []const []const u8 = &.{},
+    remember: bool = false,
+};
+const DecodedClipboardReply = struct {
+    status: ClipboardStatus = .success,
+    contents: []const vt.clipboard.Content = &.{},
+    available: []const []const u8 = &.{},
+    remember: bool = false,
 };
 const Color = struct { kind: []const u8 = "default", value: []const u16 = &.{} };
 const Style = struct {
@@ -96,11 +111,22 @@ const Observation = struct {
 };
 const Notification = struct { title: []const u8, body: []const u8 };
 const Progress = struct { state: u8, value: ?u8 };
+const ClipboardContent = struct { mime: []const u8, data: []const u8 };
+const Clipboard = struct {
+    location: []const u8,
+    contents: []const ClipboardContent = &.{},
+    mimes: []const []const u8 = &.{},
+    list: bool = false,
+    name: []const u8 = "",
+    granted: bool = false,
+    can_remember: bool = false,
+};
 const Event = struct {
     kind: []const u8,
     data: []const u8 = "",
     notification: ?Notification = null,
     progress: ?Progress = null,
+    clipboard: ?Clipboard = null,
 };
 const SnapshotProgress = struct {
     stage: []const u8,
@@ -129,6 +155,9 @@ var current: ?*Context = null;
 const Context = struct {
     alloc: Allocator,
     events: std.ArrayList(Event) = .empty,
+    clipboard_replies: []const DecodedClipboardReply,
+    clipboard_reply_index: usize = 0,
+    invalid_read_status: bool = false,
 
     fn append(kind: []const u8, bytes: []const u8) void {
         const self = current.?;
@@ -168,6 +197,60 @@ const Context = struct {
     }
     fn progress(_: *vt.TerminalStream.Handler, value: vt.osc.Command.ProgressReport) void {
         record(.{ .kind = "progress", .progress = .{ .state = @intCast(@intFromEnum(value.state)), .value = value.progress } });
+    }
+    fn nextClipboardReply() DecodedClipboardReply {
+        const self = current.?;
+        if (self.clipboard_reply_index >= self.clipboard_replies.len) return .{};
+        defer self.clipboard_reply_index += 1;
+        return self.clipboard_replies[self.clipboard_reply_index];
+    }
+    fn clipboardWrite(_: *vt.TerminalStream.Handler, value: vt.clipboard.Write) void {
+        const contents = current.?.alloc.alloc(ClipboardContent, value.contents.len) catch @panic("oracle allocation failed");
+        for (value.contents, contents) |source, *destination| {
+            destination.* = .{ .mime = encoded(source.mime), .data = encoded(source.data) };
+        }
+        record(.{ .kind = "clipboard_write", .clipboard = .{
+            .location = @tagName(value.location),
+            .contents = contents,
+            .name = encoded(value.name),
+            .granted = value.granted,
+            .can_remember = value.can_remember,
+        } });
+        const reply = nextClipboardReply();
+        value.reply(switch (reply.status) {
+            .success => .{ .success = .{ .remember = reply.remember } },
+            .denied => .denied,
+            .unsupported => .unsupported,
+            .busy => .busy,
+            .invalid_data => .invalid_data,
+            .io_error => .io_error,
+            .none => return,
+        });
+    }
+    fn clipboardRead(_: *vt.TerminalStream.Handler, value: vt.clipboard.Read) void {
+        const mimes = current.?.alloc.alloc([]const u8, value.mimes.len) catch @panic("oracle allocation failed");
+        for (value.mimes, mimes) |source, *destination| destination.* = encoded(source);
+        record(.{ .kind = "clipboard_read", .clipboard = .{
+            .location = @tagName(value.location),
+            .mimes = mimes,
+            .list = value.list,
+            .name = encoded(value.name),
+            .granted = value.granted,
+            .can_remember = value.can_remember,
+        } });
+        const reply = nextClipboardReply();
+        value.reply(switch (reply.status) {
+            .success => .{ .success = .{ .contents = reply.contents, .available = reply.available, .remember = reply.remember } },
+            .denied => .denied,
+            .unsupported => .unsupported,
+            .busy => .busy,
+            .io_error => .io_error,
+            .none => return,
+            .invalid_data => {
+                current.?.invalid_read_status = true;
+                return;
+            },
+        });
     }
 };
 
@@ -233,7 +316,17 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     defer t.deinit(alloc);
     var stream = terminalStream(alloc, &t);
     defer stream.deinit();
-    var ctx: Context = .{ .alloc = alloc };
+    const clipboard_replies = try alloc.alloc(DecodedClipboardReply, request.clipboard_replies.len);
+    for (request.clipboard_replies, clipboard_replies) |source, *destination| {
+        const contents = try alloc.alloc(vt.clipboard.Content, source.contents.len);
+        for (source.contents, contents) |content, *decoded| {
+            decoded.* = .{ .mime = try hexDecode(alloc, content.mime), .data = try hexDecode(alloc, content.data) };
+        }
+        const available = try alloc.alloc([]const u8, source.available.len);
+        for (source.available, available) |mime, *decoded| decoded.* = try hexDecode(alloc, mime);
+        destination.* = .{ .status = source.status, .contents = contents, .available = available, .remember = source.remember };
+    }
+    var ctx: Context = .{ .alloc = alloc, .clipboard_replies = clipboard_replies };
     current = &ctx;
     defer current = null;
     var observations: std.ArrayList(Observation) = .empty;
@@ -296,6 +389,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             } else .{ .stage = "finish", .offset = snapshot_source.seek });
         } else return error.UnsupportedOperation;
     }
+    if (ctx.invalid_read_status) return error.UnsupportedClipboardReadStatus;
     if (observe_terminal) try observations.append(alloc, try observe(alloc, &t));
     response.observations = observations.items;
     response.events = ctx.events.items;
@@ -327,6 +421,8 @@ fn terminalStream(alloc: Allocator, terminal: *vt.Terminal) vt.TerminalStream {
     result.handler.effects.pwd_changed = Context.pwd;
     result.handler.effects.desktop_notification = Context.notification;
     result.handler.effects.progress_report = Context.progress;
+    result.handler.effects.clipboard_write = Context.clipboardWrite;
+    result.handler.effects.clipboard_read = Context.clipboardRead;
     return result;
 }
 

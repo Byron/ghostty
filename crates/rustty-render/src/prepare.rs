@@ -20,6 +20,10 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 #[path = "graphics.rs"]
 mod graphics;
 
+#[path = "preedit.rs"]
+mod preedit;
+pub use preedit::Preedit;
+
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
     pub size: [u32; 2],
@@ -35,6 +39,7 @@ pub struct RenderOptions {
     pub cursor_visible: bool,
     pub blink_visible: bool,
     pub background_opacity: f32,
+    pub preedit: Option<Preedit>,
 }
 
 impl Default for RenderOptions {
@@ -79,6 +84,7 @@ impl Default for RenderOptions {
             cursor_visible: true,
             blink_visible: true,
             background_opacity: 1.0,
+            preedit: None,
         }
     }
 }
@@ -191,6 +197,8 @@ impl Renderer {
             }
             let cursor = screen.cursor.visible
                 && options.cursor_visible
+                && !(options.focused
+                    && options.preedit.as_ref().is_some_and(|p| !p.text.is_empty()))
                 && screen.viewport_offset == 0
                 && screen.cursor.row == row_index;
             let mut paints = Vec::with_capacity(row.cells.len());
@@ -293,6 +301,7 @@ impl Renderer {
         frame.quads.extend(below_text);
         frame.quads.extend(foreground.quads);
         frame.quads.extend(above_text);
+        self.preedit(screen, options, &mut frame)?;
         frame.atlas_uploads = self.uploads.clone();
         Ok(frame)
     }

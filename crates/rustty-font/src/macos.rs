@@ -248,8 +248,20 @@ impl FontSystem {
     }
 
     pub fn shape(&mut self, text: &str, style: FontStyle) -> Result<Vec<ShapedGlyph>, FontError> {
+        self.shape_with_carets(text, style, &[])
+            .map(|(glyphs, _)| glyphs)
+    }
+
+    /// Shape a run and resolve UTF-8 caret offsets through the native shaper.
+    /// This preserves caret positions inside ligatures and combining clusters.
+    pub fn shape_with_carets(
+        &mut self,
+        text: &str,
+        style: FontStyle,
+        offsets: &[usize],
+    ) -> Result<(Vec<ShapedGlyph>, Vec<f32>), FontError> {
         if text.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), vec![0.0; offsets.len()]));
         }
         let string = CFString::from_str(text);
         let style = if self.config.style_requests[style as usize] == FontStyleRequest::Disabled {
@@ -313,6 +325,17 @@ impl FontSystem {
                 length: (map.len() - 1) as isize,
             })
         };
+        let carets = offsets
+            .iter()
+            .map(|byte| {
+                let mut byte = (*byte).min(text.len());
+                while !text.is_char_boundary(byte) {
+                    byte -= 1;
+                }
+                let index = map.partition_point(|offset| *offset < byte);
+                unsafe { line.offset_for_string_index(index as isize, ptr::null_mut()) as f32 }
+            })
+            .collect();
         // CTLine guarantees that the returned array contains CoreText run objects.
         let runs = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(line.glyph_runs()) };
         let mut result = Vec::new();
@@ -400,7 +423,7 @@ impl FontSystem {
                 });
             }
         }
-        Ok(result)
+        Ok((result, carets))
     }
 
     pub fn rasterize(&self, glyph: &ShapedGlyph) -> Result<GlyphBitmap, FontError> {

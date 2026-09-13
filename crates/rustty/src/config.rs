@@ -307,6 +307,7 @@ pub struct Config {
     pub copy_on_select: CopyOnSelect,
     pub clipboard_read: ClipboardAccess,
     pub clipboard_write: ClipboardAccess,
+    pub clipboard_write_limit_bytes: Option<usize>,
     pub confirm_close_surface: ConfirmCloseSurface,
     pub wait_after_command: bool,
     pub abnormal_command_exit_runtime: u32,
@@ -387,6 +388,7 @@ impl Default for Config {
             copy_on_select: CopyOnSelect::None,
             clipboard_read: ClipboardAccess::Ask,
             clipboard_write: ClipboardAccess::Allow,
+            clipboard_write_limit_bytes: Some(64 * 1024 * 1024),
             confirm_close_surface: ConfirmCloseSurface::True,
             wait_after_command: false,
             abnormal_command_exit_runtime: 250,
@@ -529,6 +531,10 @@ impl Config {
             "copy-on-select" => set!(copy_on_select, CopyOnSelect::parse(value)?),
             "clipboard-read" => set!(clipboard_read, ClipboardAccess::parse(value)?),
             "clipboard-write" => set!(clipboard_write, ClipboardAccess::parse(value)?),
+            "clipboard-write-limit-bytes" => set!(
+                clipboard_write_limit_bytes,
+                parse_limit(value, Some(64 * 1024 * 1024))?
+            ),
             "confirm-close-surface" => {
                 set!(confirm_close_surface, ConfirmCloseSurface::parse(value)?)
             }

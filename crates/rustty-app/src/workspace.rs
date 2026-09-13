@@ -600,6 +600,23 @@ impl Tab {
     }
     /// Returns false when the tab's last pane has closed.
     pub fn close(&mut self, pane: Id) -> bool {
+        let next = if self.focused == pane {
+            let neighbor = |tree: &Tree| {
+                let panes = tree.panes();
+                let index = panes.iter().position(|id| *id == pane)?;
+                if index > 0 {
+                    Some(panes[index - 1])
+                } else {
+                    panes.get(1).copied()
+                }
+            };
+            self.quadrant_zoom
+                .and_then(|id| self.root.node(id))
+                .and_then(neighbor)
+                .or_else(|| neighbor(&self.root))
+        } else {
+            None
+        };
         let Some(root) = self.root.clone().remove(pane) else {
             return false;
         };
@@ -615,7 +632,7 @@ impl Tab {
             .quadrant_zoom
             .filter(|id| self.root.node(*id).is_some());
         if self.focused == pane {
-            self.focused = self.root.panes()[0];
+            self.focused = next.unwrap_or_else(|| self.root.panes()[0]);
         }
         true
     }
@@ -648,6 +665,35 @@ impl Default for Workspace {
 }
 
 impl Workspace {
+    /// Restoring a layout must not reuse IDs issued after that snapshot.
+    pub fn restore(&mut self, mut previous: Self) -> Self {
+        previous.next_id = previous.next_id.max(self.next_id);
+        std::mem::replace(self, previous)
+    }
+    pub fn close_pane(&mut self, pane: Id) -> bool {
+        let Some((window, tab)) = self.windows.iter().enumerate().find_map(|(w, window)| {
+            window
+                .tabs
+                .iter()
+                .position(|tab| tab.panes.contains_key(&pane))
+                .map(|tab| (w, tab))
+        }) else {
+            return false;
+        };
+        let window_state = &mut self.windows[window];
+        if !window_state.tabs[tab].close(pane) {
+            window_state.tabs.remove(tab);
+            if window_state.tabs.is_empty() {
+                self.windows.remove(window);
+            } else if window_state.active_tab >= tab {
+                window_state.active_tab = window_state
+                    .active_tab
+                    .saturating_sub(1)
+                    .min(window_state.tabs.len() - 1);
+            }
+        }
+        true
+    }
     pub fn id(&mut self) -> Id {
         let id = self.next_id;
         self.next_id = self
@@ -890,6 +936,31 @@ mod tests {
         assert!((tree.layout(bounds)[1].1.width - 540.0).abs() < 0.001);
         assert!(!tree.set_ratio(id, f32::NAN));
         assert!(!tree.resize(99, Direction::Left, 20.0, bounds));
+    }
+    #[test]
+    fn restored_layouts_do_not_reuse_ids_and_closing_keeps_nearby_focus() {
+        let mut workspace = Workspace::default();
+        workspace.id();
+        let saved = workspace.clone();
+        let issued = workspace.id();
+        workspace.restore(saved);
+        assert!(workspace.id() > issued);
+        let mut tab = quadrants();
+        tab.focus(5);
+        assert!(tab.close(5));
+        assert_eq!(tab.focused, 3);
+        workspace.windows.push(WindowState {
+            id: 100,
+            tabs: vec![tab],
+            active_tab: 0,
+            frame: [0.0, 0.0, 100.0, 100.0],
+            quick: false,
+        });
+        assert!(workspace.close_pane(2));
+        assert!(workspace.close_pane(3));
+        assert!(workspace.close_pane(7));
+        assert!(workspace.windows.is_empty());
+        assert!(!workspace.close_pane(7));
     }
     #[test]
     fn serialized_workspace_preserves_layout_focus_and_directories() {

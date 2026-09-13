@@ -9,6 +9,7 @@ pub(super) struct Smoke {
     deadline: Instant,
     next: Instant,
     original: Option<Id>,
+    closed: Option<(Id, Instant)>,
     idle_frames: u64,
 }
 impl Smoke {
@@ -31,6 +32,7 @@ impl Smoke {
         loaded.config.working_directory = Some(PathBuf::from("/tmp"));
         loaded.config.window_save_state = config::WindowSaveState::Always;
         loaded.config.cursor_style_blink = Some(false);
+        loaded.config.undo_timeout = Duration::from_secs(5);
         loaded.config.keybinds.retain(|b| !b.flags.global);
         Ok(Some(Self {
             directory,
@@ -39,6 +41,7 @@ impl Smoke {
             deadline: Instant::now() + Duration::from_secs(45),
             next: Instant::now(),
             original: None,
+            closed: None,
             idle_frames: 0,
         }))
     }
@@ -145,6 +148,12 @@ impl Smoke {
                 if app.panes.values().any(|p| p.cwd != Path::new("/tmp")) {
                     return Err("OSC directory was not decoded before restoration".into());
                 }
+                if self.closed.is_none() {
+                    self.closed = Some((pane, app.panes[&pane].started));
+                    app.action(event_loop, host, Action::CloseSurface, true);
+                    self.stage = 5;
+                    return Ok(false);
+                }
                 app.save();
                 let restored =
                     Workspace::load(&app.state_path)?.ok_or("workspace was not saved")?;
@@ -212,13 +221,41 @@ impl Smoke {
                     )
                     .into());
                 }
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","workspace-roundtrip","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"panes":app.panes.len()});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"panes":app.panes.len()});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
                 )?;
                 println!("Native smoke passed: {}", self.directory.display());
                 return Ok(true);
+            }
+            5 => {
+                let (closed, started) = self.closed.unwrap();
+                if app.tab(host.id).unwrap().panes.contains_key(&closed)
+                    || !app
+                        .panes
+                        .get(&closed)
+                        .is_some_and(|pane| pane.started == started)
+                {
+                    return Err("closed terminal was not retained for undo".into());
+                }
+                if !app.action(event_loop, host, Action::Undo, true) {
+                    return Err("close could not be undone".into());
+                }
+                self.stage = 6;
+            }
+            6 => {
+                let (closed, started) = self.closed.unwrap();
+                if !app.tab(host.id).unwrap().panes.contains_key(&closed)
+                    || !app
+                        .panes
+                        .get(&closed)
+                        .is_some_and(|pane| pane.started == started)
+                    || !text(app, closed).contains("Rustty native smoke")
+                {
+                    return Err("undo did not restore the same terminal process".into());
+                }
+                self.stage = 2;
             }
             _ => unreachable!(),
         }

@@ -498,5 +498,24 @@
     "corpus_sources": [
       "stream-cmin/id_000475,time_0,execs_0,orig_id_000937,src_000000,time_9272,execs_53815,op_havoc,rep_8"
     ]
+  },
+  {
+    "request": {
+      "id": "corpus/csi-zero-vpr",
+      "cols": 4,
+      "rows": 3,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b3b65"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cursor"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000411,time_0,execs_0,orig_id_000865,src_000000,time_7600,execs_44042,op_havoc,rep_7"
+    ]
   }
 ]

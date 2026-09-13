@@ -1670,7 +1670,8 @@ impl Terminal {
             }
             ([], b'L' | b'M') => {
                 let cur = self.screen().cursor.clone();
-                if cur.row >= self.margins.top
+                if (p.is_empty() || n != 0)
+                    && cur.row >= self.margins.top
                     && cur.row <= self.margins.bottom
                     && cur.col >= self.margins.left
                     && cur.col <= self.margins.right

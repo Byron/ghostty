@@ -6,6 +6,7 @@ const input_adapter = @import("zig-input.zig");
 const parser_adapter = @import("zig-parser.zig");
 const paste_adapter = @import("zig-paste.zig");
 const semantic_adapter = @import("zig-semantic.zig");
+const graphics_adapter = @import("zig-graphics.zig");
 const Allocator = std.mem.Allocator;
 // libghostty-vt exposes this type through the callback without re-exporting
 // the implementation module. Use that public signature as the source of truth.
@@ -15,6 +16,8 @@ const DeviceAttributes = @typeInfo(@typeInfo(DeviceAttributesFn).pointer.child).
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
+    "graphics.kitty",
+    "graphics.png",
     "protocol.dcs",
     "terminal.write",
     "terminal.resize",
@@ -78,6 +81,7 @@ const Request = struct {
     observe_mode_effects: bool = false,
     observe_colors: bool = false,
     observe_semantic: bool = false,
+    observe_graphics: bool = false,
     color_inputs: []const []const u8 = &.{},
 };
 const ColorDefaults = struct {
@@ -228,6 +232,7 @@ const Observation = struct {
     mode_effects: ?ModeEffects,
     colors: ?Colors,
     semantic: ?semantic_adapter.State,
+    graphics: ?graphics_adapter.State,
 };
 const Notification = struct { title: []const u8, body: []const u8 };
 const Progress = struct { state: u8, value: ?u8 };
@@ -440,6 +445,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
+    const previous_png = vt.sys.decode_png;
+    defer vt.sys.decode_png = previous_png;
+    if (request.observe_graphics) graphics_adapter.install();
     var response: Response = .{ .id = request.id };
     if (std.mem.eql(u8, request.kind, "capabilities")) return response;
     if (std.mem.eql(u8, request.kind, "parser")) {
@@ -721,6 +729,7 @@ fn observe(alloc: Allocator, t: *vt.Terminal, request: Request) !Observation {
         } else null,
         .colors = if (request.observe_colors) observeColors(&t.colors) else null,
         .semantic = if (request.observe_semantic) try semantic_adapter.observe(alloc, t) else null,
+        .graphics = if (request.observe_graphics) try graphics_adapter.observe(alloc, t) else null,
     };
 }
 

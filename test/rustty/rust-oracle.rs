@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Read, Write};
 
+#[path = "rust-graphics.rs"]
+mod graphics_adapter;
 #[path = "rust-input.rs"]
 mod input;
 #[path = "rust-parser.rs"]
@@ -17,6 +19,8 @@ mod paste;
 mod semantic_adapter;
 
 const CAPABILITIES: &[&str] = &[
+    "graphics.kitty",
+    "graphics.png",
     "terminal.write",
     "terminal.resize",
     "terminal.reset",
@@ -64,6 +68,7 @@ struct Request {
     observe_mode_effects: bool,
     observe_colors: bool,
     observe_semantic: bool,
+    observe_graphics: bool,
     color_inputs: Vec<String>,
 }
 
@@ -86,6 +91,7 @@ impl Default for Request {
             observe_mode_effects: false,
             observe_colors: false,
             observe_semantic: false,
+            observe_graphics: false,
             color_inputs: Vec::new(),
         }
     }
@@ -849,7 +855,8 @@ fn observe(terminal: &Terminal, request: &Request) -> Value {
         "margins":[m.top,m.bottom,m.left,m.right],
         "title":hex(terminal.title_bytes()),"pwd":hex(terminal.working_directory_bytes()),
         "modes":modes,"mode_effects":mode_effects,"colors":colors,
-        "semantic":request.observe_semantic.then(|| semantic_adapter::observe(terminal))})
+        "semantic":request.observe_semantic.then(|| semantic_adapter::observe(terminal)),
+        "graphics":request.observe_graphics.then(|| graphics_adapter::observe(terminal))})
 }
 
 fn screen(screen: &Screen) -> Value {

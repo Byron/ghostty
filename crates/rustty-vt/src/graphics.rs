@@ -926,23 +926,62 @@ fn decode_image(cmd: &Command, mut data: Vec<u8>) -> Result<(u32, u32, Vec<u8>),
     let mut width = cmd.n(b's');
     let mut height = cmd.n(b'v');
     if format == 100 {
-        let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(data.as_slice()));
         decoder.set_limits(png::Limits { bytes: MAX_DATA });
         decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
         let mut reader = decoder.read_info().map_err(|_| "EINVAL: invalid data")?;
         width = reader.info().width;
         height = reader.info().height;
-        check_dimensions(width, height)?;
+        // The native PNG callback bounds the expanded RGBA output before the
+        // terminal checks dimensions. Keep that bound for grayscale input too.
+        let pixel_count = u64::from(width) * u64::from(height);
+        if pixel_count > MAX_DATA as u64 / 4 {
+            return Err("EINVAL: invalid data");
+        }
         let len = reader
             .output_buffer_size()
             .filter(|&n| n <= MAX_DATA)
             .ok_or("EINVAL: invalid data")?;
         let mut bytes = vec![0; len];
-        let info = reader
-            .next_frame(&mut bytes)
-            .map_err(|_| "EINVAL: invalid data")?;
-        bytes.truncate(info.buffer_size());
-        data = match info.color_type {
+        let (color, depth) = reader.output_color_type();
+        let stride = reader
+            .output_line_size(width)
+            .ok_or("EINVAL: invalid data")?;
+        let mut decoded = 0;
+        while decoded < len {
+            let row = reader
+                .next_interlaced_row()
+                .map_err(|_| "EINVAL: invalid data")?
+                .ok_or("EINVAL: invalid data")?;
+            if row.data().len() > len - decoded {
+                return Err("EINVAL: invalid data");
+            }
+            match row.interlace() {
+                png::InterlaceInfo::Null(_) => {
+                    bytes[decoded..decoded + row.data().len()].copy_from_slice(row.data());
+                }
+                png::InterlaceInfo::Adam7(info) => png::expand_interlaced_row(
+                    &mut bytes,
+                    stride,
+                    row.data(),
+                    info,
+                    color.samples() as u8 * depth as u8,
+                ),
+            }
+            decoded += row.data().len();
+        }
+        // Flush the compressed stream and validate IDAT checksums. Wuffs stops
+        // after the final IDAT; png also reads the following chunk header. EOF
+        // is harmless only after every pixel and the full IDAT were consumed.
+        match reader.next_interlaced_row() {
+            Ok(None) => {}
+            Err(png::DecodingError::IoError(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+                    && png_ends_after_idat(&data) => {}
+            _ => return Err("EINVAL: invalid data"),
+        }
+        check_dimensions(width, height)?;
+        data = match color {
             png::ColorType::Rgba => bytes,
             png::ColorType::Rgb => bytes
                 .as_chunks::<3>()
@@ -979,6 +1018,21 @@ fn decode_image(cmd: &Command, mut data: Vec<u8>) -> Result<(u32, u32, Vec<u8>),
         }
     }
     Ok((width, height, data))
+}
+
+fn png_ends_after_idat(data: &[u8]) -> bool {
+    let mut chunks = data.get(8..).unwrap_or_default();
+    while chunks.len() >= 12 {
+        let len = u32::from_be_bytes(chunks[..4].try_into().unwrap()) as usize;
+        let Some(rest) = len.checked_add(12).and_then(|end| chunks.get(end..)) else {
+            return false;
+        };
+        if rest.len() < 8 {
+            return &chunks[4..8] == b"IDAT";
+        }
+        chunks = rest;
+    }
+    false
 }
 
 fn check_dimensions(width: u32, height: u32) -> Result<(), &'static str> {
@@ -1126,6 +1180,33 @@ mod tests {
         let payload = base64::engine::general_purpose::STANDARD.encode(zlib.finish().unwrap());
         t.feed(format!("\x1b_Gi=2,s=1,v=1,f=24,o=z;{payload}\x1b\\").as_bytes());
         assert_eq!(t.graphics().images[&2].pixels.as_ref(), [90, 80, 70, 255]);
+    }
+
+    #[test]
+    fn png_accepts_missing_trailer_but_requires_complete_pixels_and_checksum() {
+        let mut encoded = Vec::new();
+        {
+            let mut png = png::Encoder::new(&mut encoded, 1, 1);
+            png.set_color(png::ColorType::Rgba);
+            png.set_depth(png::BitDepth::Eight);
+            png.write_header()
+                .unwrap()
+                .write_image_data(&[12, 34, 56, 78])
+                .unwrap();
+        }
+        let (command, _) = Command::parse(b"Gf=100;").unwrap();
+        let idat_end = encoded.len() - 12;
+        for length in 0..=encoded.len() {
+            let decoded = decode_image(&command, encoded[..length].to_vec());
+            if length >= idat_end {
+                assert_eq!(decoded.unwrap(), (1, 1, vec![12, 34, 56, 78]));
+            } else {
+                assert!(decoded.is_err(), "accepted truncated PNG at {length}");
+            }
+        }
+        encoded[idat_end - 1] ^= 1;
+        assert!(decode_image(&command, encoded[..idat_end].to_vec()).is_err());
+        assert!(decode_image(&command, encoded).is_err());
     }
 
     #[test]

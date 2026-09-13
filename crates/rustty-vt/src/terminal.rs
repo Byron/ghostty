@@ -1305,6 +1305,7 @@ impl Terminal {
             }
         }
         let erased = screen.rows[m.top].id;
+        screen.pages.invalidate_layout(top, bottom);
         let replacement = if page_row == 0 {
             screen.rows[m.top + 1].id
         } else {
@@ -1390,6 +1391,17 @@ impl Terminal {
                 screen.rows.insert(m.bottom, blank);
                 if shift_history {
                     screen.push_history(row);
+                    if screen.limits.bytes == Some(0) {
+                        screen.pages.invalidate_layout(
+                            screen.history.len() + m.top,
+                            screen.history.len() + m.bottom,
+                        );
+                    } else if m.bottom + 1 < screen.rows.len() {
+                        screen.pages.invalidate_layout(
+                            screen.history.len() + m.bottom + 1,
+                            screen.history.len() + screen.rows.len() - 1,
+                        );
+                    }
                 } else {
                     screen.release_row_styles(&row);
                     screen.discard_row(row.id);
@@ -1450,6 +1462,13 @@ impl Terminal {
     fn prepare_row_shift(&mut self) {
         let m = self.margins;
         let right_edge = m.right + 1 == usize::from(self.cols);
+        if m.left == 0 && right_edge {
+            let screen = self.screen_mut();
+            screen.pages.invalidate_layout(
+                screen.history.len() + m.top,
+                screen.history.len() + m.bottom,
+            );
+        }
         for row in &mut self.screen_mut().rows[m.top..=m.bottom] {
             if m.left == 0 && right_edge {
                 row.wrapped = false;

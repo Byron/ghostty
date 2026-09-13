@@ -22,6 +22,7 @@ pub const Operation = struct {
     end: Point = .{},
     rectangle: bool = false,
     needle: []const u8 = "",
+    active_dirty: ?bool = null,
     delta: i32 = 0,
     lines: ?usize = null,
     bytes: ?usize = null,
@@ -54,6 +55,7 @@ pub const Result = struct {
     action: []const u8,
     status: []const u8,
     matches: ?[]const Match,
+    search_needle: ?[]const u8,
     active_screen: []const u8,
     viewport_top: ?[2]u32,
     selection: ?Selection,
@@ -75,12 +77,14 @@ const Handle = struct {
 };
 pub const Context = struct {
     handles: std.ArrayList(Handle) = .empty,
+    search: ?vt.search.Terminal = null,
 
     pub fn hasHandles(self: Context) bool {
-        return self.handles.items.len != 0;
+        return self.handles.items.len != 0 or self.search != null;
     }
 
     pub fn deinit(self: *Context, alloc: Allocator, terminal: *vt.Terminal) void {
+        if (self.search) |*search| search.deinit(terminal);
         for (self.handles.items) |handle| {
             if (handle.screen(terminal)) |screen| screen.pages.untrackPin(handle.pin);
         }
@@ -90,6 +94,7 @@ pub const Context = struct {
     pub fn run(self: *Context, alloc: Allocator, terminal: *vt.Terminal, op: Operation) !Result {
         var status: []const u8 = "ok";
         var matches: ?[]const Match = null;
+        var search_needle: ?[]const u8 = null;
         var selection_result: ?Bounds = null;
         const screen = terminal.screens.active;
         if (std.mem.eql(u8, op.action, "observe")) {
@@ -196,6 +201,33 @@ pub const Context = struct {
                 }
                 matches = results;
             }
+        } else if (std.mem.eql(u8, op.action, "search_needle")) {
+            const needle = try unhex(alloc, op.needle);
+            // Mirror the native C wrapper's lifecycle around TerminalSearch.
+            if (needle.len == 0) {
+                if (self.search) |*search| search.deinit(terminal);
+                self.search = null;
+            } else {
+                const same = if (self.search) |*search| std.ascii.eqlIgnoreCase(search.needle(), needle) else false;
+                if (!same) {
+                    const replacement = try vt.search.Terminal.init(alloc, needle);
+                    if (self.search) |*search| search.deinit(terminal);
+                    self.search = replacement;
+                }
+            }
+            search_needle = try hex(alloc, if (self.search) |*search| search.needle() else "");
+        } else if (std.mem.eql(u8, op.action, "search_feed")) {
+            if (self.search) |*search| search.feed(terminal, op.active_dirty orelse true);
+        } else if (std.mem.eql(u8, op.action, "search_viewport")) {
+            if (self.search) |*search| {
+                const found = try search.viewportMatches();
+                const results = try alloc.alloc(Match, found.len);
+                for (found, results) |value, *result| {
+                    const bounds = value.untracked();
+                    result.* = .{ .start = location(screen, bounds.start), .end = location(screen, bounds.end) };
+                }
+                matches = results;
+            } else matches = &.{};
         } else return error.UnsupportedGridAction;
 
         const tracked = try alloc.alloc(Tracked, self.handles.items.len);
@@ -222,6 +254,7 @@ pub const Context = struct {
             .action = op.action,
             .status = status,
             .matches = matches,
+            .search_needle = search_needle,
             .active_screen = @tagName(terminal.screens.active_key),
             .viewport_top = coordinate(active, .screen, active.pages.getTopLeft(.viewport)),
             .selection = selection,

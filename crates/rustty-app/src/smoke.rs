@@ -106,13 +106,10 @@ impl Smoke {
                 }
                 app.action(event_loop, host, Action::ToggleQuadrantZoom, true);
                 let before = app.focused(host.id).unwrap();
-                host.peek = Some(Peek {
-                    chord: config::Modifiers {
-                        control: true,
-                        super_key: true,
-                        ..Default::default()
-                    },
-                    target: before,
+                host.peek = app.tab_mut(host.id).unwrap().begin_peek(config::Modifiers {
+                    control: true,
+                    super_key: true,
+                    ..Default::default()
                 });
                 if !app.action(
                     event_loop,
@@ -122,7 +119,8 @@ impl Smoke {
                 ) {
                     return Err("quadrant navigation was blocked".into());
                 }
-                let target = host.peek.take().unwrap().target;
+                let peek = host.peek.take().unwrap();
+                let target = app.tab_mut(host.id).unwrap().finish_peek(peek);
                 if target == before {
                     return Err("quadrant navigation kept old focus".into());
                 }

@@ -9,7 +9,7 @@ use rustty::{
 use rustty_app::{
     input,
     platform::{Platform, PlatformEvent},
-    workspace::{Axis, Id, Rect, Tab, WindowState, Workspace},
+    workspace::{Axis, Id, Peek, Rect, Tab, WindowState, Workspace},
 };
 use rustty_font::{FontConfig, FontFeature};
 use rustty_render::{Frame, RenderOptions};
@@ -100,11 +100,6 @@ impl Pane {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Peek {
-    chord: config::Modifiers,
-    target: Id,
-}
 struct Host {
     id: Id,
     viewport: ViewportId,
@@ -120,6 +115,7 @@ struct Host {
     composing: bool,
     preedit: String,
     peek: Option<Peek>,
+    navigation_warning: Option<(Id, Instant)>,
     mouse: Pos2,
     mouse_button: Option<vt::MouseButton>,
     selection_anchor: Option<vt::GridPoint>,
@@ -608,6 +604,7 @@ impl App {
             composing: false,
             preedit: String::new(),
             peek: None,
+            navigation_warning: None,
             mouse: Pos2::ZERO,
             mouse_button: None,
             selection_anchor: None,
@@ -916,26 +913,64 @@ impl App {
                 }
             }
             Action::GotoSplit(direction) => {
-                let from = host.peek.map(|p| p.target).or(focused);
-                let target = from.and_then(|from| self.tab(host.id)?.target(from, direction));
-                let Some(mut target) = target else {
-                    return false;
-                };
-                if matches!(
+                let from = focused;
+                let quadrant = matches!(
                     direction,
                     Direction::QuadrantLeft
                         | Direction::QuadrantRight
                         | Direction::QuadrantUp
                         | Direction::QuadrantDown
-                ) && let Some(tab) = self.tab(host.id)
-                    && let Some(quadrant) = tab.root.quadrant(target)
-                    && let Some(remembered) = tab.remembered.get(&quadrant)
-                {
-                    target = *remembered;
+                );
+                let target = from.and_then(|from| self.tab(host.id)?.target(from, direction));
+                let target = target.map(|pane| {
+                    if quadrant {
+                        self.tab(host.id)
+                            .and_then(|tab| tab.remembered_for(pane))
+                            .unwrap_or(pane)
+                    } else {
+                        pane
+                    }
+                });
+                let moved = target.is_some() && target != from;
+                if quadrant {
+                    if host.peek.is_none()
+                        && let Some(tab) = self.tab_mut(host.id)
+                    {
+                        host.peek = tab.begin_peek(input::modifiers(host.modifiers));
+                    }
+                    if let Some(peek) = &mut host.peek {
+                        peek.navigation_used = true;
+                        if let Some(target) = target {
+                            peek.target = target;
+                        }
+                    }
+                    if (moved || host.peek.is_some())
+                        && let Some(tab) = self.tab_mut(host.id)
+                    {
+                        tab.zoom = None;
+                        tab.quadrant_zoom = None;
+                    }
                 }
-                if let Some(peek) = &mut host.peek {
-                    peek.target = target;
-                } else {
+                if !moved {
+                    if !quadrant
+                        && let Some(tab) = self.tab_mut(host.id)
+                        && tab.unzoom_after_blocked_navigation()
+                    {
+                        host.navigation_warning = None;
+                    } else if let Some(from) = from {
+                        host.navigation_warning =
+                            Some((from, Instant::now() + Duration::from_millis(500)));
+                        host.repaint();
+                        return quadrant && host.peek.is_some();
+                    } else {
+                        return false;
+                    }
+                } else if let Some(target) = target {
+                    if !quadrant && let Some(tab) = self.tab_mut(host.id) {
+                        // Ordinary navigation reveals the quadrant layer below full zoom.
+                        tab.zoom = tab.quadrant_zoom;
+                    }
+                    host.navigation_warning = None;
                     self.focus_pane(host.id, target);
                 }
             }
@@ -1496,6 +1531,13 @@ impl App {
         let blink_on = (self.started.elapsed().as_millis() / BLINK.as_millis()).is_multiple_of(2);
         let mut needs_blink = false;
         let mut graphics_deadline: Option<Instant> = None;
+        if host
+            .navigation_warning
+            .is_some_and(|(_, until)| until <= Instant::now())
+        {
+            host.navigation_warning = None;
+        }
+
         let title = self
             .panes
             .get(&focused)
@@ -1848,6 +1890,14 @@ impl App {
                         if id == focused && host.focused && !host.ui_input() {
                             response.request_focus();
                         }
+                        if host.navigation_warning.is_some_and(|(pane, _)| pane == id) {
+                            ui.painter().rect_stroke(
+                                rect.shrink(2.0),
+                                0.0,
+                                egui::Stroke::new(3.0, Color32::from_rgb(230, 125, 65)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
                         if active.root.panes().len() > 1 {
                             let selected = host
                                 .peek
@@ -1867,7 +1917,9 @@ impl App {
                                 egui::Stroke::new(if selected { 1.5 } else { 0.5 }, color),
                                 egui::StrokeKind::Inside,
                             );
-                            if let Some(pane) = self.panes.get(&id) {
+                            if host.peek.is_none()
+                                && let Some(pane) = self.panes.get(&id)
+                            {
                                 let directory = pane
                                     .cwd
                                     .file_name()
@@ -1913,6 +1965,60 @@ impl App {
                                 egui::FontId::monospace(config.font_size),
                                 rgb(config.foreground),
                             );
+                        }
+                    }
+                    if let Some(peek) = host.peek {
+                        let mut quadrants = BTreeMap::<Id, egui::Rect>::new();
+                        for (&pane, &rect) in &host.rects {
+                            if let Some(quadrant) = active.root.quadrant(pane) {
+                                quadrants
+                                    .entry(quadrant)
+                                    .and_modify(|bounds| *bounds = bounds.union(rect))
+                                    .or_insert(rect);
+                            }
+                        }
+                        let selected = active.root.quadrant(peek.target);
+                        for (id, bounds) in quadrants {
+                            if !peek.navigation_used && Some(id) != selected {
+                                ui.painter().rect_filled(
+                                    bounds,
+                                    0.0,
+                                    Color32::from_black_alpha(
+                                        (config.quadrant_peek_opacity * 255.0) as u8,
+                                    ),
+                                );
+                            }
+                            if Some(id) == selected {
+                                ui.painter().rect_stroke(
+                                    bounds,
+                                    0.0,
+                                    egui::Stroke::new(2.0, Color32::from_rgb(112, 165, 245)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let pane =
+                                active.activate_quadrant(active.root.node(id).unwrap().panes()[0]);
+                            if let Some(pane) = pane.and_then(|id| self.panes.get(&id)) {
+                                let label = pane
+                                    .cwd
+                                    .file_name()
+                                    .unwrap_or(pane.cwd.as_os_str())
+                                    .to_string_lossy();
+                                let galley = ui.painter().layout_no_wrap(
+                                    label.into_owned(),
+                                    egui::FontId::proportional(18.0),
+                                    Color32::WHITE,
+                                );
+                                let label_bounds =
+                                    egui::Rect::from_center_size(bounds.center(), galley.size());
+                                ui.painter().rect_filled(
+                                    label_bounds.expand(7.0),
+                                    5.0,
+                                    Color32::from_black_alpha(220),
+                                );
+                                ui.painter()
+                                    .galley(label_bounds.min, galley, Color32::WHITE);
+                            }
                         }
                     }
                 });
@@ -2058,6 +2164,9 @@ impl App {
         );
         host.frames += 1;
         host.deadline = graphics_deadline;
+        if let Some((_, deadline)) = host.navigation_warning {
+            host.deadline = Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
+        }
         if needs_blink {
             let elapsed = self.started.elapsed().as_millis();
             let deadline = Instant::now()
@@ -2121,6 +2230,17 @@ impl App {
             .layer_id_at(host.mouse)
             .is_some_and(|layer| layer.order != egui::Order::Background)
         {
+            return;
+        }
+        if let Some(peek) = &mut host.peek {
+            if action == vt::MouseAction::Press
+                && button == Some(vt::MouseButton::Left)
+                && let Some(target) = hit.and_then(|id| self.tab(host.id)?.activate_quadrant(id))
+            {
+                peek.target = target;
+                self.focus_pane(host.id, target);
+                host.repaint();
+            }
             return;
         }
         if action == vt::MouseAction::Press
@@ -2445,10 +2565,15 @@ impl ApplicationHandler<Event> for App {
                     && !input::chord_held(peek.chord, current)
                 {
                     host.peek = None;
-                    self.focus_pane(host.id, peek.target);
+                    if let Some(tab) = self.tab_mut(host.id) {
+                        let target = tab.finish_peek(peek);
+                        self.focus_pane(host.id, target);
+                    }
                 } else if host.peek.is_none()
                     && !host.ui_input()
-                    && self.tab(host.id).is_some_and(|tab| tab.zoom.is_some())
+                    && self
+                        .tab(host.id)
+                        .is_some_and(|tab| tab.quadrant_zoom.is_some())
                 {
                     let trigger = self
                         .config()
@@ -2470,13 +2595,11 @@ impl ApplicationHandler<Event> for App {
                                     )
                                 })
                         });
-                    if let Some(binding) = trigger
-                        && let Some(target) = self.focused(host.id)
+                    let chord = trigger.map(|binding| binding.trigger[0].modifiers);
+                    if let Some(chord) = chord
+                        && let Some(tab) = self.tab_mut(host.id)
                     {
-                        host.peek = Some(Peek {
-                            chord: binding.trigger[0].modifiers,
-                            target,
-                        });
+                        host.peek = tab.begin_peek(chord);
                     }
                 }
                 host.repaint();

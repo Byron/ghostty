@@ -1,5 +1,5 @@
 //! Window/tab/split state, independent of native windows and running processes.
-use rustty::config::Direction;
+use rustty::config::{Direction, Modifiers};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -373,6 +373,14 @@ pub struct SavedPane {
     pub working_directory: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Peek {
+    pub chord: Modifiers,
+    pub target: Id,
+    pub full_zoom: Option<Id>,
+    pub navigation_used: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tab {
     pub id: Id,
@@ -433,6 +441,67 @@ impl Tab {
         if let Some(quadrant) = self.root.quadrant(pane) {
             self.remembered.insert(quadrant, pane);
         }
+    }
+    pub fn begin_peek(&mut self, chord: Modifiers) -> Option<Peek> {
+        self.quadrant_zoom?;
+        if chord == Modifiers::default() {
+            return None;
+        }
+        let peek = Peek {
+            chord,
+            target: self.focused,
+            full_zoom: self.zoom.filter(|zoom| Some(*zoom) != self.quadrant_zoom),
+            navigation_used: false,
+        };
+        self.zoom = None;
+        self.quadrant_zoom = None;
+        Some(peek)
+    }
+    pub fn finish_peek(&mut self, peek: Peek) -> Id {
+        if self.zoom.is_some() || self.quadrant_zoom.is_some() || !self.root.contains(peek.target) {
+            return self.focused;
+        }
+        let quadrant = self.root.quadrant(peek.target);
+        let target = peek
+            .full_zoom
+            .filter(|original| {
+                quadrant.is_some()
+                    && self.root.quadrant(*original) == quadrant
+                    && self.root.contains(*original)
+            })
+            .unwrap_or(peek.target);
+        self.quadrant_zoom = quadrant;
+        self.zoom = if Some(target) == peek.full_zoom {
+            Some(target)
+        } else {
+            quadrant
+        };
+        target
+    }
+    pub fn remembered_for(&self, pane: Id) -> Option<Id> {
+        let quadrant = self.root.node(self.root.quadrant(pane)?)?;
+        self.remembered
+            .get(&quadrant.id)
+            .copied()
+            .filter(|id| quadrant.contains(*id))
+    }
+    pub fn activate_quadrant(&self, pane: Id) -> Option<Id> {
+        let quadrant = self.root.node(self.root.quadrant(pane)?)?;
+        self.remembered_for(pane)
+            .or_else(|| quadrant.panes().first().copied())
+    }
+    pub fn unzoom_after_blocked_navigation(&mut self) -> bool {
+        let Some(zoom) = self.zoom else {
+            return false;
+        };
+        if Some(zoom) == self.quadrant_zoom && !self.root.contains(zoom) {
+            return false;
+        }
+        self.zoom = self.quadrant_zoom.filter(|id| *id != zoom);
+        if self.zoom.is_none() {
+            self.quadrant_zoom = None;
+        }
+        true
     }
     pub fn toggle_zoom(&mut self) {
         if self.zoom == Some(self.focused) {
@@ -753,6 +822,47 @@ mod tests {
         assert_eq!(tab.target(9, Direction::Right), None);
         assert_eq!(tab.target(9, Direction::Next), Some(2));
         assert_eq!(tab.target(9, Direction::QuadrantRight), Some(3));
+    }
+    #[test]
+    fn peek_restores_full_zoom_only_within_original_quadrant() {
+        let mut tab = quadrants();
+        tab.focus(2);
+        tab.split(9, 10, Direction::Right, PathBuf::from("/tmp"));
+        tab.toggle_quadrant_zoom();
+        tab.toggle_zoom();
+        let chord = Modifiers {
+            super_key: true,
+            ..Modifiers::default()
+        };
+        let mut peek = tab.begin_peek(chord).unwrap();
+        assert_eq!((tab.zoom, tab.quadrant_zoom), (None, None));
+        assert_eq!(tab.activate_quadrant(2), Some(9));
+        peek.target = 2;
+        let target = tab.finish_peek(peek);
+        tab.focus(target);
+        assert_eq!(
+            (target, tab.zoom, tab.quadrant_zoom),
+            (9, Some(9), Some(10))
+        );
+        let mut peek = tab.begin_peek(chord).unwrap();
+        peek.target = 5;
+        let target = tab.finish_peek(peek);
+        tab.focus(target);
+        assert_eq!((target, tab.zoom, tab.quadrant_zoom), (5, Some(5), Some(5)));
+        assert!(tab.unzoom_after_blocked_navigation());
+        assert_eq!((tab.zoom, tab.quadrant_zoom), (None, None));
+        tab.toggle_zoom();
+        assert!(
+            tab.begin_peek(chord).is_none(),
+            "full zoom alone does not trigger peek"
+        );
+        assert!(tab.unzoom_after_blocked_navigation());
+        tab.focus(2);
+        tab.toggle_quadrant_zoom();
+        assert!(
+            !tab.unzoom_after_blocked_navigation(),
+            "multi-pane quadrant stays zoomed at its edge"
+        );
     }
     #[test]
     fn split_sizes_use_axis_weights_pixels_and_clamped_dividers() {

@@ -731,7 +731,7 @@ impl App {
                 SessionEvent::Effect(vt::Effect::Notification { title, body }) => {
                     pane.unseen = !focused;
                     if let Some(platform) = &self.platform
-                        && let Err(error) = platform.notify(id, &title, &body)
+                        && let Err(error) = platform.notify(id, &String::from_utf8_lossy(&title), &String::from_utf8_lossy(&body))
                     {
                         self.errors.push(error);
                     }

@@ -16,8 +16,8 @@ pub enum Effect {
         data: Option<Vec<u8>>,
     },
     Notification {
-        title: String,
-        body: String,
+        title: Vec<u8>,
+        body: Vec<u8>,
     },
     CommandStart,
     CommandEnd {
@@ -25,7 +25,7 @@ pub enum Effect {
     },
     Progress {
         state: u8,
-        value: u8,
+        value: Option<u8>,
     },
     UnknownSequence(String),
 }
@@ -1104,7 +1104,13 @@ impl Terminal {
                 let col = self.screen().cursor.col;
                 self.tabstops[col] = true;
             }
-            ([], b'c') => self.reset(),
+            ([], b'c') => {
+                self.reset();
+                effects.push(Effect::Progress {
+                    state: 0,
+                    value: None,
+                });
+            }
             ([], b'=') => self.set_mode(true, 66, true),
             ([], b'>') => self.set_mode(true, 66, false),
             ([], b'N') => self.screen_mut().charset.single = Some(2),
@@ -1428,25 +1434,33 @@ impl Terminal {
                 }
             }
             9 => {
-                if let Some(progress) = text.strip_prefix("4;") {
-                    let mut p = progress.split(';');
-                    effects.push(Effect::Progress {
-                        state: p.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-                        value: p.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-                    });
+                if let Some(progress) = data.strip_prefix(b"4;")
+                    && let Some(&state @ b'0'..=b'4') = progress.first()
+                {
+                    let state = state - b'0';
+                    let value = match state {
+                        0 | 3 => None,
+                        _ if progress.get(1) == Some(&b';') => {
+                            parse_unsigned(&progress[2..]).map(|v| v.min(100) as u8)
+                        }
+                        1 => Some(0),
+                        _ => None,
+                    };
+                    effects.push(Effect::Progress { state, value });
                 } else {
                     effects.push(Effect::Notification {
-                        title: String::new(),
-                        body: text.into_owned(),
+                        title: Vec::new(),
+                        body: data.to_vec(),
                     });
                 }
             }
             777 => {
-                if let Some(notification) = text.strip_prefix("notify;") {
-                    let (title, body) = notification.split_once(';').unwrap_or((notification, ""));
+                if let Some(notification) = data.strip_prefix(b"notify;")
+                    && let Some(split) = notification.iter().position(|&b| b == b';')
+                {
                     effects.push(Effect::Notification {
-                        title: title.into(),
-                        body: body.into(),
+                        title: notification[..split].to_vec(),
+                        body: notification[split + 1..].to_vec(),
                     });
                 }
             }
@@ -1636,6 +1650,22 @@ impl Terminal {
         }
         self.dcs.clear();
     }
+}
+
+/// Match Zig's decimal unsigned parser, including internal underscore separators.
+fn parse_unsigned(bytes: &[u8]) -> Option<usize> {
+    if !bytes.first()?.is_ascii_digit() || !bytes.last()?.is_ascii_digit() {
+        return None;
+    }
+    bytes
+        .iter()
+        .filter(|&&byte| byte != b'_')
+        .try_fold(0usize, |value, &byte| {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value.checked_mul(10)?.checked_add(usize::from(byte - b'0'))
+        })
 }
 
 fn sgr_report(style: Style) -> String {

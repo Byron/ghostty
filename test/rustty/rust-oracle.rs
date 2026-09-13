@@ -13,6 +13,8 @@ mod input;
 mod parser;
 #[path = "rust-paste.rs"]
 mod paste;
+#[path = "rust-semantic.rs"]
+mod semantic_adapter;
 
 const CAPABILITIES: &[&str] = &[
     "terminal.write",
@@ -61,6 +63,7 @@ struct Request {
     observe_modes: Vec<ModeTag>,
     observe_mode_effects: bool,
     observe_colors: bool,
+    observe_semantic: bool,
     color_inputs: Vec<String>,
 }
 
@@ -82,6 +85,7 @@ impl Default for Request {
             observe_modes: Vec::new(),
             observe_mode_effects: false,
             observe_colors: false,
+            observe_semantic: false,
             color_inputs: Vec::new(),
         }
     }
@@ -844,7 +848,8 @@ fn observe(terminal: &Terminal, request: &Request) -> Value {
         "alternate":terminal.alternate_screen().map(screen),
         "margins":[m.top,m.bottom,m.left,m.right],
         "title":hex(terminal.title_bytes()),"pwd":hex(terminal.working_directory_bytes()),
-        "modes":modes,"mode_effects":mode_effects,"colors":colors})
+        "modes":modes,"mode_effects":mode_effects,"colors":colors,
+        "semantic":request.observe_semantic.then(|| semantic_adapter::observe(terminal))})
 }
 
 fn screen(screen: &Screen) -> Value {

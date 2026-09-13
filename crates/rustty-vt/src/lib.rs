@@ -5,6 +5,7 @@ pub mod color;
 pub mod graphics;
 pub mod input;
 pub mod modes;
+pub mod paste;
 pub mod query;
 pub mod screen;
 pub mod search;

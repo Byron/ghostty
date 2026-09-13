@@ -22,6 +22,7 @@ const CAPABILITIES: &[&str] = &[
     "effects.title",
     "effects.pwd",
     "effects.bell",
+    "effects.host",
     "unicode.width",
     "input.key",
     "input.mouse",
@@ -168,7 +169,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             "input" => {
                 let bytes =
                     input::encode(&terminal, operation.input.as_ref().ok_or("MissingInput")?)?;
-                events.push(json!({"kind":"input","data":hex(&bytes)}));
+                events.push(event("input", hex(&bytes)));
                 Vec::new()
             }
             "checkpoint" => {
@@ -227,6 +228,19 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 Effect::Title(text) => ("title", hex(text.as_bytes())),
                 Effect::WorkingDirectory(text) => ("pwd", hex(text.as_bytes())),
                 Effect::Bell => ("bell", String::new()),
+                Effect::Notification { title, body } => {
+                    let mut value = event("notification", String::new());
+                    value["notification"] =
+                        json!({"title":hex(title.as_ref()),"body":hex(body.as_ref())});
+                    events.push(value);
+                    continue;
+                }
+                Effect::Progress { state, value } => {
+                    let mut observed = event("progress", String::new());
+                    observed["progress"] = json!({"state":state,"value":value});
+                    events.push(observed);
+                    continue;
+                }
                 // Unknown-sequence diagnostics are not an external terminal effect.
                 Effect::UnknownSequence(_) => continue,
                 _ => return Err("UnsupportedEffect"),
@@ -239,7 +253,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 last["data"] = json!(combined);
                 continue;
             }
-            events.push(json!({"kind":kind,"data":data}));
+            events.push(event(kind, data));
         }
     }
     if request.kind == "terminal" {
@@ -250,6 +264,10 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     result["snapshots"] = json!(snapshots);
     result["snapshot_progress"] = json!(snapshot_progress);
     Ok(result)
+}
+
+fn event(kind: &str, data: String) -> Value {
+    json!({"kind":kind,"data":data,"notification":null,"progress":null})
 }
 
 struct SnapshotReader {

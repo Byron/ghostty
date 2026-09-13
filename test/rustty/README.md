@@ -78,11 +78,16 @@ advanced cases currently expose differences and original Zig assertions;
 An expected rejection must be `InvalidSnapshot`; an unrelated adapter error
 or an unexpected successful decode still fails the case.
 
-`--protocols` compares terminal-level DCS replies. Capability names are read
+`--protocols` compares terminal-level DCS replies and host notifications.
+Capability names are read
 from the original Zig terminfo source; the Rust table is not used to select
 the test cases. It checks every advertised capability, the extra Co/RGB/TN
 keys, malformed and multiple keys, and DECRQSS style, cursor and margin
-queries. The current adapters leave the host terminfo name unset.
+queries. The current adapters leave the host terminfo name unset. Notification
+callbacks retain the original bytes, including invalid UTF-8. OSC 9/777 and
+ConEmu progress cases cover terminators, optional percentages, malformed fields
+and notification fallbacks. Enabling the real progress callback also checks
+the progress removal effect emitted by RIS.
 
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes

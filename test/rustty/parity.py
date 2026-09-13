@@ -402,6 +402,8 @@ def main():
             if args.protocols or args.thorough:
                 requests.extend((request, covers) for request, covers in protocols.requests(ROOT)
                                 if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in protocols.effect_requests()
+                                if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())
             requests.extend((request, []) for request in generated_requests(args.seed, args.generated or (100 if args.thorough else 0)))

@@ -2179,10 +2179,27 @@ fn sgr(style: &mut Style, params: &[u16], separators: u32) {
         *style = Style::default();
         return;
     }
+    let is_colon = |index: usize| separators & (1 << index) != 0;
+    let colon_count = |start: usize| {
+        (start..params.len() - 1)
+            .take_while(|&index| is_colon(index))
+            .count()
+    };
     let mut i = 0;
     while i < params.len() {
-        let n = params[i];
-        let colon = separators & (1 << i) != 0;
+        let slice = &params[i..];
+        let n = slice[0];
+        let colon = is_colon(i);
+        i += 1;
+        if colon && !matches!(n, 4 | 38 | 48 | 58) {
+            // Unknown colon groups form one attribute. Their values must not
+            // accidentally reset or enable unrelated styles.
+            while is_colon(i) {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
         match n {
             0 => *style = Style::default(),
             1 => style.bold = true,
@@ -2190,8 +2207,15 @@ fn sgr(style: &mut Style, params: &[u16], separators: u32) {
             3 => style.italic = true,
             4 => {
                 let kind = if colon {
+                    if slice.len() < 2 {
+                        continue;
+                    }
+                    if is_colon(i) {
+                        i += colon_count(i) + 1;
+                        continue;
+                    }
                     i += 1;
-                    params.get(i).copied().unwrap_or(1)
+                    slice[1]
                 } else {
                     1
                 };
@@ -2229,32 +2253,30 @@ fn sgr(style: &mut Style, params: &[u16], separators: u32) {
             55 => style.overline = false,
             59 => style.underline_color = Color::Default,
             38 | 48 | 58 => {
-                let color = match params.get(i + 1) {
-                    Some(5) => {
-                        let value = params
-                            .get(i + 2)
-                            .copied()
-                            .filter(|&v| v <= 255)
-                            .map(|v| Color::Indexed(v as u8));
+                let color = match slice.get(1) {
+                    Some(5) if slice.len() >= 3 => {
                         i += 2;
-                        value
+                        Some(Color::Indexed(slice[2] as u8))
                     }
-                    Some(2) => {
-                        let mut start = i + 2;
-                        if colon {
-                            let mut end = start;
-                            while end < params.len() && separators & (1 << (end - 1)) != 0 {
-                                end += 1;
+                    Some(2) if slice.len() >= 5 => {
+                        let start = if colon {
+                            match colon_count(i) {
+                                3 => 2,
+                                4 => 3, // Skip the optional colorspace.
+                                count => {
+                                    i += count + 1;
+                                    continue;
+                                }
                             }
-                            if end.saturating_sub(start) >= 4 {
-                                start += 1;
-                            }
-                        }
-                        let rgb = params
-                            .get(start..start + 3)
-                            .filter(|v| v.iter().all(|&v| v <= 255));
-                        i = start + 2;
-                        rgb.map(|v| Color::Rgb(v[0] as u8, v[1] as u8, v[2] as u8))
+                        } else {
+                            2
+                        };
+                        i += start + 2;
+                        Some(Color::Rgb(
+                            slice[start] as u8,
+                            slice[start + 1] as u8,
+                            slice[start + 2] as u8,
+                        ))
                     }
                     _ => None,
                 };
@@ -2268,6 +2290,5 @@ fn sgr(style: &mut Style, params: &[u16], separators: u32) {
             }
             _ => {}
         }
-        i += 1;
     }
 }

@@ -99,6 +99,24 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("restore-zig", reason)
         self.assertIsNotNone(parity.compare([Peer("zig", fails=True), Peer("rust", fails=True)], request)[2])
 
+    def test_expected_snapshot_rejections_cannot_hide_other_failures(self):
+        class Peer:
+            def __init__(self, error):
+                self.error = error
+
+            def request(self, request):
+                self_request = {"id": request["id"], "ok": self.error is None,
+                                "err": self.error, "capabilities": []}
+                if "expected_error" in request:
+                    raise AssertionError("harness-only expectation was sent to native adapter")
+                return self_request
+
+        request = {"id": "bad-wire", "expected_error": "InvalidSnapshot", "operations": []}
+        self.assertIsNone(parity.compare([Peer("InvalidSnapshot")] * 2, request)[2])
+        self.assertIsNotNone(parity.compare([Peer("UnsupportedOperation")] * 2, request)[2])
+        self.assertIsNotNone(parity.compare([Peer(None)] * 2, request)[2])
+        self.assertEqual([request], list(parity.variants(request, exhaustive=True)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -79,6 +79,35 @@ fn no_config_returns_defaults_without_creating_any_settings() {
     assert!(loaded.diagnostics.is_empty());
     assert!(!home.loader.home.exists());
     assert!(!loaded.own_config_path.exists());
+    assert_eq!(loaded.edit_config_path, loaded.own_config_path);
+}
+
+#[test]
+fn settings_edits_the_active_root_without_creating_a_fallback_override() {
+    let home = TestHome::new();
+    let stable = home.stable("font-size=14\n");
+    assert_eq!(home.loader.load().edit_config_path, stable);
+    home.write(".config/ghostty/config", "font-size=15\n");
+    let local = home.local("config-file=extra.ghostty\n");
+    home.write(
+        "Library/Application Support/com.mitchellh.ghostty.local/extra.ghostty",
+        "keybind=super+h=goto_split:left\nkeybind=super+shift+f=toggle_quadrant_zoom\n",
+    );
+    let loaded = home.loader.load();
+    assert_eq!(loaded.edit_config_path, local);
+    assert!(!loaded.own_config_path.exists());
+    assert_eq!(
+        action(&loaded.config, "super+h"),
+        Some(Action::GotoSplit(Direction::Left))
+    );
+    assert_eq!(
+        action(&loaded.config, "super+shift+f"),
+        Some(Action::ToggleQuadrantZoom)
+    );
+    let own = home.own("");
+    let loaded = home.loader.load();
+    assert_eq!(loaded.edit_config_path, own);
+    assert_eq!(loaded.family, ConfigFamily::Rustty);
 }
 
 #[test]

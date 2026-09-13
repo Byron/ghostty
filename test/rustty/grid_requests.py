@@ -114,7 +114,7 @@ def requests():
                               ("top", b"\x1b[1;3r"),
                               ("horizontal", b"\x1b[?69h\x1b[3;6s")):
             for command in "LMST":
-                for count in (1, 2, 5):
+                for count in (0, 1, 2, 5):
                     prefix = b"\x1b[?47h" if alternate else b""
                     operations = [prefix + b"aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd"]
                     operations.extend(grid("track", id=y, point=point(1, y)) for y in range(4))

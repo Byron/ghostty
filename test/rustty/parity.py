@@ -18,6 +18,7 @@ import graphics_requests
 import semantic_prompts
 import charsets
 import grid_requests
+import search_pages
 import host_queries
 import mode_defaults
 import color_protocols
@@ -455,6 +456,9 @@ def main():
                                 if not args.case or args.case in request["id"])
             if args.grid or args.thorough:
                 requests.extend((request, covers) for request, covers in grid_requests.requests()
+                                if not args.case or args.case in request["id"])
+            if args.thorough:
+                requests.extend((request, covers) for request, covers in search_pages.requests()
                                 if not args.case or args.case in request["id"])
             if args.unicode or args.thorough:
                 requests.extend((request, covers) for request, covers in unicode_requests()

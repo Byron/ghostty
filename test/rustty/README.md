@@ -87,14 +87,33 @@ Points name `active`, `viewport`, `screen` or `history` coordinates. Observation
 translate each implementation's own handles to those coordinates and include
 cell codepoints, selected text and viewport position. Raw row IDs are not shared.
 Selection extraction uses the native plain-text defaults (`unwrap` and `trim`
-enabled). Search needles are hexadecimal bytes; Rust currently accepts UTF-8
-literal needles through its regex API. Match order and overlapping results are
-compared without sorting or deduplication. The native adapter accepts arbitrary
-needle bytes, preserving the Rust API gap for invalid UTF-8.
+enabled). Search needles are hexadecimal bytes. Rust's `Screen::search_literal`
+accepts arbitrary bytes, folds ASCII case and retains overlapping matches and
+native formatter coordinates, including reversed maps for adjacent spaces.
+Partial UTF-8 needles map each endpoint to the cell containing that byte. The
+regex search and link APIs keep their existing semantics. Match order and
+endpoints are compared without sorting, deduplication or normalization.
+
+Native search formats each internal storage page separately. Rust currently
+formats its row-based screen as one range; native page ordering, duplicated
+soft-wrap matches and trimmed blank page tails therefore remain incompatible.
+`search_pages.py` retains these failing cases, including a native integer
+underflow on a short search window (`sliding_window.zig`), and `--thorough`
+includes them. Run this bounded page suite independently with:
+
+```sh
+python3 test/rustty/search_pages.py > target/search-pages.json
+python3 test/rustty/parity.py --no-build --fixtures target/search-pages.json --max-failures 10000
+```
+
+These direct search cases use `kind=input` to avoid serializing hundreds of
+thousands of unrelated cells; their search endpoints and result order remain
+unmodified. A reference-process crash is reported as a failure and ends that
+run. The search coverage entry remains partial.
 
 Grid cases cover live writes, erasure, reflow, height changes, screen switches,
-resets, handle reuse and scrollback limits. Rust currently cannot release an
-inactive screen's handle through its public API. Restoring a new terminal while
+resets, handle reuse and scrollback limits, including release of an inactive
+screen's tracked handle. Restoring a new terminal while
 the adapter owns tracked handles is explicitly unsupported; those external
 lifetimes need a separate API comparison. Incremental search, search selection,
 word/line/output selection, gestures and styled selection formatting remain

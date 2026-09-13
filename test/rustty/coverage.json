@@ -123,8 +123,8 @@
     },
     {
       "id": "graphics.glyphs",
-      "status": "pending",
-      "remaining": "Custom glyph uploads, rendering state and resource limits."
+      "status": "partial",
+      "remaining": "Headless glyf uploads, exact outlines/design/constraints, ordered replacement/eviction, replies, dirty state, configured capture and decoder limits, and snapshot continuation/omission are compared; font coverage, visible rasterization and allocator-failure injection remain."
     },
     {
       "id": "clipboard",

@@ -167,8 +167,20 @@ RGBA pixels on both screens. Native RGB storage is expanded only at the
 observation boundary. The matrix includes PNG color depths, palette/transparency,
 Adam7, raw/zlib uploads, truncation, checksum corruption and dimension precedence.
 Wuffs decoder storage has an alignment correction for arena allocators; it does
-not change terminal protocol behavior. Placements, animation, transports, custom
-glyphs and complete graphics resource-limit coverage remain separate work.
+not change terminal protocol behavior. Placements, animation, transports and
+complete graphics resource-limit coverage remain separate work.
+
+`--protocols --case protocol/glyph` compares native Glyph APC support, uploads,
+queries and clearing. Observations retain insertion order, decoded contours and
+points, design metrics, declared width and protocol-controlled constraints;
+padding uses exact IEEE 754 bits, including signed zero. Cases cover malformed
+options/base64/outlines, replacement and 1,024-entry FIFO eviction, the 64 KiB
+payload and decoder-allocation limits, dirty state and configured APC capture.
+Snapshot cases resume uncommitted commands and explicitly compare version 1's
+deliberate omission of committed registrations. The native headless API supports
+`glyf` only, reports glossary coverage only and stores the requested width without
+changing printed cell width. Font coverage, visible rasterization and injected
+allocator failures remain separate work.
 
 `--snapshots` exports one snapshot from each implementation, restores each
 encoding in both implementations, and resumes terminal input. It compares

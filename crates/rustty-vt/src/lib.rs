@@ -2,6 +2,7 @@
 
 pub mod clipboard;
 pub mod color;
+pub mod glyph;
 pub mod graphics;
 pub mod input;
 pub mod modes;

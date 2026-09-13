@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Read, Write};
 
+#[path = "rust-glyph.rs"]
+mod glyph_adapter;
 #[path = "rust-graphics.rs"]
 mod graphics_adapter;
 #[path = "rust-grid.rs"]
@@ -23,6 +25,7 @@ mod paste;
 mod semantic_adapter;
 
 const CAPABILITIES: &[&str] = &[
+    "graphics.glyphs",
     "terminal.page-layout",
     "terminal.selection",
     "terminal.search",
@@ -111,6 +114,8 @@ impl Default for Request {
 #[serde(deny_unknown_fields)]
 struct Operation {
     op: String,
+    #[serde(default)]
+    glyph_max_bytes: Option<usize>,
     #[serde(default)]
     data: String,
     #[serde(default)]
@@ -585,7 +590,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[],"page_layout":null})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[],"page_layout":null,"glyph_results":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -641,6 +646,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     let mut mode_results = Vec::new();
     let mut grid = grid_adapter::Context::default();
     let mut grid_results = Vec::new();
+    let mut glyph_results = Vec::new();
     let mut host = Host::new(request)?;
     host.host.configure(&mut terminal);
     let mut snapshots = Vec::new();
@@ -746,6 +752,10 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             "observe" => {
                 observations.push(observe(&terminal, request));
             }
+            "glyph_observe" => glyph_results.push(glyph_adapter::observe(&terminal.glyphs)),
+            "glyph_enable" => terminal.glyphs.set_enabled(operation.value),
+            "glyph_limit" => terminal.glyphs.set_apc_limit(operation.glyph_max_bytes),
+            "glyph_clean" => terminal.glyphs.clear_dirty(),
             "grid" => grid_results.push(grid.run(
                 &mut terminal,
                 operation.grid.as_ref().ok_or("MissingGridOperation")?,
@@ -765,6 +775,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 host.events.clear();
                 mode_results.clear();
                 grid_results.clear();
+                glyph_results.clear();
             }
             "snapshot" => {
                 snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
@@ -830,6 +841,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     result["snapshot_progress"] = json!(snapshot_progress);
     result["mode_results"] = json!(mode_results);
     result["grid_results"] = json!(grid_results);
+    result["glyph_results"] = json!(glyph_results);
     Ok(result)
 }
 

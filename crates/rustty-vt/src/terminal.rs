@@ -109,6 +109,7 @@ pub struct Terminal {
     /// Maximum total decoded bytes in a Kitty clipboard write transaction.
     /// A transfer retains the value that was configured when it began.
     pub clipboard_write_limit: usize,
+    pub glyphs: crate::glyph::Glyphs,
     pub(crate) clipboard: clipboard::kitty::State,
     pub title: String,
     pub working_directory: String,
@@ -127,6 +128,7 @@ pub struct Terminal {
     dcs: Vec<u8>,
     dcs_header: (Vec<u8>, Vec<u16>, u8),
     apc: Vec<u8>,
+    apc_glyph_limit: Option<usize>,
     string_overflow: bool,
 }
 
@@ -169,6 +171,7 @@ impl Terminal {
             shell_command_events: false,
             visible: true,
             clipboard_write_limit: 64 * 1024 * 1024,
+            glyphs: crate::glyph::Glyphs::default(),
             clipboard: clipboard::kitty::State::default(),
             title: String::new(),
             working_directory: String::new(),
@@ -187,6 +190,7 @@ impl Terminal {
             dcs: Vec::new(),
             dcs_header: (Vec::new(), Vec::new(), 0),
             apc: Vec::new(),
+            apc_glyph_limit: None,
             string_overflow: false,
         }
     }
@@ -488,6 +492,8 @@ impl Terminal {
         let visible = self.visible;
         let clipboard = std::mem::take(&mut self.clipboard);
         let clipboard_write_limit = self.clipboard_write_limit;
+        let mut glyphs = std::mem::take(&mut self.glyphs);
+        glyphs.reset();
         let (foreground, background, cursor, palette) = (
             self.foreground,
             self.background,
@@ -516,6 +522,7 @@ impl Terminal {
         self.visible = visible;
         self.clipboard = clipboard;
         self.clipboard_write_limit = clipboard_write_limit;
+        self.glyphs = glyphs;
         self.width_px = width_px;
         self.height_px = height_px;
         self.metadata = metadata;
@@ -718,19 +725,41 @@ impl Terminal {
             Event::DcsUnhook => self.dcs_end(effects),
             Event::ApcStart => {
                 self.apc.clear();
+                self.apc_glyph_limit = None;
                 self.string_overflow = false;
             }
             Event::ApcPut(byte) => {
-                if self.apc.len() < 64 * 1024 * 1024 {
-                    self.apc.push(byte);
-                } else {
+                if self.string_overflow {
+                    // A disabled or over-limit glyph command stays ignored.
+                } else if self
+                    .apc_glyph_limit
+                    .map_or(self.apc.len() >= 64 * 1024 * 1024, |limit| {
+                        self.apc.len() - 5 >= limit
+                    })
+                {
                     self.string_overflow = true;
+                } else {
+                    self.apc.push(byte);
+                    if self.apc.as_slice() == b"25a1;" {
+                        self.apc_glyph_limit = Some(self.glyphs.apc_limit());
+                        self.string_overflow = !self.glyphs.enabled();
+                    }
                 }
             }
             Event::ApcEnd => {
                 let mut apc = std::mem::take(&mut self.apc);
                 if !self.string_overflow {
-                    self.graphics_command(&apc, effects);
+                    if self.apc_glyph_limit.is_some() {
+                        let (reply, changed) = self.glyphs.execute(&apc[5..]);
+                        if let Some(reply) = reply {
+                            effects.push(Effect::Write(reply));
+                        }
+                        if changed {
+                            self.changed();
+                        }
+                    } else {
+                        self.graphics_command(&apc, effects);
+                    }
                 }
                 apc.clear();
                 self.apc = apc;

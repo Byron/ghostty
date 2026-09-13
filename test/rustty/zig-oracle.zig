@@ -8,6 +8,7 @@ const paste_adapter = @import("zig-paste.zig");
 const semantic_adapter = @import("zig-semantic.zig");
 const graphics_adapter = @import("zig-graphics.zig");
 const grid_adapter = @import("zig-grid.zig");
+const glyph_adapter = @import("zig-glyph.zig");
 const page_layout_adapter = @import("zig-page-layout.zig");
 const Allocator = std.mem.Allocator;
 // libghostty-vt exposes this type through the callback without re-exporting
@@ -18,6 +19,7 @@ const DeviceAttributes = @typeInfo(@typeInfo(DeviceAttributesFn).pointer.child).
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
+    "graphics.glyphs",
     "terminal.page-layout",
     "terminal.selection",
     "terminal.search",
@@ -70,6 +72,7 @@ const Operation = struct {
     cursor_blink: ?bool = false,
     colors: ?ColorDefaults = null,
     grid: ?grid_adapter.Operation = null,
+    glyph_max_bytes: ?usize = null,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -284,6 +287,7 @@ const Response = struct {
     parsed_colors: []const ?[3]u16 = &.{},
     grid_results: []const grid_adapter.Result = &.{},
     page_layout: ?page_layout_adapter.Result = null,
+    glyph_results: []const glyph_adapter.State = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -523,6 +527,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     var grid: grid_adapter.Context = .{};
     defer grid.deinit(alloc, &t);
     var grid_results: std.ArrayList(grid_adapter.Result) = .empty;
+    var glyph_results: std.ArrayList(glyph_adapter.State) = .empty;
     var snapshots: std.ArrayList([]const u8) = .empty;
     var snapshot_source: std.Io.Reader = .fixed(&.{});
     var snapshot_decoder: ?vt.snapshot.Decoder = null;
@@ -598,6 +603,19 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             configureClipboard(&stream);
         } else if (std.mem.eql(u8, op.op, "observe")) {
             try observations.append(alloc, try observe(alloc, &t, request));
+        } else if (std.mem.eql(u8, op.op, "glyph_observe")) {
+            try glyph_results.append(alloc, try glyph_adapter.observe(alloc, &stream));
+        } else if (std.mem.eql(u8, op.op, "glyph_enable")) {
+            stream.handler.apc_handler.enable(.glyph, op.value);
+            if (!op.value) t.glyph_glossary.clearAndFree(alloc);
+        } else if (std.mem.eql(u8, op.op, "glyph_limit")) {
+            if (op.glyph_max_bytes) |value| {
+                stream.handler.apc_handler.max_bytes.put(.glyph, value);
+            } else {
+                stream.handler.apc_handler.max_bytes.remove(.glyph);
+            }
+        } else if (std.mem.eql(u8, op.op, "glyph_clean")) {
+            t.flags.dirty.glyph_glossary = false;
         } else if (std.mem.eql(u8, op.op, "grid")) {
             try grid_results.append(alloc, try grid.run(alloc, &t, op.grid orelse return error.MissingGridOperation));
         } else if (std.mem.eql(u8, op.op, "input")) {
@@ -609,6 +627,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             ctx.events.clearRetainingCapacity();
             mode_results.clearRetainingCapacity();
             grid_results.clearRetainingCapacity();
+            glyph_results.clearRetainingCapacity();
         } else if (std.mem.eql(u8, op.op, "snapshot")) {
             var continuation: std.Io.Writer.Allocating = .init(alloc);
             try stream.writeContinuation(&continuation.writer);
@@ -656,6 +675,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     response.snapshot_progress = snapshot_progress.items;
     response.mode_results = mode_results.items;
     response.grid_results = grid_results.items;
+    response.glyph_results = glyph_results.items;
     return response;
 }
 

@@ -182,6 +182,12 @@ deliberate omission of committed registrations. The native headless API supports
 changing printed cell width. Font coverage, visible rasterization and injected
 allocator failures remain separate work.
 
+`--protocols --case protocol/reset-stream` resets terminal state at every byte
+boundary through UTF-8, ESC/CSI, OSC, DCS and APC commands. The pending native
+input stream survives a direct host reset, including captured DCS/APC bytes and
+their overflow state. This is separate from terminal state cleared by RIS;
+already-executed commands are not replayed after either reset.
+
 `--snapshots` exports one snapshot from each implementation, restores each
 encoding in both implementations, and resumes terminal input. It compares
 the restored state and effects with uninterrupted execution as well as with

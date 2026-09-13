@@ -26,6 +26,7 @@ import mode_defaults
 import color_protocols
 import osc_strings
 import glyph_requests
+import reset_stream
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -500,6 +501,8 @@ def main():
                 requests.extend((request, covers) for request, covers in graphics_requests.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in glyph_requests.requests()
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in reset_stream.requests()
                                 if not args.case or args.case in request["id"])
                 if not args.case or args.case in "protocol/glyph/snapshot/committed-registrations-omitted":
                     requests.extend(glyph_requests.snapshot_wire_requests(peers[0]))

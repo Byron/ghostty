@@ -1,6 +1,7 @@
 use crate::{AtlasUpload, Color, Frame, Paint, Quad, RenderError};
 use rustty_font::{
-    BitmapFormat, FontConfig, FontError, FontId, FontMetrics, FontStyle, FontSystem, ShapedGlyph,
+    BitmapFormat, FontConfig, FontError, FontId, FontMetrics, FontStyle, FontSystem, GlyphBitmap,
+    ShapedGlyph, sprite,
 };
 use rustty_vt::screen::{Color as TerminalColor, CursorShape, Row, Screen, Style, Underline};
 use std::{
@@ -99,6 +100,7 @@ struct Page {
 pub struct Renderer {
     fonts: FontSystem,
     glyphs: HashMap<(FontId, u16), CachedGlyph>,
+    sprites: HashMap<(char, u8), CachedGlyph>,
     pages: Vec<Page>,
     uploads: Vec<AtlasUpload>,
     generation: u64,
@@ -109,6 +111,7 @@ impl Renderer {
         Ok(Self {
             fonts: FontSystem::new(config)?,
             glyphs: HashMap::new(),
+            sprites: HashMap::new(),
             pages: Vec::new(),
             uploads: Vec::new(),
             generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
@@ -124,6 +127,7 @@ impl Renderer {
 
     pub fn clear_cache(&mut self) {
         self.glyphs.clear();
+        self.sprites.clear();
         self.pages.clear();
         self.uploads.clear();
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
@@ -297,9 +301,30 @@ impl Renderer {
             }
             let style = cell.style;
             let color = paints[col];
+            if let Some(cp) = sprite_codepoint(&cell.text) {
+                let cached = self.sprite(cp, cell.width)?;
+                frame.quads.push(Quad {
+                    rect: [
+                        options.padding[0] + col as f32 * metrics.cell_width as f32,
+                        top,
+                        cached.size[0] as f32,
+                        cached.size[1] as f32,
+                    ],
+                    uv: cached.uv,
+                    color,
+                    paint: Paint::Mask,
+                    atlas: cached.atlas,
+                });
+                col += 1;
+                continue;
+            }
             let mut text = String::new();
             let mut sources = Vec::new();
-            while col < paints.len() && row.cells[col].style == style && paints[col] == color {
+            while col < paints.len()
+                && row.cells[col].style == style
+                && paints[col] == color
+                && sprite_codepoint(&row.cells[col].text).is_none()
+            {
                 let cell = &row.cells[col];
                 if cell.width != 0 {
                     sources.push((text.len(), col));
@@ -365,6 +390,24 @@ impl Renderer {
             return Ok(value.clone());
         }
         let bitmap = self.fonts.rasterize(glyph)?;
+        let cached = self.cache_bitmap(bitmap)?;
+        self.glyphs.insert(key, cached.clone());
+        Ok(cached)
+    }
+
+    fn sprite(&mut self, cp: char, width: u8) -> Result<CachedGlyph, RenderError> {
+        let key = (cp, width);
+        if let Some(value) = self.sprites.get(&key) {
+            return Ok(value.clone());
+        }
+        let bitmap = sprite::rasterize(cp, self.metrics(), width)?
+            .expect("sprite_codepoint validates the codepoint");
+        let cached = self.cache_bitmap(bitmap)?;
+        self.sprites.insert(key, cached.clone());
+        Ok(cached)
+    }
+
+    fn cache_bitmap(&mut self, bitmap: GlyphBitmap) -> Result<CachedGlyph, RenderError> {
         let mut cached = CachedGlyph {
             atlas: 0,
             uv: [0.0; 4],
@@ -454,9 +497,17 @@ impl Renderer {
                 pixels: Arc::from(pixels),
             });
         }
-        self.glyphs.insert(key, cached.clone());
         Ok(cached)
     }
+}
+
+fn sprite_codepoint(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let cp = chars.next()?;
+    (sprite::contains(cp)
+        && matches!(chars.next(), None | Some('\u{fe0e}' | '\u{fe0f}'))
+        && chars.next().is_none())
+    .then_some(cp)
 }
 
 fn reserve(page: &mut Page, width: u32, height: u32) -> Option<[u32; 2]> {
@@ -612,5 +663,49 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[test]
+    fn sprites_fill_cells_without_entering_native_shaping_runs() {
+        let mut terminal = Terminal::new(10, 2, 10);
+        terminal.feed("A█B─█".as_bytes());
+        let mut renderer = Renderer::new(FontConfig::default()).unwrap();
+        let options = RenderOptions {
+            cursor_visible: false,
+            ..Default::default()
+        };
+        let frame = renderer.prepare(terminal.screen(), &options).unwrap();
+        let metrics = renderer.metrics();
+        let full = renderer.sprites[&('█', 1)].clone();
+        let quads: Vec<_> = frame
+            .quads
+            .iter()
+            .filter(|q| q.paint == Paint::Mask && q.uv == full.uv && q.atlas == full.atlas)
+            .collect();
+        assert_eq!(quads.len(), 2);
+        for (q, col) in quads.into_iter().zip([1, 4]) {
+            assert_eq!(
+                q.rect,
+                [
+                    options.padding[0] + col as f32 * metrics.cell_width as f32,
+                    options.padding[1],
+                    metrics.cell_width as f32,
+                    metrics.cell_height as f32,
+                ]
+            );
+        }
+        let upload = frame
+            .atlas_uploads
+            .iter()
+            .find(|u| {
+                u.page == full.atlas && u.size == full.size && u.pixels.iter().all(|b| *b == 255)
+            })
+            .unwrap();
+        assert_eq!(upload.size, [metrics.cell_width, metrics.cell_height]);
+        assert_eq!(renderer.sprites.len(), 2);
+        assert_eq!(sprite_codepoint("─\u{fe0f}"), Some('─'));
+        assert_eq!(sprite_codepoint("─\u{301}"), None);
+        renderer.clear_cache();
+        assert!(renderer.sprites.is_empty());
     }
 }

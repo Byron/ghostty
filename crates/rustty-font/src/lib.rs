@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+pub mod sprite;
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

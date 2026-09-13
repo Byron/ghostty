@@ -1,4 +1,4 @@
-//! Regex matching works on unwrapped lines and maps byte offsets back to cells.
+//! Literal terminal search and regex matching with byte-to-cell coordinates.
 use crate::{GridPoint, Screen};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -9,6 +9,16 @@ pub struct Match {
     pub start: GridPoint,
     pub end: GridPoint,
     pub text: String,
+}
+
+/// Inclusive cell endpoints of a literal byte match.
+///
+/// Each endpoint maps the corresponding matched byte, including matches inside
+/// a UTF-8 encoding. Native whitespace coordinates are preserved as returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiteralMatch {
+    pub start: GridPoint,
+    pub end: GridPoint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +34,12 @@ struct Line {
 }
 
 impl Line {
+    fn push(&mut self, text: &str, point: GridPoint) {
+        let start = self.text.len();
+        self.text.push_str(text);
+        self.offsets.push((start, self.text.len(), point));
+    }
+
     fn cells(&self, range: Range<usize>) -> Option<(GridPoint, GridPoint)> {
         let start = self
             .offsets
@@ -104,6 +120,92 @@ fn logical_lines(screen: &Screen) -> Vec<Line> {
     lines
 }
 
+/// Plain, trimmed, unwrapped text and point mapping used by native search.
+/// Regex links deliberately use logical_lines instead: their whitespace and
+/// hard-line boundaries are part of the regex matching contract.
+fn literal_text(screen: &Screen) -> Line {
+    let rows: Vec<_> = screen.all_rows().collect();
+    let mut line = Line {
+        text: String::new(),
+        offsets: Vec::new(),
+    };
+    let Some(first) = rows.first() else {
+        return line;
+    };
+    let mut last = (0, 0);
+    let mut blank_rows = 0;
+    let mut blank_cells = 0;
+    for (y, row) in rows.iter().enumerate() {
+        if row.cells.iter().all(|cell| cell.text.is_empty()) {
+            blank_rows += 1;
+            continue;
+        }
+        let prior = last;
+        for offset in 0..blank_rows {
+            let (y, col) = if offset == 0 {
+                prior
+            } else {
+                (prior.0 + offset, 0)
+            };
+            line.push(
+                "\n",
+                GridPoint {
+                    row: rows[y].id,
+                    col,
+                },
+            );
+            last = (y, col);
+        }
+        blank_rows = usize::from(!row.wrapped);
+        if !row.wrap_continuation {
+            blank_cells = 0;
+        }
+        for (col, cell) in row.cells.iter().enumerate() {
+            if cell.width == 0 || cell.spacer_head {
+                continue;
+            }
+            if cell.text.is_empty() || cell.text.starts_with(' ') {
+                blank_cells += 1;
+                continue;
+            }
+            // PageFormatter.appendBlankPoints walks backwards from the next
+            // written cell. Keep its order, even for adjacent spaces and wraps.
+            let mut blank = (y, col);
+            for _ in 0..blank_cells {
+                if blank.1 > 0 {
+                    blank.1 -= 1;
+                } else if blank.0 > 0 {
+                    blank.0 -= 1;
+                    blank.1 = rows[blank.0].cells.len() - 1;
+                }
+                line.push(
+                    " ",
+                    GridPoint {
+                        row: rows[blank.0].id,
+                        col: blank.1,
+                    },
+                );
+            }
+            blank_cells = 0;
+            line.push(&cell.text, GridPoint { row: row.id, col });
+            last = (y, col);
+        }
+    }
+    // SlidingWindow terminates a nonwrapped page with one newline, mapped to
+    // the final emitted byte; trailing blank rows and spaces are not flushed.
+    if rows.last().is_some_and(|row| !row.wrapped) {
+        let point = line.offsets.last().map_or(
+            GridPoint {
+                row: first.id,
+                col: 0,
+            },
+            |entry| entry.2,
+        );
+        line.push("\n", point);
+    }
+    line
+}
+
 impl Screen {
     /// Matches in terminal search order, from newest (bottom/right) to oldest.
     pub fn search(&self, regex: &Regex) -> Vec<Match> {
@@ -113,6 +215,30 @@ impl Screen {
             .collect();
         matches.reverse();
         matches
+    }
+
+    /// Literal, ASCII-case-insensitive search in newest-first byte order.
+    ///
+    /// Matches may overlap or span soft wraps and hard newlines. Empty needles
+    /// produce no matches; arbitrary byte needles need not be valid UTF-8.
+    /// The grid is formatted as one range; native storage-page-specific result
+    /// ordering and trimming are not modeled by this row-based screen.
+    pub fn search_literal(&self, needle: &[u8]) -> Vec<LiteralMatch> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let line = literal_text(self);
+        line.text
+            .as_bytes()
+            .windows(needle.len())
+            .enumerate()
+            .rev()
+            .filter(|(_, bytes)| bytes.eq_ignore_ascii_case(needle))
+            .filter_map(|(offset, _)| {
+                let (start, end) = line.cells(offset..offset + needle.len())?;
+                Some(LiteralMatch { start, end })
+            })
+            .collect()
     }
 }
 

@@ -1900,10 +1900,7 @@ impl App {
         let Ok(mut terminal) = pane.session.terminal() else {
             return 0;
         };
-        let Ok(regex) = regex::Regex::new(&regex::escape(query)) else {
-            return 0;
-        };
-        let matches = terminal.screen().search(&regex);
+        let matches = terminal.screen().search_literal(query.as_bytes());
         if matches.is_empty() {
             return 0;
         }

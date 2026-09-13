@@ -116,6 +116,32 @@ def requests():
         for ni, needle in enumerate(needles):
             yield case(f"search/literal/{ti}/{ni}", [text, grid("search", needle=needle.hex())],
                        ["terminal.search"])
+    # Native search is byte based and ASCII-case-insensitive. PageFormatter's
+    # pending-space maps and hard newline coordinates are compared verbatim.
+    native_searches = [
+        ("overlap-case", "abABaba", 8, [b"aba", b"AbA", b"bab", b"abABaba"]),
+        ("ascii-case", "aAaAa", 8, [b"aa", b"A", b"aAa"]),
+        ("unicode-case", "Ééé", 8, ["É".encode(), "é".encode(), b"\xc3", b"\xa9", b"\x89"]),
+        ("combining-bytes", "e\u0301e\u0301", 8, [b"e", b"\xcc", b"\x81", b"\x81e"]),
+        ("raw-bytes", "a界e\u0301🙂界", 8, [b"\xe7", b"\x95\x8ce", b"\xf0", b"\x99", b"\0", b"\xff"]),
+        ("spaces", "a  b", 8, [b" ", b"  ", b"a ", b" b"]),
+        ("wrap-spaces", "a    b", 4, [b" ", b"  ", b"    ", b"a    b"]),
+        ("wide-spaces", "a  界", 4, [b" ", b"  ", " 界".encode(), b"\xe7"]),
+        ("trim", "a   \r\nb   ", 8, [b" ", b"a\nb", b"b\n", b"\n"]),
+        ("hard-lines", "a\r\nb", 8, [b"a\nb", b"ab", b"\n", b"b\n"]),
+        ("blank-lines", "a\r\n\r\nb", 8, [b"\n", b"\n\n", b"a\n\nb", b"b\n"]),
+        ("trailing-blanks", "a\r\n\r\n", 8, [b"\n", b"\n\n", b"a\n"]),
+        ("empty", "", 8, [b"\n", b"\n\n", b" "]),
+        ("only-spaces", "  \r\n   ", 8, [b" ", b"\n", b"\n\n"]),
+        ("space-combining", "a \u0301b", 8, [b" ", "\u0301".encode(), b"a b"]),
+        ("written-blank-lines", "a\r\n\r\n   \r\n   \r\nb", 8, [b"\n", b"\n\n", b"b\n"]),
+        ("literal-syntax", "a.b ab (a)", 8, [b"a.b", b"(a)", b"a.*b", b""]),
+    ]
+    for name, text, cols, needles in native_searches:
+        for index, needle in enumerate(needles):
+            yield case(f"search/native/{name}/{index}",
+                       [text.encode(), grid("search", needle=needle.hex())],
+                       ["terminal.search"], cols=cols)
     for name, change in changes.items():
         yield case("search/mutation/" + name, [history, grid("search", needle=b"o".hex()), change,
                    grid("search", needle=b"o".hex())], ["terminal.search"])

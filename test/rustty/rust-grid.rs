@@ -1,5 +1,4 @@
 //! Direct selection/search/tracked-reference APIs, independent of snapshots.
-use regex::Regex;
 use rustty_vt::{GridPoint, Screen, ScrollbackLimits, Selection, Terminal, TrackedPoint};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -102,14 +101,12 @@ impl Context {
             }),
             "search" => {
                 let needle = super::unhex(&op.needle)?;
-                let needle = std::str::from_utf8(&needle).map_err(|_| "UnsupportedSearchBytes")?;
-                let regex = Regex::new(&regex::escape(needle)).map_err(|_| "InvalidSearch")?;
                 // Native search exposes a literal needle. Retain the Rust
                 // API's result order so ordering differences cannot disappear.
                 matches = Some(
                     terminal
                         .screen()
-                        .search(&regex)
+                        .search_literal(&needle)
                         .into_iter()
                         .map(|value| {
                             json!({"start": location(terminal.screen(), value.start),

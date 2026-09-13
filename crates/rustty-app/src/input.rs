@@ -23,6 +23,51 @@ pub fn filter_egui_events(raw: &mut egui::RawInput, ui_input: bool) {
     }
 }
 
+/// Native menu shortcuts bypass keyboard events, so feed the owning UI explicitly.
+pub fn edit_menu_action(
+    raw: &mut egui::RawInput,
+    action: &config::Action,
+    ui_input: bool,
+    clipboard: Option<String>,
+) -> bool {
+    if !ui_input {
+        return false;
+    }
+    match action {
+        config::Action::CopyToClipboard => raw.events.push(egui::Event::Copy),
+        config::Action::PasteFromClipboard | config::Action::PasteFromSelection => {
+            if let Some(text) = clipboard {
+                raw.events.push(egui::Event::Paste(text));
+            }
+        }
+        config::Action::SelectAll | config::Action::Undo | config::Action::Redo => {
+            let key = if *action == config::Action::SelectAll {
+                egui::Key::A
+            } else {
+                egui::Key::Z
+            };
+            // A menu click has no real key release to clear egui's held-key state.
+            for pressed in [true, false] {
+                raw.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers {
+                        command: true,
+                        mac_cmd: cfg!(target_os = "macos"),
+                        ctrl: !cfg!(target_os = "macos"),
+                        shift: *action == config::Action::Redo,
+                        ..Default::default()
+                    },
+                });
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// Focus a newly opened editor before it emits this frame's IME output.
 pub fn text_edit(
     ui: &mut egui::Ui,
@@ -227,10 +272,11 @@ pub fn chord_held(chord: config::Modifiers, current: config::Modifiers) -> bool 
 mod tests {
     use super::*;
 
-    #[derive(Clone, Copy, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     enum Editor {
         Terminal,
         Search,
+        Palette,
         TabTitle,
     }
 
@@ -239,6 +285,7 @@ mod tests {
         context: egui::Context,
         text: String,
         popup_open: bool,
+        time: f64,
     }
 
     impl InputFrame {
@@ -252,16 +299,19 @@ mod tests {
             focus_editor: bool,
             events: Vec<egui::Event>,
         ) -> egui::PlatformOutput {
+            self.time += 0.1;
             let mut raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(600.0, 400.0),
                 )),
                 focused: true,
+                time: Some(self.time),
                 events,
                 ..Default::default()
             };
-            filter_egui_events(&mut raw, editor == Editor::Search || self.popup_open);
+            let input_panel = matches!(editor, Editor::Search | Editor::Palette);
+            filter_egui_events(&mut raw, input_panel || self.popup_open);
             let mut output = self.context.run_ui(raw, |root| {
                 egui::Panel::top("tabs").show(root, |ui| {
                     let tab = ui.button("Terminal");
@@ -291,9 +341,14 @@ mod tests {
                     terminal_input(
                         &response,
                         Some(Self::cursor_rect()),
-                        editor == Editor::Search || self.popup_open,
+                        input_panel || self.popup_open,
                     );
                 });
+                if editor == Editor::Palette {
+                    egui::Window::new("Command palette").show(&self.context, |ui| {
+                        text_edit(ui, &mut self.text, egui::Id::new("palette"), focus_editor);
+                    });
+                }
             });
             output.textures_delta.clear();
             output.platform_output
@@ -406,6 +461,100 @@ mod tests {
         assert!(!focus_pending);
         assert!(frame.context.text_edit_focused());
         assert!(ime.is_some());
+    }
+
+    #[test]
+    fn native_edit_actions_reach_the_focused_editor_and_leave_terminal_routing_intact() {
+        for editor in [Editor::Search, Editor::Palette, Editor::TabTitle] {
+            let mut frame = InputFrame::default();
+            frame.draw(Editor::Terminal, false, vec![]);
+            frame.draw(editor, false, vec![]);
+            frame.draw(editor, true, vec![]);
+            frame.draw(editor, false, vec![egui::Event::Text("work 日誌".into())]);
+            assert_eq!(frame.text, "work 日誌", "{editor:?}");
+
+            let mut raw = egui::RawInput::default();
+            assert!(edit_menu_action(
+                &mut raw,
+                &config::Action::SelectAll,
+                true,
+                None
+            ));
+            frame.draw(editor, false, raw.events);
+            assert!(!frame.context.input(|input| input.key_down(egui::Key::A)));
+
+            let mut raw = egui::RawInput::default();
+            assert!(edit_menu_action(
+                &mut raw,
+                &config::Action::CopyToClipboard,
+                true,
+                None
+            ));
+            let output = frame.draw(editor, false, raw.events);
+            assert!(
+                output
+                    .commands
+                    .contains(&egui::OutputCommand::CopyText("work 日誌".into()))
+            );
+
+            // Let egui establish an undo point before replacing the selection.
+            frame.time += 2.0;
+            frame.draw(editor, false, vec![]);
+
+            let mut raw = egui::RawInput::default();
+            assert!(edit_menu_action(
+                &mut raw,
+                &config::Action::PasteFromClipboard,
+                true,
+                Some("replacement".into()),
+            ));
+            frame.draw(editor, false, raw.events);
+            assert_eq!(frame.text, "replacement", "{editor:?}");
+
+            for (action, expected) in [
+                (config::Action::Undo, "work 日誌"),
+                (config::Action::Redo, "replacement"),
+            ] {
+                let mut raw = egui::RawInput::default();
+                assert!(edit_menu_action(&mut raw, &action, true, None));
+                frame.draw(editor, false, raw.events);
+                assert_eq!(frame.text, expected, "{editor:?} {action:?}");
+                assert!(!frame.context.input(|input| input.key_down(egui::Key::Z)));
+            }
+
+            // Another window's focused editor must not redirect terminal actions.
+            assert!(frame.context.text_edit_focused());
+            for action in [
+                config::Action::CopyToClipboard,
+                config::Action::PasteFromClipboard,
+                config::Action::SelectAll,
+                config::Action::Undo,
+                config::Action::Redo,
+            ] {
+                let mut raw = egui::RawInput::default();
+                assert!(!edit_menu_action(
+                    &mut raw,
+                    &action,
+                    false,
+                    Some("terminal".into())
+                ));
+                assert!(raw.events.is_empty());
+            }
+        }
+        let mut raw = egui::RawInput::default();
+        assert!(edit_menu_action(
+            &mut raw,
+            &config::Action::PasteFromClipboard,
+            true,
+            None
+        ));
+        assert!(raw.events.is_empty());
+        assert!(!edit_menu_action(
+            &mut raw,
+            &config::Action::NewTab,
+            true,
+            None
+        ));
     }
 
     #[test]

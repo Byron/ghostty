@@ -23,6 +23,7 @@ const capabilities = [_][]const u8{
     "terminal.screens",
     "terminal.cursor",
     "terminal.modes",
+    "terminal.colors",
     "effects.pty",
     "effects.title",
     "effects.pwd",
@@ -55,6 +56,7 @@ const Operation = struct {
     value: bool = false,
     cursor_shape: []const u8 = "block",
     cursor_blink: ?bool = false,
+    colors: ?ColorDefaults = null,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -71,6 +73,21 @@ const Request = struct {
     host: HostOptions = .{},
     observe_modes: []const ModeTag = &.{},
     observe_mode_effects: bool = false,
+    observe_colors: bool = false,
+    color_inputs: []const []const u8 = &.{},
+};
+const ColorDefaults = struct {
+    foreground: ?[3]u8 = null,
+    background: ?[3]u8 = null,
+    cursor: ?[3]u8 = null,
+    palette: ?[]const [3]u8 = null,
+};
+const ColorState = struct { current: ?[3]u16, default: ?[3]u16, override: ?[3]u16 };
+const Colors = struct {
+    foreground: ColorState,
+    background: ColorState,
+    cursor: ColorState,
+    palette: [256]ColorState,
 };
 const ModeTag = struct { number: u16, private: bool };
 const Mode = struct {
@@ -199,6 +216,7 @@ const Observation = struct {
     pwd: []const u8,
     modes: []const Mode,
     mode_effects: ?ModeEffects,
+    colors: ?Colors,
 };
 const Notification = struct { title: []const u8, body: []const u8 };
 const Progress = struct { state: u8, value: ?u8 };
@@ -239,6 +257,7 @@ const Response = struct {
     snapshots: []const []const u8 = &.{},
     snapshot_progress: []const SnapshotProgress = &.{},
     mode_results: []const bool = &.{},
+    parsed_colors: []const ?[3]u16 = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -416,6 +435,14 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         response.parser = try parser_adapter.run(alloc, request.operations);
         return response;
     }
+    if (std.mem.eql(u8, request.kind, "colors")) {
+        const colors = try alloc.alloc(?[3]u16, request.color_inputs.len);
+        for (request.color_inputs, colors) |input, *result| {
+            result.* = rgbBytes(vt.color.RGB.parse(try hexDecode(alloc, input)) catch null);
+        }
+        response.parsed_colors = colors;
+        return response;
+    }
     if (std.mem.eql(u8, request.kind, "unicode")) {
         const widths = try alloc.alloc(i8, request.codepoints.len);
         for (request.codepoints, widths) |cp, *width| {
@@ -510,6 +537,17 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         } else if (std.mem.eql(u8, op.op, "cursor_defaults")) {
             t.setDefaultCursorStyle(std.meta.stringToEnum(vt.Screen.CursorStyle, op.cursor_shape) orelse return error.InvalidCursorShape);
             t.setDefaultCursorBlink(op.cursor_blink);
+        } else if (std.mem.eql(u8, op.op, "color_defaults")) {
+            const colors = op.colors orelse return error.MissingColorDefaults;
+            t.colors.foreground.default = if (colors.foreground) |value| rgb(value) else null;
+            t.colors.background.default = if (colors.background) |value| rgb(value) else null;
+            t.colors.cursor.default = if (colors.cursor) |value| rgb(value) else null;
+            var palette = vt.color.default;
+            if (colors.palette) |values| {
+                if (values.len != palette.len) return error.InvalidPalette;
+                for (&palette, values) |*entry, value| entry.* = rgb(value);
+            }
+            try t.colors.palette.changeDefault(alloc, palette);
         } else if (std.mem.eql(u8, op.op, "host_options")) {
             ctx.host = try DecodedHost.init(alloc, op.host orelse return error.MissingHostOptions);
             configureHost(&stream);
@@ -664,7 +702,37 @@ fn observe(alloc: Allocator, t: *vt.Terminal, request: Request) !Observation {
                 .sgr_pixels => 1016,
             },
         } else null,
+        .colors = if (request.observe_colors) observeColors(&t.colors) else null,
     };
+}
+
+fn rgb(value: [3]u8) vt.color.RGB {
+    return .{ .r = value[0], .g = value[1], .b = value[2] };
+}
+
+fn rgbBytes(value: ?vt.color.RGB) ?[3]u16 {
+    const color = value orelse return null;
+    return .{ color.r, color.g, color.b };
+}
+
+fn observeColors(colors: *const vt.Terminal.Colors) Colors {
+    var result: Colors = undefined;
+    inline for (.{ "foreground", "background", "cursor" }) |name| {
+        const value = &@field(colors, name);
+        @field(result, name) = .{
+            .current = rgbBytes(value.get()),
+            .default = rgbBytes(value.default),
+            .override = rgbBytes(value.override),
+        };
+    }
+    for (&result.palette, 0..) |*entry, i| {
+        entry.* = .{
+            .current = rgbBytes(colors.palette.current[i]),
+            .default = rgbBytes(colors.palette.original[i]),
+            .override = if (colors.palette.mask.isSet(i)) rgbBytes(colors.palette.current[i]) else null,
+        };
+    }
+    return result;
 }
 
 fn observeScreen(alloc: Allocator, screen: *vt.Screen) !Screen {

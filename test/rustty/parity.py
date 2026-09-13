@@ -25,6 +25,7 @@ import host_queries
 import mode_defaults
 import color_protocols
 import osc_strings
+import glyph_requests
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -105,6 +106,12 @@ def variants(request, exhaustive=False):
         return
     for name, chunks in (("scalar", [1]), ("chunks", [2, 7, 1, 13, 4])):
         variant = dict(request, id=f"{request['id']}/{name}", scalar=name == "scalar")
+        if name == "scalar":
+            # Both adapters feed one byte at a time when scalar is true.
+            # Expanding each byte into a JSON operation changes no delivery
+            # behavior and can exceed the transport's request-size limit.
+            yield variant
+            continue
         for field in ("operations", "after"):
             if field not in request:
                 continue
@@ -492,6 +499,10 @@ def main():
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in graphics_requests.requests()
                                 if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in glyph_requests.requests()
+                                if not args.case or args.case in request["id"])
+                if not args.case or args.case in "protocol/glyph/snapshot/committed-registrations-omitted":
+                    requests.extend(glyph_requests.snapshot_wire_requests(peers[0]))
                 requests.extend((request, covers) for request, covers in semantic_prompts.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in prompt_redraw.requests()

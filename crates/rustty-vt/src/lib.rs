@@ -16,6 +16,7 @@ pub mod query;
 pub mod screen;
 pub mod search;
 pub mod selection;
+pub mod selection_gesture;
 pub mod snapshot;
 mod terminal;
 mod terminfo;

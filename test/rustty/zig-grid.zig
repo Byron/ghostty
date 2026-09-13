@@ -32,7 +32,27 @@ pub const Operation = struct {
     semantic_prompt_boundary: ?bool = null,
     adjustment: ?vt.Selection.Adjustment = null,
     format: ?struct { emit: vt.formatter.Format = .plain, unwrap: bool = true, trim: bool = true } = null,
+    gesture: ?GestureOptions = null,
 };
+const GestureOptions = struct {
+    time: ?i64 = null,
+    xpos: f64 = 0,
+    ypos: f64 = 0,
+    max_distance: f64 = 10,
+    repeat_interval: u64 = 500_000_000,
+    behaviors: [3]vt.SelectionGesture.Behavior = vt.SelectionGesture.default_behaviors,
+    geometry: ?vt.SelectionGesture.Drag.Geometry = null,
+};
+const GestureState = struct {
+    click_count: u3,
+    behavior: vt.SelectionGesture.Behavior,
+    dragged: bool,
+    autoscroll: vt.SelectionGesture.Autoscroll,
+    anchor_retained: bool,
+    anchor_valid: bool,
+    anchor: ?Location,
+};
+
 const Location = struct {
     screen: ?[2]u32,
     history: ?[2]u32,
@@ -63,6 +83,7 @@ pub const Result = struct {
     selection_result: ?Bounds,
     formatted: ?[]const u8,
     tracked: []const Tracked,
+    gesture: ?GestureState,
 };
 const Handle = struct {
     id: u32,
@@ -80,9 +101,11 @@ const Handle = struct {
 pub const Context = struct {
     handles: std.ArrayList(Handle) = .empty,
     search: ?vt.search.Terminal = null,
+    gesture: vt.SelectionGesture = .init,
+    gesture_used: bool = false,
 
     pub fn hasHandles(self: Context) bool {
-        return self.handles.items.len != 0 or self.search != null;
+        return self.handles.items.len != 0 or self.search != null or self.gesture.left_click_pin != null;
     }
 
     pub fn deinit(self: *Context, alloc: Allocator, terminal: *vt.Terminal) void {
@@ -91,6 +114,7 @@ pub const Context = struct {
             if (handle.screen(terminal)) |screen| screen.pages.untrackPin(handle.pin);
         }
         self.handles.deinit(alloc);
+        self.gesture.deinit(terminal);
     }
 
     pub fn run(self: *Context, alloc: Allocator, terminal: *vt.Terminal, op: Operation) !Result {
@@ -158,6 +182,56 @@ pub const Context = struct {
                     .rectangle = selection.rectangle,
                 };
             } else if (std.mem.eql(u8, status, "ok")) status = "no_value";
+        } else if (std.mem.startsWith(u8, op.action, "gesture_")) {
+            self.gesture_used = true;
+            const options = op.gesture orelse GestureOptions{};
+            const defaults = [_]u21{ 0, ' ', '\t', '\'', '"', '│', '`', '|', ':', ';', ',', '(', ')', '[', ']', '{', '}', '<', '>', '$' };
+            const boundaries = (try codepoints(alloc, op.boundary_codepoints)) orelse &defaults;
+            const geometry = options.geometry orelse vt.SelectionGesture.Drag.Geometry{
+                .columns = terminal.cols,
+                .cell_width = 10,
+                .padding_left = 5,
+                .screen_height = 100,
+            };
+            const pin = screen.pages.pin(op.point.native());
+            const selected: ?vt.Selection = selected: {
+                if (std.mem.eql(u8, op.action, "gesture_press")) {
+                    const point = pin orelse {
+                        status = "invalid";
+                        break :selected null;
+                    };
+                    break :selected try self.gesture.press(terminal, .{
+                        .pin = point,
+                        .time = if (options.time) |time| .{ .nanoseconds = time } else null,
+                        .xpos = options.xpos,
+                        .ypos = options.ypos,
+                        .max_distance = options.max_distance,
+                        .repeat_interval = options.repeat_interval,
+                        .behaviors = &options.behaviors,
+                        .word_boundary_codepoints = boundaries,
+                    });
+                } else if (std.mem.eql(u8, op.action, "gesture_drag")) {
+                    const point = pin orelse {
+                        status = "invalid";
+                        break :selected null;
+                    };
+                    break :selected self.gesture.drag(terminal, .{ .pin = point, .xpos = options.xpos, .ypos = options.ypos, .rectangle = op.rectangle, .word_boundary_codepoints = boundaries, .geometry = geometry });
+                } else if (std.mem.eql(u8, op.action, "gesture_release")) {
+                    self.gesture.release(terminal, .{ .pin = pin });
+                } else if (std.mem.eql(u8, op.action, "gesture_reset")) {
+                    self.gesture.reset(terminal);
+                } else if (std.mem.eql(u8, op.action, "gesture_deep_press")) {
+                    break :selected self.gesture.deepPress(terminal, .{ .word_boundary_codepoints = boundaries });
+                } else if (std.mem.eql(u8, op.action, "gesture_autoscroll")) {
+                    break :selected self.gesture.autoscrollTick(terminal, .{ .viewport = .{ .x = op.point.x, .y = op.point.y }, .xpos = options.xpos, .ypos = options.ypos, .rectangle = op.rectangle, .word_boundary_codepoints = boundaries, .geometry = geometry });
+                } else return error.UnsupportedGridAction;
+                break :selected null;
+            };
+            if (selected) |selection| selection_result = .{
+                .start = location(screen, selection.start()),
+                .end = location(screen, selection.end()),
+                .rectangle = selection.rectangle,
+            };
         } else if (std.mem.eql(u8, op.action, "track")) {
             const duplicate = for (self.handles.items) |handle| {
                 if (handle.id == op.id) break true;
@@ -275,6 +349,15 @@ pub const Context = struct {
             .selection_result = selection_result,
             .formatted = formatted,
             .tracked = tracked,
+            .gesture = if (self.gesture_used) .{
+                .click_count = self.gesture.left_click_count,
+                .behavior = self.gesture.left_click_behavior,
+                .dragged = self.gesture.left_click_dragged,
+                .autoscroll = self.gesture.left_drag_autoscroll,
+                .anchor_retained = self.gesture.left_click_pin != null,
+                .anchor_valid = self.gesture.validatedLeftClickPin(&terminal.screens) != null,
+                .anchor = if (self.gesture.validatedLeftClickPin(&terminal.screens)) |pin| location(active, pin.*) else null,
+            } else null,
         };
     }
 };

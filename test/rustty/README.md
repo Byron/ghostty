@@ -104,7 +104,8 @@ minimized inherited failures with their original corpus source identifiers.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,
 `clear_selection`, `select_word`, `select_word_between`, `select_line`,
 `select_all`, `select_output`, `adjust_selection`, `format_selection`, `track`, `untrack`, `viewport`, `limits`, `search`,
-`search_needle`, `search_feed`, `search_viewport` and `observe`.
+`search_needle`, `search_feed`, `search_viewport`, `observe` and the `gesture_*`
+actions described below.
 Points name `active`, `viewport`, `screen` or `history` coordinates. Observations
 translate each implementation's own handles to those coordinates and include
 cell codepoints, selected text and viewport position. Raw row IDs are not shared.
@@ -146,6 +147,20 @@ printed spaces; down skips unwritten rows. Direct page motion clamps only at
 its destination, while down retains clamps from intervening narrow pages.
 The 150 fixtures passed 450 delivery comparisons, including reversed and
 collapsed endpoints, wide spacers, hard/soft wraps, history and restored pages.
+
+`--grid --case grid/gesture/` compares the native `SelectionGesture` API directly:
+`gesture_press`, `gesture_drag`, `gesture_release`, `gesture_reset`,
+`gesture_deep_press` and `gesture_autoscroll`. The optional `gesture` settings
+supply time in nanoseconds, pixel coordinates, repeat interval/distance, three
+click behaviors and cell/surface geometry. Returned bounds appear in
+`selection_result`; observations also expose click count, behavior, drag and
+autoscroll state, and retained versus valid anchors. These calls never install
+a selection; autoscroll moves the viewport before resolving its target cell.
+The 407 fixtures pass 1,221 delivery comparisons covering cell/rectangle
+thresholds, word/line/output drags, repeated clicks, pressure, autoscroll and
+anchors across output, reflow, pruning, reset and screen changes. Native garbage anchors after reset/pruning are rejected
+by the shared validator, including repeated presses. This core API does not
+change the app's focus-only clicks or requirement to drag before selecting.
 
 `--grid --case grid/selection-format/` compares selection exports byte-for-byte
 using `format_selection`. Its `format` options select `plain`, `vt` or `html`
@@ -271,9 +286,8 @@ resets, handle reuse and scrollback limits, including release of an inactive
 screen's tracked handle. Restoring a new terminal while
 the adapter owns tracked handles is explicitly unsupported; those external
 lifetimes need a separate API comparison. Complete selection mutation lifetimes,
-gestures and styled selection formatting remain uncovered, as do
-incremental search and search selection. The failing grid cases
-remain part of `--grid` and `--thorough`.
+formatter coordinate maps and full terminal-state exports remain uncovered, as do
+incremental search and search selection. These grid cases remain part of `--grid` and `--thorough`.
 
 Native libghostty-vt updates OSC 133 semantic state without command lifecycle
 callbacks. `Terminal::shell_command_events` explicitly enables Rustty's

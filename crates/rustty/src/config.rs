@@ -138,6 +138,7 @@ config_enum!(WindowTheme { Auto => "auto", System => "system", Light => "light",
 config_enum!(ShellIntegration { None => "none", Detect => "detect", Bash => "bash", Zsh => "zsh", Fish => "fish", Elvish => "elvish", Nushell => "nushell" });
 config_enum!(QuickTerminalPosition { Top => "top", Bottom => "bottom", Left => "left", Right => "right", Center => "center" });
 config_enum!(QuickTerminalScreen { Main => "main", Mouse => "mouse", MacosMenuBar => "macos-menu-bar" });
+config_enum!(QuickTerminalSpaceBehavior { Move => "move", Remain => "remain" });
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Padding {
@@ -315,6 +316,7 @@ pub struct Config {
     pub quick_terminal_animation_duration: Duration,
     pub quick_terminal_position: QuickTerminalPosition,
     pub quick_terminal_screen: QuickTerminalScreen,
+    pub quick_terminal_space_behavior: QuickTerminalSpaceBehavior,
     pub quick_terminal_autohide: bool,
     pub shell_integration: ShellIntegration,
     pub scrollback_limit_bytes: Option<usize>,
@@ -391,6 +393,7 @@ impl Default for Config {
             quick_terminal_animation_duration: Duration::from_millis(200),
             quick_terminal_position: QuickTerminalPosition::Top,
             quick_terminal_screen: QuickTerminalScreen::Mouse,
+            quick_terminal_space_behavior: QuickTerminalSpaceBehavior::Move,
             quick_terminal_autohide: true,
             shell_integration: ShellIntegration::Detect,
             scrollback_limit_bytes: Some(50_000_000),
@@ -552,6 +555,10 @@ impl Config {
             "quick-terminal-screen" => {
                 set!(quick_terminal_screen, QuickTerminalScreen::parse(value)?)
             }
+            "quick-terminal-space-behavior" => set!(
+                quick_terminal_space_behavior,
+                QuickTerminalSpaceBehavior::parse(value)?
+            ),
             "quick-terminal-autohide" => set!(quick_terminal_autohide, parse_bool(value)?),
             "shell-integration" => set!(shell_integration, ShellIntegration::parse(value)?),
             "scrollback-limit" | "scrollback-limit-bytes" => set!(

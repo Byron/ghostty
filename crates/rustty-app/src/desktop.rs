@@ -522,37 +522,17 @@ impl App {
         let state = self.workspace.windows[self.index(id).ok_or("missing window")?].clone();
         let quick = state.quick;
         let mut frame = state.frame;
-        if quick {
-            let monitor = event_loop
-                .primary_monitor()
-                .or_else(|| event_loop.available_monitors().next());
-            if let Some(monitor) = monitor {
-                let size = monitor.size().to_logical::<f64>(monitor.scale_factor());
-                let origin = monitor.position().to_logical::<f64>(monitor.scale_factor());
-                frame = [origin.x, origin.y, size.width, size.height * 0.5];
-                match self.config().quick_terminal_position {
-                    config::QuickTerminalPosition::Bottom => frame[1] += size.height * 0.5,
-                    config::QuickTerminalPosition::Left => {
-                        frame[2] *= 0.5;
-                        frame[3] = size.height;
-                    }
-                    config::QuickTerminalPosition::Right => {
-                        frame[0] += size.width * 0.5;
-                        frame[2] *= 0.5;
-                        frame[3] = size.height;
-                    }
-                    config::QuickTerminalPosition::Center => {
-                        frame[0] += size.width * 0.1;
-                        frame[1] += size.height * 0.15;
-                        frame[2] *= 0.8;
-                        frame[3] = size.height * 0.7;
-                    }
-                    _ => {}
-                }
-            }
+        if quick
+            && let Some(bounds) = self
+                .platform
+                .as_ref()
+                .and_then(|platform| platform.quick_terminal_frame(self.config()))
+        {
+            frame = bounds;
         }
         let attributes = Window::default_attributes()
             .with_title("Rustty")
+            .with_decorations(!quick)
             .with_visible(false)
             .with_inner_size(LogicalSize::new(frame[2].max(320.0), frame[3].max(180.0)))
             .with_position(LogicalPosition::new(frame[0], frame[1]))
@@ -633,6 +613,24 @@ impl App {
         }
         window.request_redraw();
         Ok(())
+    }
+    fn quick_visible(&mut self, host: &mut Host, visible: bool, restore_focus: bool) {
+        let result = if let Some(platform) = &self.platform {
+            if visible {
+                platform.show_quick(&host.window, self.config())
+            } else {
+                platform.hide_quick(&host.window, restore_focus)
+            }
+        } else {
+            Err("macOS window services are unavailable".into())
+        };
+        match result {
+            Ok(()) => {
+                host.visible = visible;
+                host.repaint();
+            }
+            Err(error) => self.errors.push(error),
+        }
     }
     fn save(&mut self) {
         self.save_at = None;
@@ -1071,11 +1069,7 @@ impl App {
                     .index(host.id)
                     .is_some_and(|i| self.workspace.windows[i].quick)
                 {
-                    host.visible = !host.visible;
-                    host.window.set_visible(host.visible);
-                    if host.visible {
-                        host.window.focus_window();
-                    }
+                    self.quick_visible(host, !host.visible, true);
                 } else {
                     let id = self
                         .workspace
@@ -1087,12 +1081,17 @@ impl App {
                     if let Err(error) = self.open_window(event_loop, id) {
                         self.errors.push(error.to_string());
                     }
-                    if let Some(quick) = self.windows.values_mut().find(|h| h.id == id) {
-                        quick.visible = !quick.visible;
-                        quick.window.set_visible(quick.visible);
-                        if quick.visible {
-                            quick.window.focus_window();
-                        }
+                    let key = self
+                        .windows
+                        .iter()
+                        .find(|(_, h)| h.id == id)
+                        .map(|(key, _)| *key);
+                    if let Some(key) = key
+                        && let Some(mut quick) = self.windows.remove(&key)
+                    {
+                        let visible = !quick.visible;
+                        self.quick_visible(&mut quick, visible, true);
+                        self.windows.insert(key, quick);
                     }
                 }
             }
@@ -1271,6 +1270,20 @@ impl App {
                         }
                     }
                     self.update_fonts(host);
+                    if let Some(platform) = &self.platform {
+                        for window in std::iter::once(&*host).chain(self.windows.values()) {
+                            let quick = self
+                                .workspace
+                                .windows
+                                .iter()
+                                .any(|state| state.id == window.id && state.quick);
+                            if let Err(error) =
+                                platform.configure_window(&window.window, quick, self.config())
+                            {
+                                self.errors.push(error);
+                            }
+                        }
+                    }
                 }
                 Err(error) => self.errors.push(error.to_string()),
             },
@@ -2443,10 +2456,21 @@ impl ApplicationHandler<Event> for App {
                         self.action(event_loop, &mut host, action, false);
                         self.windows.insert(key, host);
                         self.reconcile(event_loop);
-                    } else if matches!(
-                        action,
-                        Action::NewWindow | Action::NewTab | Action::ToggleQuickTerminal
-                    ) {
+                    } else if action == Action::ToggleQuickTerminal {
+                        let id = self.add_window(true);
+                        self.reconcile(event_loop);
+                        let key = self
+                            .windows
+                            .iter()
+                            .find(|(_, host)| host.id == id)
+                            .map(|(key, _)| *key);
+                        if let Some(key) = key
+                            && let Some(mut host) = self.windows.remove(&key)
+                        {
+                            self.quick_visible(&mut host, true, true);
+                            self.windows.insert(key, host);
+                        }
+                    } else if matches!(action, Action::NewWindow | Action::NewTab) {
                         self.add_window(false);
                         self.reconcile(event_loop);
                     } else if action == Action::Quit {
@@ -2603,11 +2627,15 @@ impl ApplicationHandler<Event> for App {
                     if self
                         .index(host.id)
                         .is_some_and(|i| self.workspace.windows[i].quick)
-                        && self.config().quick_terminal_autohide
-                        && !host.ui_input()
                     {
-                        host.visible = false;
-                        host.window.set_visible(false);
+                        if let Some(platform) = &self.platform
+                            && let Err(error) = platform.quick_resigned_focus(&host.window)
+                        {
+                            self.errors.push(error);
+                        }
+                        if self.config().quick_terminal_autohide && !host.ui_input() {
+                            self.quick_visible(&mut host, false, false);
+                        }
                     }
                 }
                 host.repaint();

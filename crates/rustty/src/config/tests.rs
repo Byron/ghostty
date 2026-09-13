@@ -459,6 +459,36 @@ fn bom_crlf_comments_quotes_and_hash_colors() {
 }
 
 #[test]
+fn quick_terminal_space_behavior_validates_and_resets() {
+    let home = TestHome::new();
+    assert_eq!(
+        home.loader.load().config.quick_terminal_space_behavior,
+        QuickTerminalSpaceBehavior::Move
+    );
+    home.own("quick-terminal-space-behavior = remain\n");
+    let loaded = home.loader.load();
+    assert!(loaded.diagnostics.is_empty());
+    assert_eq!(
+        loaded.config.quick_terminal_space_behavior,
+        QuickTerminalSpaceBehavior::Remain
+    );
+    home.own("quick-terminal-space-behavior = remain\nquick-terminal-space-behavior =\n");
+    let loaded = home.loader.load();
+    assert!(loaded.diagnostics.is_empty());
+    assert_eq!(
+        loaded.config.quick_terminal_space_behavior,
+        QuickTerminalSpaceBehavior::Move
+    );
+    home.own("quick-terminal-space-behavior = elsewhere\n");
+    let loaded = home.loader.load();
+    assert_eq!(loaded.diagnostics.len(), 1);
+    assert_eq!(
+        loaded.config.quick_terminal_space_behavior,
+        QuickTerminalSpaceBehavior::Move
+    );
+}
+
+#[test]
 fn current_local_workflow_settings_and_actions_are_supported() {
     let home = TestHome::new();
     home.local(

@@ -2926,10 +2926,20 @@ impl ApplicationHandler<Event> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
             Event::Output(id) => {
+                if let Some(smoke) = &mut self.smoke {
+                    smoke.record("pty-output");
+                }
                 self.drain(id);
                 self.reconcile(event_loop);
             }
             Event::Repaint(viewport, delay) => {
+                if let Some(smoke) = &mut self.smoke {
+                    smoke.record(if delay.is_zero() {
+                        "egui-immediate"
+                    } else {
+                        "egui-delayed"
+                    });
+                }
                 if let Some(host) = self
                     .windows
                     .values_mut()
@@ -3084,7 +3094,19 @@ impl ApplicationHandler<Event> for App {
             let input = match &event {
                 WindowEvent::CursorMoved { position, .. } => {
                     let position = position.to_logical::<f32>(host.window.scale_factor());
-                    host.mouse != Pos2::new(position.x, position.y)
+                    let changed = host.mouse != Pos2::new(position.x, position.y);
+                    smoke.pointer(Some(Pos2::new(position.x, position.y)), host.frames);
+                    smoke.record(if changed {
+                        "cursor-moved"
+                    } else {
+                        "cursor-unchanged"
+                    });
+                    changed
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    smoke.pointer(None, host.frames);
+                    smoke.record("cursor-left");
+                    false
                 }
                 WindowEvent::KeyboardInput {
                     is_synthetic: false,
@@ -3092,8 +3114,34 @@ impl ApplicationHandler<Event> for App {
                 }
                 | WindowEvent::MouseInput { .. }
                 | WindowEvent::MouseWheel { .. }
-                | WindowEvent::Touch(_) => true,
-                _ => false,
+                | WindowEvent::Touch(_) => {
+                    smoke.record("user-input");
+                    true
+                }
+                WindowEvent::RedrawRequested => {
+                    smoke.record("redraw");
+                    false
+                }
+                WindowEvent::Resized(_) => {
+                    smoke.record("resize");
+                    false
+                }
+                WindowEvent::Focused(_) => {
+                    smoke.record("focus");
+                    false
+                }
+                WindowEvent::Ime(_) => {
+                    smoke.record("ime");
+                    false
+                }
+                WindowEvent::Occluded(_) => {
+                    smoke.record("occlusion");
+                    false
+                }
+                _ => {
+                    smoke.record("other-window-event");
+                    false
+                }
             };
             if input {
                 smoke.input(host.frames);

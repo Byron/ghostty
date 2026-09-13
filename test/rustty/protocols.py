@@ -43,3 +43,25 @@ def requests(root):
         b"\x1bP$qm\x18tail", b"\x1bP$qm\x1atail", b"\x1bP$qm\x07\x1b\\",
     )):
         yield case(f"decrqss/context/{index}", data)
+
+
+def effect_requests():
+    def case(name, payload, terminator=b"\x07"):
+        return ({"id": "protocol/effects/" + name, "operations": [
+            {"op": "write", "data": (b"\x1b]" + payload + terminator).hex()},
+        ]}, ["effects.host"])
+
+    for index, payload in enumerate((
+        b"9;message", "9;héllo 界".encode(), b"9;", b"9;4", b"9;4;",
+        b"777;notify;title;body", b"777;notify;title", b"777;notify;;body",
+        b"777;notify;title;body;tail", b"777;other;title;body", b"9;raw\xff\xfe",
+        b"777;notify;;", b"777;notify;raw\xff;raw\xfe", b"777;Notify;title;body",
+    )):
+        for ending, terminator in (("bel", b"\x07"), ("st", b"\x1b\\"), ("c1", b"\x9c")):
+            yield case(f"notification/{index}/{ending}", payload, terminator)
+
+    for state in (b"0", b"1", b"2", b"3", b"4", b"5", b"-1", b"256", b"abc", b"", b"01", b"+1", b" 1"):
+        for index, value in enumerate((b"", b";0", b";5", b";100", b";101", b";255", b";256", b";-1", b";abc", b";50;extra",
+                                       b";01", b";+1", b"; 1", b";18446744073709551616", b";1_0",
+                                       b";_10", b";10_", b";1__0", b";_", b";0x10", b";-0", b";18446744073709551615")):
+            yield case(f"progress/{state.decode()}/{index}", b"9;4;" + state + value)

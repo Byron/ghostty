@@ -22,6 +22,7 @@ const capabilities = [_][]const u8{
     "effects.title",
     "effects.pwd",
     "effects.bell",
+    "effects.host",
     "unicode.width",
     "input.key",
     "input.mouse",
@@ -93,7 +94,14 @@ const Observation = struct {
     title: []const u8,
     pwd: []const u8,
 };
-const Event = struct { kind: []const u8, data: []const u8 = "" };
+const Notification = struct { title: []const u8, body: []const u8 };
+const Progress = struct { state: u8, value: ?u8 };
+const Event = struct {
+    kind: []const u8,
+    data: []const u8 = "",
+    notification: ?Notification = null,
+    progress: ?Progress = null,
+};
 const SnapshotProgress = struct {
     stage: []const u8,
     offset: usize,
@@ -147,6 +155,19 @@ const Context = struct {
     }
     fn pwd(h: *vt.TerminalStream.Handler) void {
         append("pwd", h.terminal.getPwd() orelse "");
+    }
+    fn record(event: Event) void {
+        const self = current.?;
+        self.events.append(self.alloc, event) catch @panic("oracle allocation failed");
+    }
+    fn encoded(bytes: []const u8) []const u8 {
+        return hexEncode(current.?.alloc, bytes) catch @panic("oracle allocation failed");
+    }
+    fn notification(_: *vt.TerminalStream.Handler, value: vt.StreamAction.ShowDesktopNotification) void {
+        record(.{ .kind = "notification", .notification = .{ .title = encoded(value.title), .body = encoded(value.body) } });
+    }
+    fn progress(_: *vt.TerminalStream.Handler, value: vt.osc.Command.ProgressReport) void {
+        record(.{ .kind = "progress", .progress = .{ .state = @intCast(@intFromEnum(value.state)), .value = value.progress } });
     }
 };
 
@@ -304,6 +325,8 @@ fn terminalStream(alloc: Allocator, terminal: *vt.Terminal) vt.TerminalStream {
     result.handler.effects.bell = Context.bell;
     result.handler.effects.title_changed = Context.title;
     result.handler.effects.pwd_changed = Context.pwd;
+    result.handler.effects.desktop_notification = Context.notification;
+    result.handler.effects.progress_report = Context.progress;
     return result;
 }
 

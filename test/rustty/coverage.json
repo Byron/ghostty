@@ -153,8 +153,8 @@
     },
     {
       "id": "effects.host",
-      "status": "pending",
-      "remaining": "Notifications, progress and explicit host query decisions."
+      "status": "partial",
+      "remaining": "OSC 9/777 notification bytes and ConEmu progress callbacks are observed, including malformed fields and RIS removal; Kitty notifications and explicit host query decisions remain."
     },
     {
       "id": "snapshot.cross-decode",

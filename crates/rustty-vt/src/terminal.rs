@@ -1464,12 +1464,21 @@ impl Terminal {
         if mode == 1047 && !enabled && self.alternate_active {
             self.erase_display(2, false);
         }
+        if self.alternate_active == enabled {
+            if mode == 1049 {
+                if enabled {
+                    self.erase_display(2, false);
+                } else {
+                    self.restore_cursor();
+                }
+            }
+            return;
+        }
         let old_cursor = self.screen().cursor.clone();
         let clear_eol = self.screen().metadata.cursor_clear_eol;
         let hyperlink_implicit_id = self.screen().metadata.hyperlink_implicit_id;
         let charset = self.screen().charset.clone();
         self.end_hyperlink();
-        let switched = self.alternate_active != enabled;
         if enabled && self.alternate.is_none() {
             self.alternate = Some(Screen::new(
                 self.cols.into(),
@@ -1485,7 +1494,7 @@ impl Terminal {
         }
         // Mode 1049 restores the primary cursor on exit without copying the
         // alternate cursor's appearance. Legacy modes copy in both directions.
-        if switched && (mode != 1049 || enabled) {
+        if mode != 1049 || enabled {
             self.screen_mut().cursor = old_cursor;
             self.screen_mut().metadata.cursor_clear_eol = clear_eol;
             self.screen_mut().metadata.hyperlink_implicit_id = hyperlink_implicit_id;

@@ -145,3 +145,51 @@ fn screen_cursor_copies_carry_the_next_implicit_hyperlink_id() {
         );
     }
 }
+
+#[test]
+fn same_screen_switches_preserve_active_hyperlinks() {
+    for mode in [47, 1047, 1049] {
+        for alternate in [false, true] {
+            let mut terminal = Terminal::new(10, 3, 0);
+            if alternate {
+                terminal.feed(format!("\x1b[?{mode}h").as_bytes());
+            }
+            terminal.feed(&link(b"", b"current/\xff"));
+            terminal.feed(b"A");
+            terminal.feed(format!("\x1b[?{mode}{}", if alternate { 'h' } else { 'l' }).as_bytes());
+            assert_eq!(
+                terminal.screen().cursor.hyperlink_raw.as_deref(),
+                Some(b"current/\xff".as_slice())
+            );
+            assert_eq!(
+                terminal.screen().cursor.hyperlink_id,
+                Some(HyperlinkId::Implicit(0))
+            );
+            terminal.feed(&link(b"", b"next"));
+            assert_eq!(
+                terminal.screen().cursor.hyperlink_id,
+                Some(HyperlinkId::Implicit(1))
+            );
+            assert_eq!(
+                terminal.screen().rows[0].cells[0].text,
+                if alternate && mode == 1049 { "" } else { "A" }
+            );
+        }
+    }
+}
+
+#[test]
+fn repeated_1049_exit_still_restores_the_saved_cursor() {
+    let mut terminal = Terminal::new(10, 3, 0);
+    terminal.feed(b"\x1b[2;3H\x1b[?1049h\x1b[?1049l\x1b[H");
+    terminal.feed(&link(b"id=current", b"current"));
+    terminal.feed(b"\x1b[?1049l");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (1, 2)
+    );
+    assert_eq!(
+        terminal.screen().cursor.hyperlink_id,
+        Some(HyperlinkId::Explicit(b"current".to_vec()))
+    );
+}

@@ -2,6 +2,7 @@
 //! No code from this executable is linked into the Rust application.
 const std = @import("std");
 const vt = @import("ghostty-vt");
+const input_adapter = @import("zig-input.zig");
 const Allocator = std.mem.Allocator;
 
 pub const std_options: std.Options = .{ .log_level = .err };
@@ -10,7 +11,7 @@ const capabilities = [_][]const u8{
     "terminal.write", "terminal.resize", "terminal.reset",   "terminal.observe",
     "terminal.cells", "terminal.styles", "terminal.screens", "terminal.cursor",
     "effects.pty",    "effects.title",   "effects.pwd",      "effects.bell",
-    "unicode.width",
+    "unicode.width",  "input.key",       "input.mouse",      "input.focus-paste",
 };
 
 const Operation = struct {
@@ -18,6 +19,7 @@ const Operation = struct {
     data: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
+    input: ?input_adapter.Event = null,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -164,7 +166,8 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         response.widths = widths;
         return response;
     }
-    if (!std.mem.eql(u8, request.kind, "terminal")) return error.UnsupportedKind;
+    const observe_terminal = std.mem.eql(u8, request.kind, "terminal");
+    if (!observe_terminal and !std.mem.eql(u8, request.kind, "input")) return error.UnsupportedKind;
     if (request.cols == 0 or request.rows == 0 or request.cols > 1024 or request.rows > 1024) return error.InvalidDimensions;
     var t = try vt.Terminal.init(io, alloc, .{
         .cols = request.cols,
@@ -197,9 +200,11 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             stream.nextSlice("\x1bc");
         } else if (std.mem.eql(u8, op.op, "observe")) {
             try observations.append(alloc, try observe(alloc, &t));
+        } else if (std.mem.eql(u8, op.op, "input")) {
+            Context.append("input", try input_adapter.encode(alloc, &t, op.input orelse return error.MissingInput));
         } else return error.UnsupportedOperation;
     }
-    try observations.append(alloc, try observe(alloc, &t));
+    if (observe_terminal) try observations.append(alloc, try observe(alloc, &t));
     response.observations = observations.items;
     response.events = ctx.events.items;
     return response;

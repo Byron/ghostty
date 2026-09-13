@@ -84,7 +84,7 @@ def difference(left, right, path="response"):
 def variants(request, exhaustive=False):
     """Delivery boundaries change; operation/observation ordering never changes."""
     yield request
-    if request.get("kind", "terminal") != "terminal":
+    if request.get("kind", "terminal") not in ("terminal", "input"):
         return
     for name, chunks in (("scalar", [1]), ("chunks", [2, 7, 1, 13, 4])):
         operations = []
@@ -144,6 +144,49 @@ def generated_requests(seed, count):
             if rng.randrange(4) == 0:
                 operations.append({"op": "observe"})
         yield {"id": f"generated/{seed}/{case}", "cols": 12, "rows": 4, "operations": operations}
+
+
+def input_requests():
+    def request(name, setup, events, covers):
+        return ({"id": "input/" + name, "kind": "input", "cols": 80, "rows": 24,
+                 "operations": [{"op": "write", "data": setup.encode().hex()}]
+                 + [{"op": "input", "input": event} for event in events]}, covers)
+
+    keys = ["key_a", "key_z", "digit_0", "digit_2", "space", "tab", "enter", "escape", "backspace",
+            "arrow_up", "arrow_down", "arrow_left", "arrow_right", "home", "end", "page_up", "page_down",
+            "insert", "delete", "numpad_0", "numpad_9", "numpad_enter", "numpad_add", "numpad_decimal",
+            "shift_left", "control_left", "alt_left", "meta_left"] + [f"f{i}" for i in range(1, 26)]
+    configurations = [("legacy", ""), ("cursor", "\x1b[?1h"), ("keypad", "\x1b[?66h"),
+                      ("backarrow", "\x1b[?67h"), ("alt-prefix-off", "\x1b[?1036l"),
+                      ("modify-other", "\x1b[>4;2m")]
+    configurations += [(f"kitty-{flags}", f"\x1b[>{flags}u") for flags in (1, 2, 3, 4, 8, 16, 31)]
+    for mode, setup in configurations:
+        for key in keys:
+            events = []
+            for modifiers in (0, 1, 2, 4, 8, 3, 5, 7, 15, 16, 32, 48):
+                for action in ("press", "repeat", "release"):
+                    text = key[-1] if key.startswith(("key_", "digit_")) else " " if key == "space" else ""
+                    base = text
+                    if modifiers & 1:
+                        text = text.upper()
+                    events.append({"kind": "key", "key": key, "modifiers": modifiers, "action": action,
+                                   "data": text.encode().hex(), "unshifted": ord(base) if base else 0})
+            yield request(f"key/{mode}/{key}", setup, events, ["input.key"])
+    for mode in (9, 1000, 1002, 1003):
+        for encoding in (0, 1005, 1006, 1015, 1016):
+            setup = f"\x1b[?{mode}h" + (f"\x1b[?{encoding}h" if encoding else "")
+            for button in (None, "left", "middle", "right", "four", "five", "six", "seven"):
+                events = [{"kind": "mouse", "button": button, "action": action, "modifiers": modifiers, "x": x, "y": y}
+                          for action in ("press", "release", "motion") for modifiers in (0, 1, 2, 4, 7)
+                          for x, y in ((0, 0), (9, 17), (639, 383), (640, 384), (2000, 4000))]
+                yield request(f"mouse/{mode}/{encoding}/{button}", setup, events, ["input.mouse"])
+    for enabled in (False, True):
+        yield request(f"focus/{enabled}", "\x1b[?1004h" if enabled else "",
+                      [{"kind": "focus", "focused": focused} for focused in (True, False, True)], ["input.focus-paste"])
+        yield request(f"paste/{enabled}", "\x1b[?2004h" if enabled else "",
+                      [{"kind": "paste", "data": text.encode().hex()} for text in
+                       ("", "hello", "é界👩🏽‍💻", "a\nb\r\nc", "\x00\x08\x05\x04\x1b\x7f\x03\x1c\x15\x1a\x11\x13\x17\x16\x12\x0f")],
+                      ["input.focus-paste"])
 
 
 def save_failure(request, left, right, reason):
@@ -230,6 +273,7 @@ def minimize(peers, request):
 
 
 def main():
+    global ARTIFACTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--thorough", action="store_true", help="run extended cases and require complete coverage")
     parser.add_argument("--no-build", action="store_true")
@@ -239,10 +283,16 @@ def main():
     parser.add_argument("--timeout", type=float, default=15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generated", type=int, default=0)
+    parser.add_argument("--input", action="store_true", help="compare keyboard, mouse, focus and paste encoding")
     parser.add_argument("--max-failures", type=int, default=20)
+    parser.add_argument("--artifacts", type=Path, default=ARTIFACTS, help="isolated output directory for concurrent suites")
+    parser.add_argument("--zig-bin", type=Path, default=ROOT / "zig-out/bin/vt-oracle")
+    parser.add_argument("--rust-bin", type=Path, default=ROOT / "target/debug/examples/parity")
+    parser.add_argument("--fixtures", type=Path, default=HERE / "smoke.json")
     args = parser.parse_args()
     if args.minimize and not args.replay:
         parser.error("--minimize requires --replay")
+    ARTIFACTS = args.artifacts.resolve()
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     if not args.no_build:
         subprocess.run(["zig", "build", "vt-oracle", "-Demit-lib-vt=true", "-Demit-macos-app=false"], cwd=ROOT, check=True)
@@ -254,11 +304,11 @@ def main():
     missing = []
     covered = set()
     try:
-        for name, binary in (("zig", ROOT / "zig-out/bin/vt-oracle"), ("rust", ROOT / "target/debug/examples/parity")):
+        for name, binary in (("zig", args.zig_bin.resolve()), ("rust", args.rust_bin.resolve())):
             peers.append(Peer(name, [str(binary)], args.timeout))
         capabilities = [set(peer.request({"kind": "capabilities"})["capabilities"]) for peer in peers]
         manifest = json.loads((HERE / "coverage.json").read_text())
-        fixtures = json.loads((HERE / "smoke.json").read_text())
+        fixtures = json.loads(args.fixtures.read_text())
         requests = []
         if args.replay:
             requests.append((json.loads(args.replay.read_text()), []))
@@ -266,6 +316,9 @@ def main():
             for fixture in fixtures:
                 if not args.case or args.case in fixture["request"]["id"]:
                     requests.append((fixture["request"], fixture["covers"]))
+            if args.input or args.thorough:
+                requests.extend((request, covers) for request, covers in input_requests()
+                                if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())
             requests.extend((request, []) for request in generated_requests(args.seed, args.generated or (100 if args.thorough else 0)))

@@ -45,7 +45,7 @@ const INPUT_BUDGET: usize = 16 * 1024 * 1024;
 enum Event {
     Output(Id),
     Platform(PlatformEvent),
-    Repaint(ViewportId, Duration),
+    Repaint(egui::RequestRepaintInfo, Instant),
     Access(egui_winit::accesskit_winit::Event),
 }
 impl From<egui_winit::accesskit_winit::Event> for Event {
@@ -362,7 +362,9 @@ pub fn run() -> Result<()> {
     context.set_theme(ui_theme(&loaded.config));
     let repaint = proxy.clone();
     context.set_request_repaint_callback(move |info| {
-        let _ = repaint.send_event(Event::Repaint(info.viewport_id, info.delay));
+        if let Some(deadline) = Instant::now().checked_add(info.delay) {
+            let _ = repaint.send_event(Event::Repaint(info, deadline));
+        }
     });
     let mut gpu_config = egui_wgpu::WgpuConfiguration::default();
     if smoke.is_some() {
@@ -2932,9 +2934,16 @@ impl ApplicationHandler<Event> for App {
                 self.drain(id);
                 self.reconcile(event_loop);
             }
-            Event::Repaint(viewport, delay) => {
+            Event::Repaint(info, deadline) => {
+                let current_pass = self.context.cumulative_pass_nr_for(info.viewport_id);
+                if !repaint_is_current(info.current_cumulative_pass_nr, current_pass) {
+                    if let Some(smoke) = &mut self.smoke {
+                        smoke.record("egui-stale");
+                    }
+                    return;
+                }
                 if let Some(smoke) = &mut self.smoke {
-                    smoke.record(if delay.is_zero() {
+                    smoke.record(if info.delay.is_zero() {
                         "egui-immediate"
                     } else {
                         "egui-delayed"
@@ -2943,11 +2952,11 @@ impl ApplicationHandler<Event> for App {
                 if let Some(host) = self
                     .windows
                     .values_mut()
-                    .find(|host| host.viewport == viewport)
+                    .find(|host| host.viewport == info.viewport_id)
                 {
-                    if delay.is_zero() {
+                    if deadline <= Instant::now() {
                         host.repaint();
-                    } else if let Some(deadline) = Instant::now().checked_add(delay) {
+                    } else {
                         host.deadline =
                             Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
                     }
@@ -3574,6 +3583,12 @@ fn directory_from_osc(value: &str) -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+fn repaint_is_current(requested_pass: u64, current_pass: u64) -> bool {
+    // Match egui's native runner: one completed pass still needs its requested
+    // follow-up, but later passes have already superseded the request.
+    current_pass == requested_pass || requested_pass.checked_add(1) == Some(current_pass)
+}
+
 fn ui_theme(config: &Config) -> egui::ThemePreference {
     match config.window_theme {
         config::WindowTheme::System => egui::ThemePreference::System,
@@ -3595,6 +3610,34 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repaint_callbacks_only_survive_their_own_pass_and_its_follow_up() {
+        let context = egui::Context::default();
+        let viewport = ViewportId::from_hash_of("terminal");
+        let mut requests = Vec::new();
+        for _ in 0..8 {
+            requests.push(context.cumulative_pass_nr_for(viewport));
+            let mut input = egui::RawInput {
+                viewport_id: viewport,
+                ..Default::default()
+            };
+            input.viewports.entry(viewport).or_default();
+            let mut output = context.run_ui(input, |_| {});
+            output.textures_delta.clear();
+        }
+        let current = context.cumulative_pass_nr_for(viewport);
+        assert_eq!(
+            requests
+                .into_iter()
+                .filter(|&pass| repaint_is_current(pass, current))
+                .count(),
+            1,
+            "queued callbacks must not each render another unchanged frame"
+        );
+        assert!(repaint_is_current(current, current));
+        assert!(!repaint_is_current(current + 1, current));
+        assert!(!repaint_is_current(u64::MAX, 0));
+    }
     #[test]
     fn clipboard_grants_and_metadata_queries_respect_explicit_denial() {
         use config::ClipboardAccess::{Allow, Ask, Deny};

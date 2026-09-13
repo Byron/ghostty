@@ -1,8 +1,9 @@
+// Rustty modification: retain NSWindow owners shared by WinitWindow and WinitPanel.
 #![allow(clippy::unnecessary_cast)]
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::{declare_class, mutability, ClassType, DeclaredClass};
-use objc2_app_kit::{NSResponder, NSWindow};
+use objc2_app_kit::{NSPanel, NSResponder, NSWindow};
 use objc2_foundation::{MainThreadBound, MainThreadMarker, NSObject};
 
 use super::event_loop::ActiveEventLoop;
@@ -11,7 +12,7 @@ use crate::error::OsError as RootOsError;
 use crate::window::WindowAttributes;
 
 pub(crate) struct Window {
-    window: MainThreadBound<Retained<WinitWindow>>,
+    window: MainThreadBound<Retained<NSWindow>>,
     /// The window only keeps a weak reference to this, so we must keep it around here.
     delegate: MainThreadBound<Retained<WindowDelegate>>,
 }
@@ -74,6 +75,10 @@ impl Window {
 pub struct WindowId(pub usize);
 
 impl WindowId {
+    pub(super) fn from_ns_window(window: &NSWindow) -> Self {
+        Self(window as *const NSWindow as usize)
+    }
+
     pub const fn dummy() -> Self {
         Self(0)
     }
@@ -119,8 +124,28 @@ declare_class!(
     }
 );
 
-impl WinitWindow {
-    pub(super) fn id(&self) -> WindowId {
-        WindowId(self as *const Self as usize)
+declare_class!(
+    #[derive(Debug)]
+    pub struct WinitPanel;
+
+    unsafe impl ClassType for WinitPanel {
+        #[inherits(NSWindow, NSResponder, NSObject)]
+        type Super = NSPanel;
+        type Mutability = mutability::MainThreadOnly;
+        const NAME: &'static str = "WinitPanel";
     }
-}
+
+    impl DeclaredClass for WinitPanel {}
+
+    unsafe impl WinitPanel {
+        #[method(canBecomeMainWindow)]
+        fn can_become_main_window(&self) -> bool {
+            true
+        }
+
+        #[method(canBecomeKeyWindow)]
+        fn can_become_key_window(&self) -> bool {
+            true
+        }
+    }
+);

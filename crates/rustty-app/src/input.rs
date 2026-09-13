@@ -1,5 +1,6 @@
 //! Route input to the active editor and keep physical keys separate from composed text.
 use rustty::{config, vt};
+use std::collections::HashSet;
 use winit::{
     event::{ElementState, KeyEvent, Modifiers},
     keyboard::{
@@ -22,6 +23,23 @@ pub fn filter_egui_events(raw: &mut egui::RawInput, ui_input: bool) {
                     | egui::Event::Ime(_)
             )
         });
+    }
+}
+
+/// Keep UI and shortcut presses out of the terminal through their physical release.
+pub fn key_is_consumed(
+    consumed: &mut HashSet<PhysicalKey>,
+    key: PhysicalKey,
+    state: ElementState,
+    ui_input: bool,
+) -> bool {
+    if state == ElementState::Released {
+        consumed.remove(&key) || ui_input
+    } else if ui_input {
+        consumed.insert(key);
+        true
+    } else {
+        consumed.contains(&key)
     }
 }
 
@@ -384,6 +402,73 @@ pub fn chord_held(chord: config::Modifiers, current: config::Modifiers) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dismissing_ui_consumes_held_key_repeats_and_releases_before_terminal_input_resumes() {
+        let mut terminal = vt::Terminal::new(20, 2, 0);
+        terminal.feed(b"\x1b[>11u");
+        for (physical, key) in [
+            (KeyCode::Escape, vt::Key::Escape),
+            (KeyCode::Enter, vt::Key::Enter),
+            (KeyCode::Space, vt::Key::Char(' ')),
+        ] {
+            let mut consumed = HashSet::new();
+            assert!(key_is_consumed(
+                &mut consumed,
+                physical.into(),
+                ElementState::Pressed,
+                true
+            ));
+            // Escape dismisses a dialog; Enter/Space activates its focused button.
+            // That frame closes the UI before the next native keyboard event.
+            for action in [vt::KeyAction::Repeat, vt::KeyAction::Release] {
+                let mut event = vt::KeyEvent::new(key);
+                event.action = action;
+                let state = if action == vt::KeyAction::Release {
+                    ElementState::Released
+                } else {
+                    ElementState::Pressed
+                };
+                // Kitty would report these orphan events if they reached the encoder.
+                assert!(!terminal.encode_key(&event).is_empty());
+                assert!(key_is_consumed(
+                    &mut consumed,
+                    physical.into(),
+                    state,
+                    false
+                ));
+            }
+            assert!(consumed.is_empty());
+            assert!(!key_is_consumed(
+                &mut consumed,
+                physical.into(),
+                ElementState::Pressed,
+                false
+            ));
+            assert!(!terminal.encode_key(&vt::KeyEvent::new(key)).is_empty());
+        }
+        // The shortcut that opened an editor stays consumed after the editor closes.
+        let mut consumed = HashSet::from([PhysicalKey::Code(KeyCode::KeyV)]);
+        assert!(key_is_consumed(
+            &mut consumed,
+            KeyCode::KeyV.into(),
+            ElementState::Pressed,
+            false
+        ));
+        assert!(!key_is_consumed(
+            &mut consumed,
+            KeyCode::KeyA.into(),
+            ElementState::Pressed,
+            false
+        ));
+        assert!(key_is_consumed(
+            &mut consumed,
+            KeyCode::KeyV.into(),
+            ElementState::Released,
+            false
+        ));
+        assert!(consumed.is_empty());
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Editor {

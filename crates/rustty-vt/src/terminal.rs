@@ -1134,6 +1134,9 @@ impl Terminal {
         let cols = self.cols as usize;
         let bg = self.screen().cursor.style.background;
         let full = m.left == 0 && m.right == cols - 1;
+        if !history || m.top != 0 || !full {
+            self.prepare_row_shift();
+        }
         for _ in 0..count {
             if full {
                 let row = self.screen_mut().rows.remove(m.top);
@@ -1160,6 +1163,7 @@ impl Terminal {
         let cols = self.cols as usize;
         let count = count.max(1).min(m.bottom - m.top + 1);
         let bg = self.screen().cursor.style.background;
+        self.prepare_row_shift();
         for _ in 0..count {
             if m.left == 0 && m.right == cols - 1 {
                 let row = self.screen_mut().rows.remove(m.bottom);
@@ -1175,6 +1179,32 @@ impl Terminal {
         }
         self.clamp_cursor();
         self.changed();
+    }
+
+    fn prepare_row_shift(&mut self) {
+        let m = self.margins;
+        let right_edge = m.right + 1 == usize::from(self.cols);
+        for row in &mut self.screen_mut().rows[m.top..=m.bottom] {
+            if m.left == 0 && right_edge {
+                row.wrapped = false;
+                row.wrap_continuation = false;
+            }
+            if (right_edge || m.left < 2)
+                && let Some(cell) = row.cells.last_mut()
+            {
+                cell.spacer_head = false;
+            }
+            // Split glyphs lose their text, but the cells outside the moved
+            // region retain their attributes and hyperlink identity.
+            for boundary in [m.left, m.right + 1] {
+                if boundary > 0 && row.cells.get(boundary).is_some_and(|cell| cell.width == 0) {
+                    row.cells[boundary - 1].text.clear();
+                    row.cells[boundary - 1].width = 1;
+                    row.cells[boundary].width = 1;
+                }
+            }
+            row.dirty = true;
+        }
     }
 
     fn copy_row_region(

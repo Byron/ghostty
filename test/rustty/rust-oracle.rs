@@ -1,7 +1,7 @@
 //! Test-only NDJSON adapter for comparisons with the original Zig terminal.
 use rustty_vt::{
-    Color, CursorShape, Effect, EffectHandler, Screen, SemanticContent, Style, Terminal, clipboard,
-    color, modes::Modes, query,
+    Color, CursorShape, Effect, EffectHandler, HyperlinkId, Screen, SemanticContent, Style,
+    Terminal, clipboard, color, modes::Modes, query,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -844,7 +844,7 @@ fn screen(screen: &Screen) -> Value {
         "shape":match c.shape {
             CursorShape::Block => "block", CursorShape::Bar => "bar",
             CursorShape::Underline => "underline", CursorShape::HollowBlock => "block_hollow",
-        },"style":style(c.style),
+        },"style":style(c.style),"hyperlink":hyperlink(&c.hyperlink, &c.hyperlink_raw, &c.hyperlink_id),
         "protected":c.protected,"semantic":semantic(c.semantic)},
         "rows":screen.rows.iter().map(row).collect::<Vec<_>>(),
         "history":screen.history.iter().map(row).collect::<Vec<_>>()})
@@ -854,8 +854,26 @@ fn row(row: &rustty_vt::Row) -> Value {
     json!({"wrapped":row.wrapped,"cells":row.cells.iter().map(|cell| json!({
         "text":cell.text.chars().map(u32::from).collect::<Vec<_>>(),
         "width":cell.width,"spacer_head":cell.spacer_head,"style":style(cell.style),
-        "hyperlink":cell.hyperlink,"protected":cell.protected,
+        "hyperlink":hyperlink(&cell.hyperlink, &cell.hyperlink_raw, &cell.hyperlink_id),
+        "protected":cell.protected,
         "semantic":semantic(cell.semantic)})).collect::<Vec<_>>()})
+}
+
+fn hyperlink(
+    text: &Option<String>,
+    raw: &Option<Vec<u8>>,
+    id: &Option<HyperlinkId>,
+) -> Option<Value> {
+    raw.as_deref()
+        .or_else(|| text.as_deref().map(str::as_bytes))
+        .map(|uri| {
+            let (explicit, implicit) = match id {
+                Some(HyperlinkId::Explicit(bytes)) => (Some(hex(bytes)), None),
+                Some(HyperlinkId::Implicit(number)) => (None, Some(*number)),
+                None => (None, None),
+            };
+            json!({"uri":hex(uri),"explicit":explicit,"implicit":implicit})
+        })
 }
 
 fn semantic(value: SemanticContent) -> &'static str {

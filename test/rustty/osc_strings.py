@@ -2,6 +2,52 @@
 import base64
 
 
+def allocating_requests(case_filter=None):
+    """Build large capture cases only after applying the requested ID filter."""
+    limit = 8 * 1024 * 1024
+
+    def osc(number, body):
+        return b"\x1b]" + str(number).encode() + b";" + body + b"\x1b\\"
+
+    def case(name, operations, covers):
+        return ({"id": name, "kind": "input", "operations": [
+            op if isinstance(op, dict) else {"op": "write", "data": op.hex()}
+            for op in operations]}, covers)
+
+    observe = {"op": "dnd", "dnd": {"action": "observe"}}
+    for pending in ("query", "registration", "status"):
+        for extra in ((-3, 0, 1) if pending == "query" else (0, 1)):
+            name = f"protocol/dnd/capture/{pending}/{extra}"
+            if case_filter and case_filter not in name:
+                continue
+            prefix = []
+            if pending == "registration":
+                prefix = [osc(72, b"t=a:i=7:m=1;text/")]
+            elif pending == "status":
+                prefix = [osc(72, b"t=a:i=7;text/plain"), osc(72, b"t=m:o=1:m=1;text/")]
+            body = b"t=q;" + b"x" * (limit + extra - 4)
+            yield case(name, [*prefix, osc(72, body), observe,
+                              osc(72, b"t=q;plain"), observe], ["drag-and-drop", "effects.pty"])
+
+    for number in (52, 5522):
+        for extra in (-1, 0, 1):
+            name = f"protocol/osc/allocating-boundary/{number}/{extra}"
+            if case_filter and case_filter not in name:
+                continue
+            prefix = b";" if number == 52 else b"type=write:id=capture:unused="
+            body = prefix + b"A" * (limit + extra - len(prefix))
+            packets = [osc(number, body)]
+            if number == 5522:
+                packets.append(osc(5522, b"type=wdata"))
+            yield case(name, packets, ["clipboard", "effects.pty"])
+
+    name = "protocol/dnd/capture/direct-reset"
+    if not case_filter or case_filter in name:
+        yield case(name, [b"\x1b]72;t=q;", {"op": "terminal_reset"},
+                          b"x" * (limit - 4) + b"\x1b\\", observe],
+                   ["drag-and-drop", "terminal.reset", "effects.pty"])
+
+
 def requests():
     def case(name, operations, covers=None, **options):
         return ({"id": "protocol/osc/" + name, "host": {"title_report": True},

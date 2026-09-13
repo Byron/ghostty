@@ -99,7 +99,7 @@
     {
       "id": "terminal.search",
       "status": "partial",
-      "remaining": "Literal byte matching, ASCII case folding, overlaps and formatter coordinates pass within one native page, including UTF-8 fragments, spaces, hard newlines and wraps. Multi-page ordering, duplicates and trailing-blank trimming still differ; retained thorough cases also expose a native search underflow. Incremental feed/tick, selected matches, viewport results and regex extension coverage remain."
+      "remaining": "Literal byte matching, ASCII case folding, formatter coordinates, per-page order/overlap/trimming, no-scrollback prefix pruning and restored history are compared without normalizing results. A retained native search-underflow case still fails. Incremental feed/tick, selected matches, viewport results, resource-driven page changes and regex extension coverage remain."
     },
     {
       "id": "terminal.page-layout",

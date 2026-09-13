@@ -681,6 +681,11 @@ impl Screen {
             self.discard_row(row.id);
             return;
         }
+        self.retain_history(row);
+    }
+
+    // ED22 grows native page storage even when ordinary scrollback is disabled.
+    pub(crate) fn retain_history(&mut self, row: Row) {
         self.history_bytes = self.history_bytes.saturating_add(row.storage_bytes());
         self.history.push_back(row);
         if self.viewport_offset > 0 {
@@ -703,7 +708,11 @@ impl Screen {
 
     pub(crate) fn set_limits(&mut self, limits: ScrollbackLimits) {
         self.limits = limits;
-        self.enforce_limits();
+        if limits.bytes == Some(0) {
+            self.clear_history();
+        } else {
+            self.enforce_limits();
+        }
         self.history.shrink_to_fit();
     }
 
@@ -725,13 +734,7 @@ impl Screen {
             .allocation_bytes(false)
             * (self.rows.len().max(1).div_ceil(minimum_lines) + 1);
         ScrollbackLimits {
-            bytes: self.limits.bytes.map(|bytes| {
-                if bytes == 0 {
-                    0
-                } else {
-                    bytes.max(minimum_bytes)
-                }
-            }),
+            bytes: self.limits.bytes.map(|bytes| bytes.max(minimum_bytes)),
             lines: self.limits.lines.map(|lines| lines.max(minimum_lines)),
         }
     }

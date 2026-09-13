@@ -1449,7 +1449,7 @@ impl Terminal {
             let row = screen.rows.remove(0);
             let blank = screen.blank_row(cols, Color::Default);
             screen.rows.push(blank);
-            screen.push_history(row);
+            screen.retain_history(row);
         }
         if screen.cursor.row < count {
             screen.cursor.row = 0;

@@ -5,6 +5,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     ffi::c_void,
+    io::{self, Read},
     path::Path,
     ptr::NonNull,
     rc::Rc,
@@ -83,6 +84,11 @@ pub struct Platform {
 }
 
 impl Platform {
+    /// The kernel supplies cryptographic entropy; failures must not mint a paste grant.
+    pub fn secure_random(bytes: &mut [u8]) -> io::Result<()> {
+        std::fs::File::open("/dev/urandom")?.read_exact(bytes)
+    }
+
     /// Native state for an explicitly requested smoke-test failure report.
     pub fn window_diagnostics(window: &Window) -> Result<String, String> {
         let native = native_window(window)?;

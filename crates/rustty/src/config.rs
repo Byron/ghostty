@@ -12,8 +12,11 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+#[path = "config/font.rs"]
+mod font;
 #[path = "config/keybinding.rs"]
 mod keybinding;
+pub use font::{CodepointMap, FontStyleRequest, FontVariation};
 pub use keybinding::{
     Action, BindingFlags, Direction, KeyBinding, KeyTrigger, Modifiers, parse_escaped_bytes,
 };
@@ -264,6 +267,20 @@ pub struct Config {
     pub font_family_bold_italic: Vec<String>,
     pub font_feature: Vec<String>,
     pub font_size: f32,
+    pub font_style: FontStyleRequest,
+    pub font_style_bold: FontStyleRequest,
+    pub font_style_italic: FontStyleRequest,
+    pub font_style_bold_italic: FontStyleRequest,
+    pub font_variation: Vec<FontVariation>,
+    pub font_variation_bold: Vec<FontVariation>,
+    pub font_variation_italic: Vec<FontVariation>,
+    pub font_variation_bold_italic: Vec<FontVariation>,
+    pub font_codepoint_map: Vec<CodepointMap>,
+    /// Synthetic bold, italic and bold-italic are controlled independently.
+    pub font_synthetic_style: [bool; 3],
+    pub font_thicken: bool,
+    /// Zero is the lightest thickening; `font_thicken` controls whether it is used.
+    pub font_thicken_strength: u8,
     pub background: Rgb,
     pub foreground: Rgb,
     pub palette: [Rgb; 256],
@@ -323,6 +340,18 @@ impl Default for Config {
             font_family_bold_italic: vec![],
             font_feature: vec![],
             font_size: 13.0,
+            font_style: FontStyleRequest::Default,
+            font_style_bold: FontStyleRequest::Default,
+            font_style_italic: FontStyleRequest::Default,
+            font_style_bold_italic: FontStyleRequest::Default,
+            font_variation: vec![],
+            font_variation_bold: vec![],
+            font_variation_italic: vec![],
+            font_variation_bold_italic: vec![],
+            font_codepoint_map: vec![],
+            font_synthetic_style: [true; 3],
+            font_thicken: false,
+            font_thicken_strength: 255,
             background: Rgb::new(0x28, 0x2c, 0x34),
             foreground: Rgb::new(255, 255, 255),
             palette: default_palette(),
@@ -415,6 +444,35 @@ impl Config {
             "font-family-bold-italic" => append_or_clear(&mut self.font_family_bold_italic, value),
             "font-feature" => append_or_clear(&mut self.font_feature, value),
             "font-size" => set!(font_size, parse_positive(value)?),
+            "font-style" => set!(font_style, FontStyleRequest::parse(value)?),
+            "font-style-bold" => set!(font_style_bold, FontStyleRequest::parse(value)?),
+            "font-style-italic" => set!(font_style_italic, FontStyleRequest::parse(value)?),
+            "font-style-bold-italic" => {
+                set!(font_style_bold_italic, FontStyleRequest::parse(value)?)
+            }
+            "font-variation" => font::append_variation(&mut self.font_variation, value)?,
+            "font-variation-bold" => font::append_variation(&mut self.font_variation_bold, value)?,
+            "font-variation-italic" => {
+                font::append_variation(&mut self.font_variation_italic, value)?
+            }
+            "font-variation-bold-italic" => {
+                font::append_variation(&mut self.font_variation_bold_italic, value)?
+            }
+            "font-codepoint-map" => {
+                if value.is_empty() {
+                    self.font_codepoint_map.clear();
+                } else {
+                    self.font_codepoint_map.extend(CodepointMap::parse(value)?);
+                }
+            }
+            "font-synthetic-style" => set!(font_synthetic_style, font::synthetic_styles(value)?),
+            "font-thicken" => set!(font_thicken, parse_bool(value)?),
+            "font-thicken-strength" => set!(
+                font_thicken_strength,
+                parse_usize(value)?
+                    .try_into()
+                    .map_err(|_| "font thickening strength must be 0 through 255")?
+            ),
             "foreground" => set!(foreground, Rgb::parse(value)?),
             "background" => set!(background, Rgb::parse(value)?),
             "palette" => {

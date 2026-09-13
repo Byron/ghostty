@@ -281,6 +281,12 @@ and batched failures remain recorded; these checks use the repaired reference.
 Complete resource-exhaustion combinations, especially splitting during reflow,
 remain unverified.
 
+`pages/styles/mixed-edit/` adds 114 comparisons for cursor motion, direct row
+and cell edits, margins and linked/wide printing on restored pages.
+`pages/styles/wrap-reset/` adds 24 comparisons for ordinary wraps and wide-cell
+spacer heads: ECH, EL and DCH clear the following row's continuation as well as
+the current row's wrap state. All 381 retained STYLE comparisons pass.
+
 Grid cases cover live writes, erasure, reflow, height changes, screen switches,
 resets, handle reuse and scrollback limits, including release of an inactive
 screen's tracked handle. Restoring a new terminal while

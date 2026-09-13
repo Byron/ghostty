@@ -1363,6 +1363,22 @@ impl Screen {
         self.sync_cursor_style();
     }
 
+    pub(crate) fn cursor_reset_wrap(&mut self) {
+        self.cursor.pending_wrap = false;
+        let y = self.cursor.row;
+        if !self.rows[y].wrapped {
+            return;
+        }
+        self.rows[y].wrapped = false;
+        if let Some(next) = self.rows.get_mut(y + 1) {
+            next.wrap_continuation = false;
+        }
+        let columns = self.rows[y].cells.len();
+        if self.rows[y].cells[columns - 1].spacer_head {
+            self.erase_row_cells(y, columns - 1, columns, self.cursor.style.background, false);
+        }
+    }
+
     pub(crate) fn split_cell_boundary(&mut self, col: usize) {
         let y = self.cursor.row;
         let cols = self.rows[y].cells.len();

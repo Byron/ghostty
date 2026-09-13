@@ -29,7 +29,7 @@
     {
       "id": "terminal.cells",
       "status": "partial",
-      "remaining": "Cell comparison exists; complete grapheme, protection, wide-cell and semantic cases remain."
+      "remaining": "Cell comparison exists; ECH/EL/DCH wrap resets, next-row continuation and wide spacer cleanup have focused snapshot coverage. Complete grapheme, protection, wide-cell and semantic cases remain."
     },
     {
       "id": "terminal.styles",

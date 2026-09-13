@@ -1580,9 +1580,8 @@ impl Terminal {
             row.cells[cur.col..end].rotate_left(count);
             row.cells[end - count..end].fill(Cell::blank(cur.style.background));
             row.repair_wide(cur.style.background);
-            row.wrapped = false;
         });
-        self.screen_mut().cursor.pending_wrap = false;
+        self.screen_mut().cursor_reset_wrap();
         self.changed();
     }
 
@@ -1597,6 +1596,9 @@ impl Terminal {
             _ => return,
         };
         self.ensure_row_cells(cursor.row, cols);
+        if mode != 1 {
+            self.screen_mut().cursor_reset_wrap();
+        }
         self.screen_mut().erase_row_cells(
             cursor.row,
             start,
@@ -1604,9 +1606,6 @@ impl Terminal {
             cursor.style.background,
             protected,
         );
-        if mode != 1 {
-            self.screen_mut().rows[cursor.row].wrapped = false;
-        }
         self.screen_mut().cursor.pending_wrap = false;
         self.changed();
     }
@@ -2053,6 +2052,7 @@ impl Terminal {
                 let end = cur.col.saturating_add(count).min(self.cols as usize);
                 self.screen_mut().split_cell_boundary(cur.col);
                 self.screen_mut().split_cell_boundary(end);
+                self.screen_mut().cursor_reset_wrap();
                 self.screen_mut().erase_row_cells(
                     cur.row,
                     cur.col,
@@ -2060,8 +2060,6 @@ impl Terminal {
                     cur.style.background,
                     protected,
                 );
-                self.screen_mut().rows[cur.row].wrapped = false;
-                self.screen_mut().cursor.pending_wrap = false;
                 self.changed();
             }
             ([], b'L' | b'M') => {

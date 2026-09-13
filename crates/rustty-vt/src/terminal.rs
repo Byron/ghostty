@@ -404,6 +404,13 @@ impl Terminal {
         }
     }
 
+    fn ensure_active_columns(&mut self) {
+        let columns = usize::from(self.cols);
+        for row in 0..usize::from(self.rows) {
+            self.ensure_row_cells(row, columns);
+        }
+    }
+
     fn clamp_cursor(&mut self) {
         let columns = usize::from(self.cols);
         let screen = self.screen_mut();
@@ -814,10 +821,11 @@ impl Terminal {
     }
 
     pub fn print(&mut self, cp: char) {
-        self.clamp_cursor();
         if self.status_display {
             return;
         }
+        self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
+        self.clamp_cursor();
         let current = self.screen().cursor.clone();
         let right = if current.col > self.margins.right {
             self.cols as usize - 1
@@ -1057,7 +1065,7 @@ impl Terminal {
             self.screen_mut().rows[y].wrap_continuation = true;
         }
         self.screen_mut().cursor.col = self.margins.left;
-        self.ensure_row_cells(self.screen().cursor.row, self.margins.left + 1);
+        self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
         self.screen_mut().cursor.pending_wrap = false;
     }
 
@@ -1111,6 +1119,7 @@ impl Terminal {
             };
             y.saturating_sub(amount.max(1)).max(top)
         };
+        self.ensure_row_cells(target, self.screen().cursor.col + 1);
         self.screen_mut().cursor.row = target;
         self.clamp_cursor();
         self.screen_mut().cursor.pending_wrap = false;
@@ -1183,6 +1192,7 @@ impl Terminal {
                 self.index_scroll();
             }
         } else if y + 1 < self.rows as usize {
+            self.ensure_row_cells(y + 1, self.screen().cursor.col + 1);
             self.screen_mut().cursor.row += 1;
         }
         self.clamp_cursor();
@@ -1212,6 +1222,7 @@ impl Terminal {
     }
 
     fn index_scroll(&mut self) {
+        self.ensure_active_columns();
         let m = self.margins;
         let cols = usize::from(self.cols);
         let full = m.left == 0 && m.right == cols - 1;
@@ -1331,6 +1342,7 @@ impl Terminal {
     }
 
     fn scroll_up(&mut self, count: usize, history: bool) {
+        self.ensure_active_columns();
         let m = self.margins;
         let count = count.max(1).min(m.bottom - m.top + 1);
         let cols = self.cols as usize;
@@ -1420,6 +1432,7 @@ impl Terminal {
     }
 
     fn scroll_down(&mut self, count: usize) {
+        self.ensure_active_columns();
         let m = self.margins;
         let cols = self.cols as usize;
         let count = count.max(1).min(m.bottom - m.top + 1);
@@ -1541,7 +1554,8 @@ impl Terminal {
         if cur.col < self.margins.left || cur.col > self.margins.right {
             return;
         }
-        let end = (self.margins.right + 1).min(self.screen().rows[cur.row].cells.len());
+        self.ensure_row_cells(cur.row, usize::from(self.cols));
+        let end = self.margins.right + 1;
         let count = count.max(1).min(end - cur.col);
         self.screen_mut().edit_row(cur.row, |row| {
             row.cells[cur.col..end].rotate_right(count);
@@ -1556,7 +1570,8 @@ impl Terminal {
         if cur.col < self.margins.left || cur.col > self.margins.right {
             return;
         }
-        let end = (self.margins.right + 1).min(self.screen().rows[cur.row].cells.len());
+        self.ensure_row_cells(cur.row, usize::from(self.cols));
+        let end = self.margins.right + 1;
         let count = count.max(1).min(end - cur.col);
         self.screen_mut().split_cell_boundary(cur.col);
         self.screen_mut().split_cell_boundary(cur.col + count);
@@ -1581,6 +1596,7 @@ impl Terminal {
             2 => (0, cols),
             _ => return,
         };
+        self.ensure_row_cells(cursor.row, cols);
         self.screen_mut().erase_row_cells(
             cursor.row,
             start,
@@ -1596,6 +1612,9 @@ impl Terminal {
     }
 
     pub fn erase_display(&mut self, mode: u16, protected: bool) {
+        if matches!(mode, 0..=2 | 22) {
+            self.ensure_active_columns();
+        }
         let cursor = self.screen().cursor.clone();
         let rows = self.rows as usize;
         let protected = protected || self.screen().iso_protection;
@@ -1651,6 +1670,7 @@ impl Terminal {
     }
 
     fn scroll_clear(&mut self) {
+        self.ensure_active_columns();
         let cell = [
             self.width_px / u32::from(self.cols),
             self.height_px / u32::from(self.rows),
@@ -1883,6 +1903,7 @@ impl Terminal {
                 };
             }
             ([b'#'], b'8') => {
+                self.ensure_active_columns();
                 let style = Style {
                     foreground: self.screen().cursor.style.foreground,
                     background: self.screen().cursor.style.background,
@@ -2026,6 +2047,7 @@ impl Terminal {
             ([], b'@') => self.insert_blanks(count),
             ([], b'P') => self.delete_chars(count),
             ([], b'X') => {
+                self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
                 let cur = self.screen().cursor.clone();
                 let protected = self.screen().iso_protection;
                 let end = cur.col.saturating_add(count).min(self.cols as usize);

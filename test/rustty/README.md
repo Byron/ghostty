@@ -236,8 +236,8 @@ attribute, cursor movement, printed and erased cells, page migration, resize,
 restored sparse IDs and mixed-width IND copies. Rustty retains the native set's
 dead entries, reference counts and ID reuse history instead of reconstructing
 STYLE resources when a snapshot is requested. Growth and rehashing clone live
-cells in row order. Mixed-width copies preserve the separate owners of their
-source prefix and recycled suffix. Failed rehash/growth leaves source cell IDs
+cells in row order. Row copies retain native STYLE ownership, including padding
+introduced when narrow pages grow. Failed rehash/growth leaves source cell IDs
 and references unchanged. Rendering viewport copies keep resolved styles and
 page boundaries without allocating live STYLE tables. The first-IND matrix can
 be run separately with `--case pages/styles/mixed-ind/` (48 passing comparisons).
@@ -260,8 +260,9 @@ out-of-bounds cursor followed by an assertion in `printSliceFill`'s STYLE releas
 The reference now widens physical pages before editing logical columns. It
 prepares replacement pages before moving tracked pins, preserving the source on
 allocation failure. Read-only access and untouched pages retain their widths.
-The original scalar and batched failures remain recorded; Rust migration to
-the corrected reference behavior is tracked separately.
+Rust now follows the corrected growth, padding, cursor and copied-row metadata.
+All 96 first-IND and continued-printing comparisons pass. The original scalar
+and batched failures remain recorded; these checks use the repaired reference.
 Complete resource-exhaustion combinations, especially splitting during reflow,
 remain unverified.
 

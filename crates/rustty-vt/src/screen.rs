@@ -1320,15 +1320,32 @@ impl Screen {
     pub(crate) fn extend_physical_row(&mut self, row: usize, columns: usize) {
         let history = self.history.len();
         let absolute = history + row;
-        let columns = columns.max(usize::from(self.pages.page_at(absolute).0.columns));
+        let (page, page_row) = self.pages.page_at(absolute);
+        if columns <= usize::from(page.columns) {
+            return;
+        }
+        let spacer_head = self
+            .all_rows()
+            .skip(absolute - page_row)
+            .take(usize::from(page.rows))
+            .any(|row| row.cells.last().is_some_and(|cell| cell.spacer_head));
+        let copy_rows = columns > usize::from(page.capacity.cols) || spacer_head;
         self.release_cursor_style();
         let old_pages = self.pages.clone();
-        let range = self.pages.extend_page(absolute, columns as u16);
+        let range = self
+            .pages
+            .extend_page(absolute, columns as u16, spacer_head);
         let mut contents: Vec<_> = self.history.drain(..).chain(self.rows.drain(..)).collect();
         for row in &mut contents[range.clone()] {
             let old_ids: Vec<_> = row.cells.iter().map(|cell| cell.style_id).collect();
             row.cells.resize(columns, Cell::default());
             row.repair_wide(Color::Default);
+            if copy_rows {
+                // Native page copying into a wider blank row preserves the
+                // destination's wrap flags because the copied range is partial.
+                row.wrapped = false;
+                row.wrap_continuation = false;
+            }
             if let Some(serial) = row.style_page {
                 for (old_id, cell) in old_ids.into_iter().zip(&row.cells) {
                     if old_id != cell.style_id {

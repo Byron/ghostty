@@ -415,3 +415,25 @@ fn history_restore_stops_after_lazy_normalization_changes_the_row_layout() {
     );
     assert!(decoder.next_history(&mut terminal).unwrap().is_none());
 }
+
+#[test]
+fn terminal_reset_keeps_the_primary_history_restore_destination() {
+    for ready_pages in [0, 1] {
+        let bytes = fixture();
+        let mut decoder = Decoder::new(bytes.as_slice(), DecodeOptions::default());
+        let mut terminal = decoder.ready().unwrap();
+        if ready_pages == 1 {
+            decoder.next_history(&mut terminal).unwrap();
+        }
+        terminal.feed(b"\x1bc");
+        assert!(terminal.primary_screen().history.is_empty());
+        while decoder.next_history(&mut terminal).unwrap().is_some() {}
+        let expected = if ready_pages == 0 {
+            vec!["A", "", "B", ""]
+        } else {
+            vec!["A", ""]
+        };
+        assert_eq!(text(&terminal.primary_screen().history), expected);
+        assert!(terminal.alternate_screen().is_none());
+    }
+}

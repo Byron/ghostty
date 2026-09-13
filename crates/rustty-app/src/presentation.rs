@@ -6,6 +6,16 @@ use std::time::{Duration, Instant};
 pub const PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
 pub const FLASH_DURATION: Duration = Duration::from_millis(1200);
 
+/// Typing restarts the visible phase; idle redraws happen only at its boundaries.
+pub fn cursor_blink_phase(started: Instant, now: Instant) -> (bool, Instant) {
+    let interval = Duration::from_millis(600).as_nanos();
+    let elapsed = now.saturating_duration_since(started).as_nanos();
+    (
+        (elapsed / interval).is_multiple_of(2),
+        now + Duration::from_nanos((interval - elapsed % interval) as u64),
+    )
+}
+
 /// A focus change shows its directory once, until typing or a single expiry.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FocusHint {
@@ -265,6 +275,41 @@ impl TabAccent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_blink_restarts_visible_until_typing_stops() {
+        let started = Instant::now();
+        let interval = Duration::from_millis(600);
+        assert_eq!(
+            cursor_blink_phase(started, started),
+            (true, started + interval)
+        );
+        assert_eq!(
+            cursor_blink_phase(started, started + interval),
+            (false, started + interval * 2),
+        );
+
+        let mut last_input = started;
+        for ms in [650, 1_000, 1_400, 1_950] {
+            last_input = started + Duration::from_millis(ms);
+            let deadline = last_input + interval;
+            assert_eq!(cursor_blink_phase(last_input, last_input), (true, deadline));
+            // Even a draw just before the idle boundary keeps the original deadline.
+            assert_eq!(
+                cursor_blink_phase(last_input, deadline - Duration::from_nanos(1)),
+                (true, deadline),
+            );
+        }
+        let idle = last_input + interval;
+        assert_eq!(
+            cursor_blink_phase(last_input, idle),
+            (false, idle + interval)
+        );
+        assert_eq!(
+            cursor_blink_phase(last_input, idle + interval),
+            (true, idle + interval * 2),
+        );
+    }
 
     #[test]
     fn focus_hint_expires_or_clears_on_input_without_rearming_on_hover() {

@@ -12,7 +12,7 @@ use rustty_app::{
     platform::{Platform, PlatformEvent},
     presentation::{
         Activity, CompletionFlash, DirectoryLabel, FocusHint, TabAccent, common_directory_name,
-        directory_name,
+        cursor_blink_phase, directory_name,
     },
     workspace::{self, Axis, Id, Peek, Rect, SavedPane, Tab, WindowState, Workspace},
 };
@@ -39,7 +39,6 @@ use winit::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-const BLINK: Duration = Duration::from_millis(600);
 const INPUT_BUDGET: usize = 16 * 1024 * 1024;
 const MIN_WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(240.0, 120.0);
 
@@ -199,6 +198,7 @@ struct Host {
     selection_drag: Option<input::SelectionDrag>,
     focused: bool,
     focus_hint: FocusHint,
+    cursor_blink_started: Instant,
     visible: bool,
     occluded: bool,
     deadline: Option<Instant>,
@@ -865,6 +865,7 @@ impl App {
             selection_drag: None,
             focused: false,
             focus_hint: FocusHint::default(),
+            cursor_blink_started: Instant::now(),
             visible: !quick,
             occluded: false,
             deadline: None,
@@ -944,13 +945,15 @@ impl App {
             self.errors.push(error.to_string());
         }
     }
-    fn dismiss_focus_hint(&self, host: &mut Host, pane: Id) {
+    fn terminal_input(&self, host: &mut Host, pane: Id) {
+        let now = Instant::now();
         let focused = self
             .focused(host.id)
             .filter(|_| host.focused && host.visible);
-        host.focus_hint.focus(focused, Instant::now());
+        host.focus_hint.focus(focused, now);
         if focused == Some(pane) {
             host.focus_hint.dismiss();
+            host.cursor_blink_started = now;
             host.repaint();
         }
     }
@@ -982,7 +985,7 @@ impl App {
         terminal.screen_mut().viewport_offset = 0;
         terminal.screen_mut().selection = None;
         drop(terminal);
-        self.dismiss_focus_hint(host, paste.pane);
+        self.terminal_input(host, paste.pane);
         self.write(paste.pane, bytes);
         host.repaint();
     }
@@ -1502,7 +1505,7 @@ impl App {
             Action::Text(bytes) => {
                 if let Some(id) = focused {
                     if !bytes.is_empty() {
-                        self.dismiss_focus_hint(host, id);
+                        self.terminal_input(host, id);
                     }
                     self.write(id, bytes);
                 }
@@ -1753,7 +1756,7 @@ impl App {
                         vt::clipboard::Location::Standard
                     };
                     match self.paste_event(host.id, id, location) {
-                        Ok(true) => self.dismiss_focus_hint(host, id),
+                        Ok(true) => self.terminal_input(host, id),
                         Err(error) => self.errors.push(error),
                         Ok(false) => {
                             let text = if action == Action::PasteFromSelection {
@@ -1799,7 +1802,7 @@ impl App {
             }
             Action::ClearScreen => {
                 if let Some(id) = focused {
-                    self.dismiss_focus_hint(host, id);
+                    self.terminal_input(host, id);
                     self.write(id, b"\x0c".to_vec());
                 }
             }
@@ -2189,7 +2192,7 @@ impl App {
                         if !bytes.is_empty()
                             && let Some(id) = self.focused(host.id)
                         {
-                            self.dismiss_focus_hint(host, id);
+                            self.terminal_input(host, id);
                         }
                         for id in self
                             .workspace
@@ -2247,7 +2250,7 @@ impl App {
         });
         if let Some(bytes) = bytes {
             if key.state == ElementState::Pressed && !bytes.is_empty() {
-                self.dismiss_focus_hint(host, id);
+                self.terminal_input(host, id);
             }
             self.write(id, bytes);
         }
@@ -2322,7 +2325,7 @@ impl App {
             .render_state()
             .ok_or("GPU unavailable")?
             .target_format;
-        let blink_on = (self.started.elapsed().as_millis() / BLINK.as_millis()).is_multiple_of(2);
+        let (blink_on, blink_deadline) = cursor_blink_phase(host.cursor_blink_started, now);
         let mut needs_blink = false;
         let mut graphics_deadline: Option<Instant> = None;
         if host
@@ -2617,6 +2620,7 @@ impl App {
                             let is_focused = host.focused && id == focused && host.peek.is_none();
                             needs_blink |= is_focused
                                 && !pane.exited
+                                && !host.composing
                                 && snapshot.screen.cursor.visible
                                 && snapshot.screen.cursor.blink;
                             let cursor_color = snapshot.cursor_color.unwrap_or(snapshot.foreground);
@@ -3153,9 +3157,7 @@ impl App {
             host.deadline = Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
         }
         if needs_blink {
-            let elapsed = self.started.elapsed().as_millis();
-            let deadline = Instant::now()
-                + Duration::from_millis((BLINK.as_millis() - elapsed % BLINK.as_millis()) as u64);
+            let deadline = blink_deadline;
             host.deadline = Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
         }
         Ok(())
@@ -3870,7 +3872,7 @@ impl ApplicationHandler<Event> for App {
                         if !text.is_empty()
                             && let Some(pane) = self.focused(host.id)
                         {
-                            self.dismiss_focus_hint(&mut host, pane);
+                            self.terminal_input(&mut host, pane);
                         }
                         host.composing = !text.is_empty();
                         host.preedit = text;
@@ -3882,7 +3884,7 @@ impl ApplicationHandler<Event> for App {
                         host.preedit_selection = None;
                         if let Some(pane) = self.focused(host.id) {
                             if !text.is_empty() {
-                                self.dismiss_focus_hint(&mut host, pane);
+                                self.terminal_input(&mut host, pane);
                             }
                             self.write(pane, text.into_bytes());
                         }
@@ -3971,7 +3973,7 @@ impl ApplicationHandler<Event> for App {
                         .get(&id)
                         .and_then(|p| p.session.terminal().ok().map(|t| t.encode_paste(&escaped)));
                     if let Some(bytes) = bytes {
-                        self.dismiss_focus_hint(&mut host, id);
+                        self.terminal_input(&mut host, id);
                         self.write(id, bytes);
                     }
                 }

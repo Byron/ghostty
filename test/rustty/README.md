@@ -35,6 +35,7 @@ Use deterministic generated cases and saved failures to diagnose differences:
 python3 test/rustty/parity.py --no-build --generated 100 --seed 0
 python3 test/rustty/parity.py --no-build --input
 python3 test/rustty/parity.py --no-build --parser
+python3 test/rustty/parity.py --no-build --snapshots
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
@@ -55,6 +56,16 @@ boundary because Zig exposes validated commands while Rust exposes raw OSC
 payloads. This comparison therefore does **not** validate OSC command parsing,
 effects or command-specific limits; those need terminal/protocol cases.
 
+`--snapshots` exports one snapshot from each implementation, restores each
+encoding in both implementations, and resumes terminal input. It compares
+the restored state and effects with uninterrupted execution as well as with
+the other implementation. Both wire encodings are retained in failure
+artifacts; their bytes may differ because PAGE grouping is not prescribed.
+Cases include all cuts through representative UTF-8, ESC, CSI, OSC, DCS and
+APC sequences, plus styles, hyperlinks, screens, history, saved cursors and
+reflow. READY/history interleaving and malformed wire input still need
+separate coverage.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;
@@ -63,7 +74,7 @@ An oracle crash, invalid response, unsupported operation or timeout fails the
 run. Requests are limited to 16 MiB and responses to 128 MiB. Graphics file,
 temporary-file and shared-memory transports are disabled in the Zig oracle.
 
-`--thorough` additionally exercises input and parser cases, all split points
+`--thorough` additionally exercises input, parser and snapshot cases, all split points
 for short writes, the inherited stream corpus and generated operations. The
 stream corpus's first byte is its original delivery selector, so it is removed
 from the terminal input.

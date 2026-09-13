@@ -1,4 +1,6 @@
-use rustty_vt::clipboard::{self, Content, Location, Read, Terminator, Write};
+use rustty_vt::clipboard::{
+    self, Content, Location, Read, ReadResult, ReadSuccess, Terminator, Write, WriteResult,
+};
 use rustty_vt::{Effect, EffectHandler, Terminal};
 
 #[test]
@@ -82,21 +84,18 @@ fn clipboard_writes_validate_selectors_and_base64_before_dispatch() {
         for encoded in ["Zg==", "Zg", "Zh=="] {
             assert_eq!(
                 terminal.feed(format!("\x1b]52;{selector};{encoded}\x07").as_bytes()),
-                [Effect::ClipboardWrite(Write {
+                [Effect::ClipboardWrite(Write::osc52(
                     location,
-                    contents: vec![Content {
+                    vec![Content {
                         mime: b"text/plain".to_vec(),
-                        data: b"f".to_vec(),
+                        data: b"f".as_slice().into(),
                     }],
-                })]
+                ))]
             );
         }
         assert_eq!(
             terminal.feed(format!("\x1b]52;{selector};\x07").as_bytes()),
-            [Effect::ClipboardWrite(Write {
-                location,
-                contents: Vec::new(),
-            })]
+            [Effect::ClipboardWrite(Write::osc52(location, Vec::new()))]
         );
     }
     for input in [
@@ -120,26 +119,30 @@ fn clipboard_reads_reply_in_event_order_and_preserve_binary_text_and_terminator(
             self.0.push(effect);
         }
 
-        fn clipboard_read(&mut self, request: &Read) -> Vec<Content> {
+        fn clipboard_read(&mut self, request: &Read) -> ReadResult {
             self.0.push(Effect::ClipboardRead(request.clone()));
-            vec![
-                Content {
-                    mime: b"image/png".to_vec(),
-                    data: b"ignored".to_vec(),
-                },
-                Content {
-                    mime: b"UTF8_STRING".to_vec(),
-                    data: b"a\0\xff".to_vec(),
-                },
-                Content {
-                    mime: b"text/plain".to_vec(),
-                    data: b"second text ignored".to_vec(),
-                },
-            ]
+            ReadResult::Success(ReadSuccess {
+                contents: vec![
+                    Content {
+                        mime: b"image/png".to_vec(),
+                        data: b"ignored".as_slice().into(),
+                    },
+                    Content {
+                        mime: b"UTF8_STRING".to_vec(),
+                        data: b"a\0\xff".as_slice().into(),
+                    },
+                    Content {
+                        mime: b"text/plain".to_vec(),
+                        data: b"second text ignored".as_slice().into(),
+                    },
+                ],
+                ..ReadSuccess::default()
+            })
         }
 
-        fn clipboard_write(&mut self, request: &Write) {
+        fn clipboard_write(&mut self, request: &Write) -> WriteResult {
             self.0.push(Effect::ClipboardWrite(request.clone()));
+            WriteResult::Success { remember: false }
         }
     }
 
@@ -153,21 +156,12 @@ fn clipboard_reads_reply_in_event_order_and_preserve_binary_text_and_terminator(
         host.0,
         [
             Effect::Bell,
-            Effect::ClipboardRead(Read {
-                location: Location::Primary,
-                terminator: Terminator::Bell,
-            }),
+            Effect::ClipboardRead(Read::osc52(Location::Primary, Terminator::Bell)),
             Effect::Write(b"\x1b]52;p;YQD/\x07".to_vec()),
             Effect::Write(b"\x1b[1;1R".to_vec()),
-            Effect::ClipboardRead(Read {
-                location: Location::Selection,
-                terminator: Terminator::St,
-            }),
+            Effect::ClipboardRead(Read::osc52(Location::Selection, Terminator::St)),
             Effect::Write(b"\x1b]52;s;YQD/\x1b\\".to_vec()),
-            Effect::ClipboardWrite(Write {
-                location: Location::Standard,
-                contents: Vec::new(),
-            }),
+            Effect::ClipboardWrite(Write::osc52(Location::Standard, Vec::new())),
         ]
     );
 

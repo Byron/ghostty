@@ -209,13 +209,13 @@ fn effects_and_terminal_replies_are_ordered() {
             Effect::Bell,
             Effect::CommandStart,
             Effect::CommandEnd { exit_code: Some(2) },
-            Effect::ClipboardWrite(rustty_vt::clipboard::Write {
-                location: rustty_vt::clipboard::Location::Standard,
-                contents: vec![rustty_vt::clipboard::Content {
+            Effect::ClipboardWrite(rustty_vt::clipboard::Write::osc52(
+                rustty_vt::clipboard::Location::Standard,
+                vec![rustty_vt::clipboard::Content {
                     mime: b"text/plain".to_vec(),
-                    data: b"hello".to_vec(),
+                    data: b"hello".as_slice().into(),
                 }],
-            })
+            ))
         ]
     );
     assert_eq!(

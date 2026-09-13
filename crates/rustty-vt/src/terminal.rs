@@ -27,11 +27,21 @@ pub enum Effect {
 pub trait EffectHandler {
     fn effect(&mut self, effect: Effect);
 
-    fn clipboard_read(&mut self, _request: &clipboard::Read) -> Vec<clipboard::Content> {
-        Vec::new()
+    fn clipboard_read_enabled(&self) -> bool {
+        true
     }
 
-    fn clipboard_write(&mut self, _request: &clipboard::Write) {}
+    fn clipboard_write_enabled(&self) -> bool {
+        true
+    }
+
+    fn clipboard_read(&mut self, _request: &clipboard::Read) -> clipboard::ReadResult {
+        clipboard::ReadResult::Denied
+    }
+
+    fn clipboard_write(&mut self, _request: &clipboard::Write) -> clipboard::WriteResult {
+        clipboard::WriteResult::Denied
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +68,10 @@ pub struct Terminal {
     /// Host's actual TERM name, used for XTGETTCAP TN. Unset or names longer
     /// than 128 bytes leave TN unanswered. This host setting is not persisted.
     pub terminfo_name: Option<String>,
+    /// Maximum total decoded bytes in a Kitty clipboard write transaction.
+    /// A transfer retains the value that was configured when it began.
+    pub clipboard_write_limit: usize,
+    clipboard: clipboard::kitty::State,
     pub title: String,
     pub working_directory: String,
     pub generation: u64,
@@ -112,6 +126,8 @@ impl Terminal {
             background: [0; 3],
             cursor_color: None,
             terminfo_name: None,
+            clipboard_write_limit: 64 * 1024 * 1024,
+            clipboard: clipboard::kitty::State::default(),
             title: String::new(),
             working_directory: String::new(),
             generation: 0,
@@ -167,7 +183,7 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut parser = std::mem::take(&mut self.parser);
-        parser.advance(bytes, |event| self.handle(event, &mut effects));
+        parser.advance(bytes, |event| self.handle(event, &mut effects, true, true));
         self.parser = parser;
         // Active rows can grow allocations without scrolling (graphemes and
         // hyperlinks), so reconcile the byte budget after the complete update.
@@ -181,21 +197,56 @@ impl Terminal {
     pub fn feed_with_handler(&mut self, bytes: &[u8], handler: &mut impl EffectHandler) {
         let mut effects = Vec::new();
         let mut parser = std::mem::take(&mut self.parser);
+        let read_enabled = handler.clipboard_read_enabled();
+        let write_enabled = handler.clipboard_write_enabled();
         parser.advance(bytes, |event| {
-            self.handle(event, &mut effects);
+            self.handle(event, &mut effects, write_enabled, read_enabled);
             for effect in effects.drain(..) {
                 match effect {
                     Effect::ClipboardRead(request) => {
-                        let contents = handler.clipboard_read(&request);
-                        handler.effect(Effect::Write(request.reply(&contents)));
+                        let result = if read_enabled {
+                            handler.clipboard_read(&request)
+                        } else if request.protocol == clipboard::Protocol::Osc52 {
+                            continue;
+                        } else {
+                            clipboard::ReadResult::Denied
+                        };
+                        handler.effect(Effect::Write(self.reply_clipboard_read(request, result)));
                     }
-                    Effect::ClipboardWrite(request) => handler.clipboard_write(&request),
+                    Effect::ClipboardWrite(request) => {
+                        if write_enabled {
+                            let result = handler.clipboard_write(&request);
+                            if let Some(reply) = self.reply_clipboard_write(request, result) {
+                                handler.effect(Effect::Write(reply));
+                            }
+                        }
+                    }
                     effect => handler.effect(effect),
                 }
             }
         });
         self.parser = parser;
         self.primary.enforce_limits();
+    }
+
+    /// Complete a deferred clipboard request, including an optional grant.
+    pub fn reply_clipboard_read(
+        &mut self,
+        request: clipboard::Read,
+        result: clipboard::ReadResult,
+    ) -> Vec<u8> {
+        self.clipboard.remember_read(&request, &result);
+        request.reply_result(result)
+    }
+
+    /// Complete a deferred write. OSC 52 has no acknowledgement bytes.
+    pub fn reply_clipboard_write(
+        &mut self,
+        request: clipboard::Write,
+        result: clipboard::WriteResult,
+    ) -> Option<Vec<u8>> {
+        self.clipboard.remember_write(&request, result);
+        request.reply(result)
     }
 
     fn ensure_row_cells(&mut self, row: usize, end: usize) {
@@ -260,6 +311,8 @@ impl Terminal {
         let primary_identity = self.primary.metadata.identity;
         let reflow_generation = self.primary.metadata.reflow_generation;
         let terminfo_name = self.terminfo_name.take();
+        let clipboard = std::mem::take(&mut self.clipboard);
+        let clipboard_write_limit = self.clipboard_write_limit;
         let (foreground, background, cursor, palette) = (
             self.foreground,
             self.background,
@@ -282,6 +335,8 @@ impl Terminal {
         self.primary.metadata.identity = primary_identity;
         self.primary.metadata.reflow_generation = reflow_generation;
         self.terminfo_name = terminfo_name;
+        self.clipboard = clipboard;
+        self.clipboard_write_limit = clipboard_write_limit;
         self.width_px = width_px;
         self.height_px = height_px;
         self.metadata = metadata;
@@ -390,7 +445,13 @@ impl Terminal {
         };
     }
 
-    fn handle(&mut self, event: Event<'_>, effects: &mut Vec<Effect>) {
+    fn handle(
+        &mut self,
+        event: Event<'_>,
+        effects: &mut Vec<Effect>,
+        clipboard_write_enabled: bool,
+        clipboard_read_enabled: bool,
+    ) {
         match event {
             Event::Print(cp) => self.print(cp),
             Event::Execute(byte) => match byte {
@@ -422,7 +483,13 @@ impl Terminal {
             Event::Osc {
                 data,
                 terminated_by_bell,
-            } => self.osc(data, terminated_by_bell, effects),
+            } => self.osc(
+                data,
+                terminated_by_bell,
+                effects,
+                clipboard_write_enabled,
+                clipboard_read_enabled,
+            ),
             Event::DcsHook {
                 intermediates,
                 params,
@@ -1133,6 +1200,7 @@ impl Terminal {
             }
             ([], b'c') => {
                 self.reset();
+                self.clipboard.clear_grants();
                 effects.push(Effect::Progress {
                     state: 0,
                     value: None,
@@ -1411,7 +1479,14 @@ impl Terminal {
         }
     }
 
-    fn osc(&mut self, data: &[u8], bell: bool, effects: &mut Vec<Effect>) {
+    fn osc(
+        &mut self,
+        data: &[u8],
+        bell: bool,
+        effects: &mut Vec<Effect>,
+        clipboard_write_enabled: bool,
+        clipboard_read_enabled: bool,
+    ) {
         let split = data.iter().position(|&b| b == b';').unwrap_or(data.len());
         let Ok(number) = std::str::from_utf8(&data[..split])
             .unwrap_or("")
@@ -1497,14 +1572,14 @@ impl Terminal {
                         clipboard::Location::from_selector(if split == 0 { b'c' } else { data[0] });
                     let encoded = &data[split + 1..];
                     if encoded == b"?" {
-                        effects.push(Effect::ClipboardRead(clipboard::Read {
+                        effects.push(Effect::ClipboardRead(clipboard::Read::osc52(
                             location,
-                            terminator: if bell {
+                            if bell {
                                 clipboard::Terminator::Bell
                             } else {
                                 clipboard::Terminator::St
                             },
-                        }));
+                        )));
                     } else {
                         let engine = base64::engine::general_purpose::GeneralPurpose::new(
                             &base64::alphabet::STANDARD,
@@ -1522,17 +1597,28 @@ impl Terminal {
                             } else {
                                 vec![clipboard::Content {
                                     mime: b"text/plain".to_vec(),
-                                    data,
+                                    data: data.into(),
                                 }]
                             };
-                            effects.push(Effect::ClipboardWrite(clipboard::Write {
-                                location,
-                                contents,
-                            }));
+                            effects.push(Effect::ClipboardWrite(clipboard::Write::osc52(
+                                location, contents,
+                            )));
                         }
                     }
                 }
             }
+            5522 => self.clipboard.handle(
+                data,
+                if bell {
+                    clipboard::Terminator::Bell
+                } else {
+                    clipboard::Terminator::St
+                },
+                self.clipboard_write_limit,
+                clipboard_write_enabled,
+                clipboard_read_enabled,
+                effects,
+            ),
             133 => match text.split(';').next().unwrap_or("") {
                 "A" => {
                     let row = self.screen().cursor.row;

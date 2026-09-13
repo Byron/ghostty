@@ -193,17 +193,17 @@ and references unchanged. Rendering viewport copies keep resolved styles and
 page boundaries without allocating live STYLE tables. The first-IND matrix can
 be run separately with `--case pages/styles/mixed-ind/` (48 passing comparisons).
 
-The retained `pages/styles/max-capacity-split/2` case exposes a native cursor
+The retained `pages/styles/max-capacity-split/2` case exposed a native cursor
 cache defect. A restored two-row page with 32 colliding STYLE entries at capacity
-65535 splits during SGR. `Screen.splitForCapacity` moves the cursor pin through
-`cursorChangePin` without refreshing cached `page_row`/`page_cell`; subsequent
-printing writes to the retired row. Native drops `X`, while Rustty writes it at
-the current cursor. A vertical cursor detour or snapshot restore fixes the
-native write; same-row movement, observation and snapshot encoding do not.
-This was independently reproduced with native binary SHA-256
+65535 splits during SGR. The original `Screen.splitForCapacity` moved the cursor
+pin without refreshing cached `page_row`/`page_cell`; subsequent printing wrote
+to the retired row and dropped `X`. This was independently reproduced with
+native binary SHA-256
 `760b71c042988ece0aee08e1202b3e3b255372e983f4fb451cb38cc3b9d84313`.
-The fixture remains a failure in broad and thorough runs; it is neither
-normalized nor marked as an expected pass.
+The reference now refreshes both caches after migrating the cursor. The existing
+native split test checks the pointers and the following styled write, and all six
+split comparisons pass. The fixture remains in broad and thorough runs without
+normalization; compatibility is measured against this repaired reference.
 
 `pages/styles/mixed-ind-resume/` also retains continued-printing probes after
 the first IND. A native assertion in `printSliceFill`'s STYLE release occurs for

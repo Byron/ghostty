@@ -34,7 +34,7 @@
     {
       "id": "terminal.styles",
       "status": "partial",
-      "remaining": "Live STYLE admission, cursor/cell references, dead-ID reuse, rehash/growth, restored sparse IDs, resize and mixed-width IND copies have bounded coverage. Native max-capacity split cursor-cache and mixed-width continued-printing failures are retained. Complete SGR/state transitions and resource-exhaustion combinations remain."
+      "remaining": "Live STYLE admission, cursor/cell references, dead-ID reuse, rehash/growth, restored sparse IDs, resize and mixed-width IND copies have bounded coverage. The native max-capacity split cursor-cache defect is repaired and its six retained comparisons pass; the native mixed-width continued-printing failure remains. Complete SGR/state transitions and resource-exhaustion combinations remain."
     },
     {
       "id": "terminal.screens",
@@ -109,7 +109,7 @@
     {
       "id": "terminal.pages",
       "status": "partial",
-      "remaining": "Initialization, growth, whole-page pruning, clear/reset, dimension changes, reflow and snapshot admission compare native boundaries, capacities and allocation charges on macOS ARM64. Live STYLE ownership, growth and mixed-width row copies have bounded coverage; native STYLE split and continued-printing defects remain visible. Other managed resources, splitting during reflow, compression and complete lifecycle combinations remain."
+      "remaining": "Initialization, growth, whole-page pruning, clear/reset, dimension changes, reflow and snapshot admission compare native boundaries, capacities and allocation charges on macOS ARM64. Live STYLE ownership, growth and mixed-width row copies have bounded coverage; the repaired native STYLE split passes, while the continued-printing defect remains visible. Other managed resources, splitting during reflow, compression and complete lifecycle combinations remain."
     },
     {
       "id": "terminal.tracked",

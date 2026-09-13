@@ -486,8 +486,8 @@ fn apply_appearance(terminal: &mut Terminal, config: &Config) {
         _ => None,
     });
     terminal.set_default_colors(
-        config.foreground.to_array(),
-        config.background.to_array(),
+        Some(config.foreground.to_array()),
+        Some(config.background.to_array()),
         cursor_color,
         &palette,
     );

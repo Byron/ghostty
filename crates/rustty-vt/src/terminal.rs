@@ -479,24 +479,27 @@ impl Terminal {
     }
 
     /// Update configured colors while preserving application overrides.
+    /// `None` clears a configured dynamic color without inventing a query value.
     /// Palette entries beyond the supplied slice retain their defaults.
     pub fn set_default_colors(
         &mut self,
-        foreground: [u8; 3],
-        background: [u8; 3],
+        foreground: Option<[u8; 3]>,
+        background: Option<[u8; 3]>,
         cursor: Option<[u8; 3]>,
         palette: &[[u8; 3]],
     ) {
-        for (entry, value) in
-            self.metadata
-                .colors
-                .iter_mut()
-                .zip([Some(background), Some(foreground), cursor])
+        for (entry, value) in self
+            .metadata
+            .colors
+            .iter_mut()
+            .zip([background, foreground, cursor])
         {
             entry[0] = value;
         }
-        self.background = self.metadata.colors[0][1].unwrap_or(background);
-        self.foreground = self.metadata.colors[1][1].unwrap_or(foreground);
+        self.background = self.metadata.colors[0][1].or(background).unwrap_or([0; 3]);
+        self.foreground = self.metadata.colors[1][1]
+            .or(foreground)
+            .unwrap_or([255; 3]);
         self.cursor_color = self.metadata.colors[2][1].or(cursor);
         for (i, &color) in palette.iter().take(256).enumerate() {
             self.metadata.original_palette[i] = color;
@@ -562,7 +565,7 @@ impl Terminal {
         }
     }
 
-    fn changed(&mut self) {
+    pub(crate) fn changed(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
     fn reset_margins(&mut self) {
@@ -1678,9 +1681,23 @@ impl Terminal {
         else {
             return;
         };
+        if matches!(number, 4 | 5 | 10..=19 | 21 | 104 | 105 | 110..=119) {
+            if data[..split] != *number.to_string().as_bytes() {
+                return;
+            }
+            let reply = crate::color::osc(
+                self,
+                number,
+                data.get(split + 1..).unwrap_or_default(),
+                bell,
+            );
+            if !reply.is_empty() {
+                effects.push(Effect::Write(reply));
+            }
+            return;
+        }
         let data = data.get(split + 1..).unwrap_or_default();
         let text = String::from_utf8_lossy(data);
-        let terminator = if bell { "\x07" } else { "\x1b\\" };
         match number {
             0 | 2 => {
                 let tail = data.len().saturating_sub(2047);
@@ -1819,79 +1836,7 @@ impl Terminal {
                 }),
                 _ => {}
             },
-            4 => {
-                let mut parts = text.split(';');
-                while let (Some(index), Some(value)) = (parts.next(), parts.next()) {
-                    if let Ok(index) = index.parse::<u8>() {
-                        if value == "?" {
-                            let [r, g, b] = self.palette[index as usize];
-                            effects.push(Effect::Write(format!("\x1b]4;{index};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{terminator}").into_bytes()));
-                        } else if let Some(color) = parse_color(value) {
-                            self.palette[index as usize] = color;
-                            self.metadata.palette_overrides[index as usize / 8] |= 1 << (index % 8);
-                            self.changed();
-                        }
-                    }
-                }
-            }
-            10..=12 => {
-                for (offset, value) in text.split(';').enumerate() {
-                    let target = number + offset as u16;
-                    if target > 12 {
-                        break;
-                    }
-                    let color = match target {
-                        10 => self.foreground,
-                        11 => self.background,
-                        _ => self.cursor_color.unwrap_or(self.foreground),
-                    };
-                    if value == "?" {
-                        let [r, g, b] = color;
-                        effects.push(Effect::Write(format!("\x1b]{target};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{terminator}").into_bytes()));
-                    } else if let Some(color) = parse_color(value) {
-                        self.metadata.colors[match target {
-                            10 => 1,
-                            11 => 0,
-                            _ => 2,
-                        }][1] = Some(color);
-                        match target {
-                            10 => self.foreground = color,
-                            11 => self.background = color,
-                            _ => self.cursor_color = Some(color),
-                        }
-                        self.changed();
-                    }
-                }
-            }
-            104 => {
-                if text.is_empty() {
-                    self.palette.clone_from(&self.metadata.original_palette);
-                    self.metadata.palette_overrides = [0; 32];
-                } else {
-                    for index in text.split(';').filter_map(|v| v.parse::<u8>().ok()) {
-                        self.palette[index as usize] =
-                            self.metadata.original_palette[index as usize];
-                        self.metadata.palette_overrides[index as usize / 8] &= !(1 << (index % 8));
-                    }
-                }
-                self.changed();
-            }
-            110 => {
-                self.metadata.colors[1][1] = None;
-                self.foreground = self.metadata.colors[1][0].unwrap_or([255; 3]);
-                self.changed();
-            }
-            111 => {
-                self.metadata.colors[0][1] = None;
-                self.background = self.metadata.colors[0][0].unwrap_or([0; 3]);
-                self.changed();
-            }
-            112 => {
-                self.metadata.colors[2][1] = None;
-                self.cursor_color = self.metadata.colors[2][0];
-                self.changed();
-            }
-            1 | 21 | 22 => {}
+            1 | 22 => {}
             _ => effects.push(Effect::UnknownSequence(format!("OSC {number}"))),
         }
     }
@@ -2064,38 +2009,6 @@ pub fn default_palette() -> Vec<[u8; 3]> {
         colors.push([i * 10 + 8; 3]);
     }
     colors
-}
-
-pub fn parse_color(text: &str) -> Option<[u8; 3]> {
-    let value = text.trim().strip_prefix('#').unwrap_or(text.trim());
-    if value.len() == 6
-        && let Ok(rgb) = u32::from_str_radix(value, 16)
-    {
-        return Some([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
-    }
-    if let Some(rgb) = value.strip_prefix("rgb:") {
-        let parts: Vec<_> = rgb.split('/').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-        let mut color = [0; 3];
-        for (component, part) in color.iter_mut().zip(parts) {
-            if part.is_empty() || part.len() > 4 {
-                return None;
-            }
-            let raw = u32::from_str_radix(part, 16).ok()?;
-            *component = ((raw * 255) / ((1 << (part.len() * 4)) - 1)) as u8;
-        }
-        return Some(color);
-    }
-    match value.to_ascii_lowercase().as_str() {
-        "black" => Some([0; 3]),
-        "white" => Some([255; 3]),
-        "red" => Some([255, 0, 0]),
-        "green" => Some([0, 255, 0]),
-        "blue" => Some([0, 0, 255]),
-        _ => None,
-    }
 }
 
 fn sgr(style: &mut Style, params: &[u16], separators: u32) {

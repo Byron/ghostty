@@ -21,6 +21,17 @@ impl Modifiers {
     fn kitty_number(self) -> u16 {
         self.number() + 64 * u16::from(self.caps_lock) + 128 * u16::from(self.num_lock)
     }
+
+    fn without(self, consumed: Self) -> Self {
+        Self {
+            shift: self.shift && !consumed.shift,
+            control: self.control && !consumed.control,
+            alt: self.alt && !consumed.alt,
+            super_key: self.super_key && !consumed.super_key,
+            caps_lock: self.caps_lock && !consumed.caps_lock,
+            num_lock: self.num_lock && !consumed.num_lock,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +78,9 @@ pub struct KeyEvent {
     pub key: Key,
     pub text: Option<String>,
     pub modifiers: Modifiers,
+    /// Modifiers consumed in producing nonempty text. Raw modifier bits remain
+    /// available for protocol reporting and physical functional-key matching.
+    pub consumed_modifiers: Modifiers,
     pub action: KeyAction,
     /// Logical unshifted Unicode key. `key` retains the physical/base-layout key.
     pub unshifted: Option<char>,
@@ -82,9 +96,21 @@ impl KeyEvent {
                 _ => None,
             },
             modifiers: Modifiers::default(),
+            consumed_modifiers: Modifiers::default(),
             action: KeyAction::Press,
-            unshifted: None,
+            unshifted: match key {
+                Key::Char(cp) => Some(cp),
+                _ => None,
+            },
             composing: false,
+        }
+    }
+
+    fn effective_modifiers(&self) -> Modifiers {
+        if self.text.as_ref().is_some_and(|text| !text.is_empty()) {
+            self.modifiers.without(self.consumed_modifiers)
+        } else {
+            self.modifiers
         }
     }
 }
@@ -134,113 +160,61 @@ impl Terminal {
             return Vec::new();
         }
         let mods = event.modifiers;
-        let number = mods.number();
+        let effective = event.effective_modifiers();
         let text = event.text.as_deref().unwrap_or("");
-        if matches!(event.key, Key::Enter | Key::Escape | Key::Backspace)
-            && !text.is_empty()
-            && text.chars().all(|cp| !cp.is_control())
-        {
-            return if event.key == Key::Backspace {
-                Vec::new()
+        if let Some(sequence) = pc_key(self, event.key, mods) {
+            if !text.is_empty()
+                && !is_control_text(text)
+                && matches!(event.key, Key::Enter | Key::Escape | Key::Backspace)
+            {
+                if event.key == Key::Backspace {
+                    return Vec::new();
+                }
             } else {
-                text.as_bytes().to_vec()
-            };
+                return sequence;
+            }
         }
         if self.modify_other_keys
-            && number > 1
-            && let Some(cp) = text.chars().next().or(match event.key {
-                Key::Char(cp) => Some(cp),
-                Key::Enter => Some('\r'),
-                Key::Tab => Some('\t'),
-                Key::Backspace => Some('\u{7f}'),
-                Key::Escape => Some('\u{1b}'),
-                _ => None,
-            })
+            && let Some(cp) = single_char(text)
+            && (('@'..='\u{7f}').contains(&cp)
+                || mods.control
+                || mods.alt
+                || mods.super_key
+                || cp == ' ')
+            && mods.number() > 1
         {
-            return format!("\x1b[27;{number};{}~", cp as u32).into_bytes();
+            return format!("\x1b[27;{};{}~", mods.number(), cp as u32).into_bytes();
         }
-        if let Some(final_byte) = match event.key {
-            Key::Up => Some('A'),
-            Key::Down => Some('B'),
-            Key::Right => Some('C'),
-            Key::Left => Some('D'),
-            Key::Home => Some('H'),
-            Key::End => Some('F'),
-            _ => None,
-        } {
-            return if number > 1 {
-                format!("\x1b[1;{number}{final_byte}")
+        if let Some(byte) = control_sequence(event) {
+            return if effective.alt {
+                vec![0x1b, byte]
             } else {
-                format!(
-                    "\x1b{}{final_byte}",
-                    if self.modes.dec(1) { 'O' } else { '[' }
-                )
-            }
-            .into_bytes();
-        }
-        if let Some((code, final_byte)) = functional(event.key) {
-            if matches!(event.key, Key::Function(1..=4)) && number == 1 {
-                let Key::Function(f) = event.key else {
-                    unreachable!()
-                };
-                return vec![0x1b, b'O', b'P' + f - 1];
-            }
-            return if number == 1 {
-                format!("\x1b[{code}{final_byte}")
-            } else {
-                format!("\x1b[{code};{number}{final_byte}")
-            }
-            .into_bytes();
-        }
-        if let Some((app, plain)) = keypad(event.key) {
-            return if self.modes.dec(66) && !(self.modes.dec(1035) && mods.num_lock) {
-                if number > 1 {
-                    format!("\x1bO{number}{app}").into_bytes()
-                } else {
-                    vec![0x1b, b'O', app as u8]
-                }
-            } else {
-                vec![plain as u8]
+                vec![byte]
             };
         }
-        if event.key == Key::Tab && mods.shift && !mods.control && !mods.alt {
-            return b"\x1b[Z".to_vec();
+        if text.is_empty() {
+            return alt_prefix(self, event).unwrap_or_default();
         }
-        let mut output = match event.key {
-            Key::Enter => {
-                if self.modes.get(false, 20) {
-                    b"\r\n".to_vec()
-                } else {
-                    vec![b'\r']
-                }
+        if mods.control
+            && let Some(mut cp) = single_char(text)
+        {
+            let mut sequence_mods = mods;
+            sequence_mods.super_key = false;
+            if sequence_mods.shift && cp.is_ascii_uppercase() {
+                cp = cp.to_ascii_lowercase();
             }
-            Key::Tab => vec![b'\t'],
-            Key::Escape => vec![0x1b],
-            Key::Backspace => vec![if self.modes.dec(67) || mods.control {
-                0x08
-            } else {
-                0x7f
-            }],
-            Key::Char(cp) => {
-                let base = event.unshifted.unwrap_or(cp);
-                if mods.control {
-                    if let Some(byte) = control_byte(base) {
-                        vec![byte]
-                    } else {
-                        text.as_bytes().to_vec()
-                    }
-                } else if !text.is_empty() {
-                    text.as_bytes().to_vec()
-                } else {
-                    cp.to_string().into_bytes()
-                }
+            if event.unshifted != Some(cp) {
+                sequence_mods.shift = false;
             }
-            _ => Vec::new(),
-        };
-        if mods.alt && self.modes.dec(1036) && !output.is_empty() {
-            output.insert(0, 0x1b);
+            return format!("\x1b[{};{}u", cp as u32, sequence_mods.number()).into_bytes();
         }
-        output
+        if let Some(output) = alt_prefix(self, event) {
+            return output;
+        }
+        if cfg!(target_os = "macos") && mods.super_key {
+            return Vec::new();
+        }
+        text.as_bytes().to_vec()
     }
 
     pub fn encode_focus(&self, focused: bool) -> Vec<u8> {
@@ -343,19 +317,167 @@ impl Terminal {
     }
 }
 
-fn control_byte(cp: char) -> Option<u8> {
-    match cp {
-        'a'..='z' => Some(cp as u8 - b'a' + 1),
-        '@'..='_' => Some(cp as u8 - b'@'),
-        ' ' | '2' => Some(0),
-        '3' => Some(0x1b),
-        '4' => Some(0x1c),
-        '5' => Some(0x1d),
-        '6' => Some(0x1e),
-        '7' | '/' => Some(0x1f),
-        '?' | '8' => Some(0x7f),
-        _ => None,
+fn single_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let cp = chars.next()?;
+    chars.next().is_none().then_some(cp)
+}
+
+fn is_control(cp: char) -> bool {
+    cp < ' ' || cp == '\u{7f}'
+}
+fn is_control_text(text: &str) -> bool {
+    text.len() == 1 && is_control(text.chars().next().unwrap())
+}
+
+fn physical_codepoint(key: Key) -> Option<char> {
+    match key {
+        Key::Char(cp) => Some(cp),
+        Key::KeypadEnter => None,
+        key => keypad(key).map(|(_, plain)| plain),
     }
+}
+
+fn alt_prefix(terminal: &Terminal, event: &KeyEvent) -> Option<Vec<u8>> {
+    if !event.effective_modifiers().alt || !terminal.modes.dec(1036) {
+        return None;
+    }
+    let text = event.text.as_deref().unwrap_or("");
+    let value = if text.len() == 1 {
+        text.to_owned()
+    } else if cfg!(target_os = "macos")
+        && let Some(cp) = event.unshifted
+    {
+        cp.to_string()
+    } else if !text.is_empty() {
+        text.to_owned()
+    } else {
+        event.unshifted?.to_string()
+    };
+    let mut output = vec![0x1b];
+    output.extend_from_slice(value.as_bytes());
+    Some(output)
+}
+
+fn control_sequence(event: &KeyEvent) -> Option<u8> {
+    let mut mods = event.modifiers;
+    if !mods.control {
+        return None;
+    }
+    mods.alt = false;
+    let text = event.text.as_deref().unwrap_or("");
+    let mut cp = if text.len() == 1 {
+        text.as_bytes()[0] as char
+    } else if let Key::Char(cp) = event.key {
+        if !cp.is_ascii() || mods.shift || mods.super_key {
+            return None;
+        }
+        cp
+    } else {
+        return None;
+    };
+    if mods.shift && !cp.is_ascii_uppercase() && cp != '@' {
+        mods.shift = false;
+    }
+    if cp.is_ascii_uppercase()
+        && let Some(base) = event.unshifted.filter(char::is_ascii)
+    {
+        cp = base;
+    }
+    if mods.shift || mods.super_key {
+        return None;
+    }
+    Some(match cp {
+        ' ' | '2' | '@' => 0,
+        '/' | '7' | '_' => 31,
+        '0' | '1' | '9' => cp as u8,
+        '3' => 27,
+        '4' | '\\' => 28,
+        '5' | ']' => 29,
+        '6' | '^' | '~' => 30,
+        '8' | '?' => 127,
+        'a'..='h' | 'j'..='l' | 'n'..='z' => cp as u8 - b'a' + 1,
+        _ => return None,
+    })
+}
+
+fn pc_key(t: &Terminal, key: Key, mods: Modifiers) -> Option<Vec<u8>> {
+    let number = mods.number();
+    if let Some(final_byte) = match key {
+        Key::Up => Some('A'),
+        Key::Down => Some('B'),
+        Key::Right => Some('C'),
+        Key::Left => Some('D'),
+        Key::Home => Some('H'),
+        Key::End => Some('F'),
+        _ => None,
+    } {
+        return Some(
+            if number > 1 {
+                format!("\x1b[1;{number}{final_byte}")
+            } else {
+                format!("\x1b{}{final_byte}", if t.modes.dec(1) { 'O' } else { '[' })
+            }
+            .into_bytes(),
+        );
+    }
+    if let Some((code, final_byte)) = functional(key) {
+        return Some(
+            if let Key::Function(f @ 1..=4) = key
+                && number == 1
+            {
+                vec![0x1b, b'O', b'P' + f - 1]
+            } else if number == 1 {
+                format!("\x1b[{code}{final_byte}").into_bytes()
+            } else {
+                format!("\x1b[{code};{number}{final_byte}").into_bytes()
+            },
+        );
+    }
+    if let Some((app, plain)) = keypad(key) {
+        return Some(if t.modes.dec(66) && !t.modes.dec(1035) {
+            if number > 1 {
+                format!("\x1bO{number}{app}").into_bytes()
+            } else {
+                vec![0x1b, b'O', app as u8]
+            }
+        } else {
+            vec![plain as u8]
+        });
+    }
+    if key == Key::Backspace {
+        let mask = u8::from(mods.shift)
+            + 2 * u8::from(mods.control)
+            + 4 * u8::from(mods.alt)
+            + 8 * u8::from(mods.super_key);
+        if t.modify_other_keys && !matches!(mask, 0 | 2) {
+            return Some(format!("\x1b[27;{number};127~").into_bytes());
+        }
+        return Some(match mask {
+            0 | 7 => vec![if t.modes.dec(67) { 8 } else { 127 }],
+            2 => vec![if t.modes.dec(67) { 127 } else { 8 }],
+            1 | 8 | 9 => vec![127],
+            4 | 5 | 12 | 13 => vec![0x1b, 127],
+            3 | 10 | 11 => vec![8],
+            6 | 14 | 15 => vec![0x1b, 8],
+            _ => unreachable!(),
+        });
+    }
+    let byte = match key {
+        Key::Enter => 13,
+        Key::Tab => 9,
+        Key::Escape => 27,
+        _ => return None,
+    };
+    Some(if number == 1 {
+        vec![byte]
+    } else if !t.modify_other_keys && number == 3 {
+        vec![0x1b, byte]
+    } else if !t.modify_other_keys && key == Key::Tab && number == 2 {
+        b"\x1b[Z".to_vec()
+    } else {
+        format!("\x1b[27;{number};{byte}~").into_bytes()
+    })
 }
 
 fn functional(key: Key) -> Option<(u32, char)> {
@@ -398,65 +520,95 @@ fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
     if event.action == KeyAction::Release
         && (!report_events || !all && matches!(event.key, Key::Enter | Key::Tab | Key::Backspace))
         || event.composing && !modifier_key
-        || modifier_key && !all
     {
         return Vec::new();
     }
     let text = event.text.as_deref().unwrap_or("");
-    if !all && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.super_key {
+    if !text.is_empty()
+        && !is_control_text(text)
+        && matches!(event.key, Key::Enter | Key::Backspace)
+    {
+        return if event.key == Key::Backspace {
+            Vec::new()
+        } else {
+            text.as_bytes().to_vec()
+        };
+    }
+    if !all && event.effective_modifiers().number() == 1 {
+        match event.key {
+            Key::Enter => return vec![b'\r'],
+            Key::Tab => return vec![b'\t'],
+            Key::Backspace => return vec![0x7f],
+            _ => {}
+        }
         if event.action != KeyAction::Release
             && !text.is_empty()
-            && text.chars().all(|cp| !cp.is_control())
+            && text.chars().all(|cp| !is_control(cp))
         {
             return text.as_bytes().to_vec();
         }
-        if !event.modifiers.shift {
-            match event.key {
-                Key::Enter => return vec![b'\r'],
-                Key::Tab => return vec![b'\t'],
-                Key::Backspace => return vec![0x7f],
-                _ => {}
-            }
-        }
     }
-    let (code, final_byte) = match event.key {
-        Key::Char(cp) => (event.unshifted.unwrap_or(cp) as u32, 'u'),
-        Key::Enter => (13, 'u'),
-        Key::Tab => (9, 'u'),
-        Key::Backspace => (127, 'u'),
-        Key::Escape => (27, 'u'),
-        Key::Up => (1, 'A'),
-        Key::Down => (1, 'B'),
-        Key::Right => (1, 'C'),
-        Key::Left => (1, 'D'),
-        Key::Home => (1, 'H'),
-        Key::End => (1, 'F'),
-        Key::Keypad(n @ 0..=9) => (57399 + u32::from(n), 'u'),
-        Key::KeypadDecimal => (57409, 'u'),
-        Key::KeypadDivide => (57410, 'u'),
-        Key::KeypadMultiply => (57411, 'u'),
-        Key::KeypadSubtract => (57412, 'u'),
-        Key::KeypadAdd => (57413, 'u'),
-        Key::KeypadEnter => (57414, 'u'),
-        Key::Shift => (57441, 'u'),
-        Key::Control => (57442, 'u'),
-        Key::Alt => (57443, 'u'),
-        Key::Super => (57444, 'u'),
-        _ => match functional(event.key) {
-            Some(code) => code,
-            None => return Vec::new(),
-        },
+    if modifier_key && !all {
+        return Vec::new();
+    }
+    let code = match event.key {
+        Key::Char(_) => event.unshifted.map(|cp| (cp as u32, 'u')),
+        Key::Enter => Some((13, 'u')),
+        Key::Tab => Some((9, 'u')),
+        Key::Backspace => Some((127, 'u')),
+        Key::Escape => Some((27, 'u')),
+        Key::Up => Some((1, 'A')),
+        Key::Down => Some((1, 'B')),
+        Key::Right => Some((1, 'C')),
+        Key::Left => Some((1, 'D')),
+        Key::Home => Some((1, 'H')),
+        Key::End => Some((1, 'F')),
+        Key::Function(f @ 13..=25) => Some((57376 + u32::from(f - 13), 'u')),
+        Key::Keypad(n @ 0..=9) => Some((57399 + u32::from(n), 'u')),
+        Key::KeypadDecimal => Some((57409, 'u')),
+        Key::KeypadDivide => Some((57410, 'u')),
+        Key::KeypadMultiply => Some((57411, 'u')),
+        Key::KeypadSubtract => Some((57412, 'u')),
+        Key::KeypadAdd => Some((57413, 'u')),
+        Key::KeypadEnter => Some((57414, 'u')),
+        Key::Shift => Some((57441, 'u')),
+        Key::Control => Some((57442, 'u')),
+        Key::Alt => Some((57443, 'u')),
+        Key::Super => Some((57444, 'u')),
+        _ => functional(event.key),
     };
-    let mut output = format!("\x1b[{code}");
-    if flags & 4 != 0 && code > 31 && final_byte == 'u' {
-        let shifted = text
-            .chars()
-            .next()
-            .filter(|&cp| event.modifiers.shift && cp as u32 != code);
-        let base = match event.key {
-            Key::Char(cp) if cp as u32 != code => Some(cp),
-            _ => None,
+    let Some((code, final_byte)) = code else {
+        return if event.action == KeyAction::Release {
+            Vec::new()
+        } else {
+            text.as_bytes().to_vec()
         };
+    };
+    let mods = event.modifiers.kitty_number();
+    let event_number = match event.action {
+        KeyAction::Press => 1,
+        KeyAction::Repeat => 2,
+        KeyAction::Release => 3,
+    };
+    if !matches!(final_byte, 'u' | '~') {
+        return if report_events {
+            format!("\x1b[1;{mods}:{event_number}{final_byte}")
+        } else if mods > 1 {
+            format!("\x1b[1;{mods}{final_byte}")
+        } else {
+            format!("\x1b[{final_byte}")
+        }
+        .into_bytes();
+    }
+    let mut output = format!("\x1b[{code}");
+    if flags & 4 != 0 && code >= 32 && code != 127 {
+        let mut chars = text.chars();
+        let first = chars.next();
+        let has_second = chars.next().is_some();
+        let shifted = first.filter(|&cp| event.modifiers.shift && cp as u32 != code);
+        let base = physical_codepoint(event.key).filter(|&cp| {
+            cp as u32 != code && first.is_none_or(|first| first != cp && !has_second)
+        });
         if let Some(cp) = shifted {
             output.push_str(&format!(":{}", cp as u32));
         }
@@ -467,31 +619,31 @@ fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
             output.push_str(&format!(":{}", cp as u32));
         }
     }
-    let mods = event.modifiers.kitty_number();
-    let event_number = match event.action {
-        KeyAction::Press => 1,
-        KeyAction::Repeat => 2,
-        KeyAction::Release => 3,
-    };
-    let associated = flags & 16 != 0
-        && event.action != KeyAction::Release
-        && !event.modifiers.control
-        && !event.modifiers.alt
-        && !event.modifiers.super_key
-        && !text.is_empty();
-    if mods != 1 || report_events && event_number != 1 || associated {
+    let has_modifiers = mods != 1 || report_events && event_number != 1;
+    if has_modifiers {
         output.push_str(&format!(";{mods}"));
         if report_events && event_number != 1 {
             output.push_str(&format!(":{event_number}"));
         }
     }
-    if associated {
-        output.push(';');
-        for (index, cp) in text.chars().enumerate() {
-            if index != 0 {
-                output.push(':');
+    if flags & 16 != 0
+        && event.action != KeyAction::Release
+        && !event.modifiers.control
+        && !event.modifiers.alt
+        && !event.modifiers.super_key
+    {
+        let mut chars = text.chars().filter(|&cp| !is_control(cp)).peekable();
+        if chars.peek().is_some() {
+            if !has_modifiers {
+                output.push(';');
             }
-            output.push_str(&(cp as u32).to_string());
+            output.push(';');
+            for (index, cp) in chars.enumerate() {
+                if index != 0 {
+                    output.push(':');
+                }
+                output.push_str(&(cp as u32).to_string());
+            }
         }
     }
     output.push(final_byte);
@@ -533,9 +685,30 @@ mod tests {
         key.action = KeyAction::Release;
         assert_eq!(t.encode_key(&key), b"\x1b[97;5:3u");
         key = KeyEvent::new(Key::Char('a'));
-        assert_eq!(t.encode_key(&key), b"\x1b[97;1;97u");
+        assert_eq!(t.encode_key(&key), b"\x1b[97;;97u");
         t.feed(b"\x1b[<u");
         assert_eq!(t.encode_key(&key), b"a");
+    }
+    #[test]
+    fn keyboard_consumption_and_control_distinctions() {
+        let mut t = Terminal::new(80, 24, 10);
+        let mut key = KeyEvent::new(Key::Char('i'));
+        key.modifiers.control = true;
+        assert_eq!(t.encode_key(&key), b"\x1b[105;5u");
+        key = KeyEvent::new(Key::Char('a'));
+        key.text = Some("A".into());
+        key.modifiers.shift = true;
+        key.modifiers.control = true;
+        assert_eq!(t.encode_key(&key), b"\x1b[97;6u");
+        key.modifiers.control = false;
+        key.consumed_modifiers.shift = true;
+        t.feed(b"\x1b[>3u");
+        assert_eq!(t.encode_key(&key), b"A");
+        t.feed(b"\x1b[>24u");
+        assert_eq!(t.encode_key(&key), b"\x1b[97;2;65u");
+        key = KeyEvent::new(Key::Up);
+        t.feed(b"\x1b[>3u");
+        assert_eq!(t.encode_key(&key), b"\x1b[1;1:1A");
     }
     #[test]
     fn paste_frames_strip_unsafe_bytes_and_preserve_utf8() {

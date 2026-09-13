@@ -152,10 +152,14 @@ def input_requests():
                  "operations": [{"op": "write", "data": setup.encode().hex()}]
                  + [{"op": "input", "input": event} for event in events]}, covers)
 
-    keys = ["key_a", "key_z", "digit_0", "digit_2", "space", "tab", "enter", "escape", "backspace",
+    keys = ["space", "tab", "enter", "escape", "backspace", "backquote", "minus", "equal",
+            "bracket_left", "bracket_right", "backslash", "semicolon", "quote", "comma", "period", "slash",
             "arrow_up", "arrow_down", "arrow_left", "arrow_right", "home", "end", "page_up", "page_down",
             "insert", "delete", "numpad_0", "numpad_9", "numpad_enter", "numpad_add", "numpad_decimal",
             "shift_left", "control_left", "alt_left", "meta_left"] + [f"f{i}" for i in range(1, 26)]
+    keys += ["key_" + chr(cp) for cp in range(ord('a'), ord('z') + 1)] + [f"digit_{n}" for n in range(10)]
+    punctuation = dict(zip(("space", "backquote", "minus", "equal", "bracket_left", "bracket_right",
+                            "backslash", "semicolon", "quote", "comma", "period", "slash"), " `-=[]\\;',./"))
     configurations = [("legacy", ""), ("cursor", "\x1b[?1h"), ("keypad", "\x1b[?66h"),
                       ("backarrow", "\x1b[?67h"), ("alt-prefix-off", "\x1b[?1036l"),
                       ("modify-other", "\x1b[>4;2m")]
@@ -163,15 +167,28 @@ def input_requests():
     for mode, setup in configurations:
         for key in keys:
             events = []
-            for modifiers in (0, 1, 2, 4, 8, 3, 5, 7, 15, 16, 32, 48):
+            for modifiers in (*range(16), 16, 32, 48):
                 for action in ("press", "repeat", "release"):
-                    text = key[-1] if key.startswith(("key_", "digit_")) else " " if key == "space" else ""
+                    text = key[-1] if key.startswith(("key_", "digit_")) else punctuation.get(key, "")
                     base = text
                     if modifiers & 1:
                         text = text.upper()
                     events.append({"kind": "key", "key": key, "modifiers": modifiers, "action": action,
                                    "data": text.encode().hex(), "unshifted": ord(base) if base else 0})
             yield request(f"key/{mode}/{key}", setup, events, ["input.key"])
+    for flags in (0, 1, 3, 8, 24, 31):
+        for name, event in (
+            ("consumed-shift", {"key": "key_a", "data": "41", "modifiers": 1, "consumed_modifiers": 1, "unshifted": 97}),
+            ("consumed-alt", {"key": "key_e", "data": "c3a9", "modifiers": 4, "consumed_modifiers": 4, "unshifted": 101}),
+            ("empty-text", {"key": "key_a", "modifiers": 4, "unshifted": 97}),
+            ("shifted-layout", {"key": "key_a", "data": "d090", "modifiers": 1, "unshifted": 0x430}),
+            ("ctrl-layout", {"key": "key_c", "data": "d181", "modifiers": 2, "unshifted": 0x441}),
+            ("ime-enter", {"key": "enter", "data": "e697a5e69cac"}),
+            ("ime-backspace", {"key": "backspace", "data": "e697a5e69cac"}),
+            ("composing", {"key": "key_a", "data": "61", "composing": True, "unshifted": 97}),
+        ):
+            yield request(f"key/text-{flags}/{name}", f"\x1b[>{flags}u" if flags else "",
+                          [dict(event, kind="key")], ["input.key"])
     for mode in (9, 1000, 1002, 1003):
         for encoding in (0, 1005, 1006, 1015, 1016):
             setup = f"\x1b[?{mode}h" + (f"\x1b[?{encoding}h" if encoding else "")

@@ -59,3 +59,8 @@ configuration but does not restore or overwrite the regular app workspace.
 On a locked or headless Mac, set `RUSTTY_SMOKE_OFFSCREEN=1` for an offscreen
 Metal capture of the same host primitives. The report labels this mode; it does
 not verify that macOS presents the window on a physical display.
+The native smoke report includes event counts during its idle phase, distinguishing
+unchanged cursor events, actual pointer movement and egui repaint requests.
+Set `RUSTTY_SMOKE_HOVER=1` to require a stationary pointer over a shell pane
+during the idle interval. Move the pointer into a test pane before the 45-second
+timeout; leaving the pane or moving the pointer restarts the interval.

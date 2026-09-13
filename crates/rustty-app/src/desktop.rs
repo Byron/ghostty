@@ -810,8 +810,7 @@ impl App {
             .with_transparent(self.config().background_opacity < 1.0)
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)
-            .with_title_hidden(true)
-            .with_tabbing_identifier("rustty");
+            .with_title_hidden(true);
         let window = Arc::new(event_loop.create_window(attributes)?);
         if let Some(platform) = &self.platform {
             platform.configure_window(&window, quick, self.config())?;

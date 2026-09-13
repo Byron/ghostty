@@ -308,6 +308,9 @@ pub struct Config {
     pub clipboard_read: ClipboardAccess,
     pub clipboard_write: ClipboardAccess,
     pub confirm_close_surface: ConfirmCloseSurface,
+    pub wait_after_command: bool,
+    pub abnormal_command_exit_runtime: u32,
+    pub undo_timeout: Duration,
     pub quit_after_last_window_closed: bool,
     pub bell_features: BellFeatures,
     pub notify_on_command_finish: NotifyOnCommandFinish,
@@ -385,6 +388,9 @@ impl Default for Config {
             clipboard_read: ClipboardAccess::Ask,
             clipboard_write: ClipboardAccess::Allow,
             confirm_close_surface: ConfirmCloseSurface::True,
+            wait_after_command: false,
+            abnormal_command_exit_runtime: 250,
+            undo_timeout: Duration::from_secs(5),
             quit_after_last_window_closed: false,
             bell_features: BellFeatures::default(),
             notify_on_command_finish: NotifyOnCommandFinish::Never,
@@ -526,6 +532,20 @@ impl Config {
             "confirm-close-surface" => {
                 set!(confirm_close_surface, ConfirmCloseSurface::parse(value)?)
             }
+            "wait-after-command" => set!(wait_after_command, parse_bool(value)?),
+            "abnormal-command-exit-runtime" => set!(
+                abnormal_command_exit_runtime,
+                value
+                    .parse()
+                    .map_err(|_| "invalid abnormal command exit runtime")?
+            ),
+            "undo-timeout" => set!(undo_timeout, {
+                let timeout = parse_duration(value)?;
+                if std::time::Instant::now().checked_add(timeout).is_none() {
+                    return Err("undo timeout is too large");
+                }
+                timeout
+            }),
             "quit-after-last-window-closed" => {
                 set!(quit_after_last_window_closed, parse_bool(value)?)
             }

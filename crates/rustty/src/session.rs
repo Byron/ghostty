@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_PENDING_INPUT: usize = 16 * 1024 * 1024;
 
@@ -35,7 +35,12 @@ impl Default for SessionOptions {
 #[derive(Debug)]
 pub enum SessionEvent {
     Effect(Effect),
-    Exited { code: u32, signal: Option<String> },
+    Exited {
+        code: u32,
+        signal: Option<String>,
+        /// Wall time observed by the child owner, independent of event delivery.
+        runtime: Duration,
+    },
     OutputClosed,
     Error(String),
 }
@@ -203,6 +208,7 @@ impl Session {
         thread::Builder::new()
             .name("rustty-pty-wait".into())
             .spawn(move || {
+                let started = Instant::now();
                 let child = pair.slave.spawn_command(command).map_err(error);
                 drop(pair.slave);
                 let child = match child {
@@ -219,6 +225,7 @@ impl Session {
                     Ok(status) => SessionEvent::Exited {
                         code: status.exit_code(),
                         signal: status.signal().map(str::to_owned),
+                        runtime: started.elapsed(),
                     },
                     Err(e) => SessionEvent::Error(e.to_string()),
                 };
@@ -647,6 +654,7 @@ mod tests {
         let mut config = Config::default();
         config.scrollback_limit_bytes = None;
         config.scrollback_limit_lines = Some(4);
+        let before_spawn = Instant::now();
         let session = Session::spawn(
             &config,
             SessionOptions {
@@ -661,6 +669,13 @@ mod tests {
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
+        while !session.has_exited() {
+            assert!(Instant::now() < deadline, "child did not exit");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let maximum_runtime = before_spawn.elapsed();
+        // Simulate an app occupied with other work after the process has exited.
+        thread::sleep(Duration::from_millis(300));
         let (mut exited, mut eof) = (false, false);
         while !(exited && eof) {
             assert!(
@@ -669,8 +684,9 @@ mod tests {
             );
             for event in session.events() {
                 match event {
-                    SessionEvent::Exited { code, .. } => {
+                    SessionEvent::Exited { code, runtime, .. } => {
                         assert_eq!(code, 7);
+                        assert!(runtime <= maximum_runtime);
                         exited = true;
                     }
                     SessionEvent::OutputClosed => eof = true,

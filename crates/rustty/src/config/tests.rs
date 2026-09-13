@@ -656,3 +656,24 @@ fn symlink_cycles_and_invalid_utf8_are_reported_without_fallback() {
     assert_eq!(loaded.config.font_size, 13.0);
     assert_eq!(loaded.diagnostics.len(), 1);
 }
+
+#[test]
+fn command_exit_and_undo_settings_keep_ghostty_defaults_and_units() {
+    let defaults = Config::default();
+    assert!(!defaults.wait_after_command);
+    assert_eq!(defaults.abnormal_command_exit_runtime, 250);
+    assert_eq!(defaults.undo_timeout, Duration::from_secs(5));
+    let home = TestHome::new();
+    home.own("wait-after-command=true\nabnormal-command-exit-runtime=20\nundo-timeout=1m 5s\n");
+    let loaded = home.loader.load();
+    assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+    assert!(loaded.config.wait_after_command);
+    assert_eq!(loaded.config.abnormal_command_exit_runtime, 20);
+    assert_eq!(loaded.config.undo_timeout, Duration::from_secs(65));
+    home.own("undo-timeout=1m\nundo-timeout=\n");
+    let reset = home.loader.load();
+    assert!(reset.diagnostics.is_empty());
+    assert_eq!(reset.config.undo_timeout, Duration::from_secs(5));
+    home.own("wait-after-command=perhaps\nabnormal-command-exit-runtime=-1\nundo-timeout=-2s\n");
+    assert_eq!(home.loader.load().diagnostics.len(), 3);
+}

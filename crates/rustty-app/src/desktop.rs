@@ -61,6 +61,8 @@ struct Pane {
     running: Option<Instant>,
     unseen: bool,
     exited: bool,
+    started: Instant,
+    exit_message: Option<String>,
 }
 impl Pane {
     fn write(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
@@ -199,6 +201,8 @@ struct App {
     state_path: PathBuf,
     resources: Option<PathBuf>,
     panes: HashMap<Id, Pane>,
+    failed_panes: BTreeMap<Id, String>,
+    closing: Vec<Session>,
     windows: HashMap<WindowId, Host>,
     platform: Option<Platform>,
     context: egui::Context,
@@ -208,9 +212,9 @@ struct App {
     started: Instant,
     save_at: Option<Instant>,
     errors: Vec<String>,
-    history: Vec<Workspace>,
-    redo: Vec<Workspace>,
-    initial_command_used: bool,
+    history: Vec<(Instant, Workspace)>,
+    redo: Vec<(Instant, Workspace)>,
+    initial_command_pane: Option<Id>,
     close_at: Option<Instant>,
     smoke: Option<smoke::Smoke>,
     smoke_error: Option<String>,
@@ -306,6 +310,8 @@ pub fn run() -> Result<()> {
         state_path,
         resources,
         panes: HashMap::new(),
+        failed_panes: BTreeMap::new(),
+        closing: Vec::new(),
         windows: HashMap::new(),
         platform: None,
         context,
@@ -317,13 +323,15 @@ pub fn run() -> Result<()> {
         errors,
         history: Vec::new(),
         redo: Vec::new(),
-        initial_command_used: false,
+        initial_command_pane: None,
         close_at,
         smoke,
         smoke_error: None,
         primary_selection: None,
     };
-    event_loop.run_app(&mut app)?;
+    let result = event_loop.run_app(&mut app);
+    app.shutdown();
+    result?;
     if let Some(error) = app.smoke_error {
         return Err(error.into());
     }
@@ -432,7 +440,12 @@ impl App {
         self.save_at = Some(Instant::now() + Duration::from_millis(500));
     }
     fn remember(&mut self) {
-        self.history.push(self.workspace.clone());
+        if !self.config().undo_timeout.is_zero() {
+            self.history.push((
+                Instant::now() + self.config().undo_timeout,
+                self.workspace.clone(),
+            ));
+        }
         if self.history.len() > 50 {
             self.history.remove(0);
         }
@@ -462,7 +475,7 @@ impl App {
         id
     }
     fn spawn_pane(&mut self, id: Id, directory: PathBuf) -> Result<()> {
-        if self.panes.contains_key(&id) {
+        if self.panes.contains_key(&id) || self.failed_panes.contains_key(&id) {
             return Ok(());
         }
         let directory = directory_from_osc(&directory.to_string_lossy())
@@ -483,13 +496,12 @@ impl App {
                 let _ = proxy.send_event(Event::Output(id));
             }
         });
-        let command = if self.initial_command_used {
-            None
-        } else {
-            self.initial_command_used = true;
-            self.config().initial_command.clone()
-        };
-        let session = Session::spawn(
+        let initial = *self.initial_command_pane.get_or_insert(id);
+        let command = (id == initial)
+            .then(|| self.config().initial_command.clone())
+            .flatten();
+        let started = Instant::now();
+        let session = match Session::spawn(
             self.config(),
             SessionOptions {
                 working_directory: Some(directory.clone()),
@@ -498,7 +510,13 @@ impl App {
                 ..Default::default()
             },
             wake,
-        )?;
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                self.failed_panes.insert(id, error.to_string());
+                return Err(error.into());
+            }
+        };
         self.panes.insert(
             id,
             Pane {
@@ -511,6 +529,8 @@ impl App {
                 running: None,
                 unseen: false,
                 exited: false,
+                started,
+                exit_message: None,
             },
         );
         Ok(())
@@ -677,6 +697,12 @@ impl App {
         self.changed();
     }
     fn drain(&mut self, id: Id) {
+        let live = self
+            .workspace
+            .windows
+            .iter()
+            .any(|window| window.tabs.iter().any(|tab| tab.panes.contains_key(&id)));
+        let mut close = false;
         let focused = self
             .windows
             .values()
@@ -714,7 +740,8 @@ impl App {
                                 && !focused)
                     {
                         pane.unseen = !focused;
-                        if config.notify_on_command_finish_action.notify
+                        if live
+                            && config.notify_on_command_finish_action.notify
                             && let Some(platform) = &self.platform
                         {
                             let body = format!(
@@ -730,8 +757,13 @@ impl App {
                 }
                 SessionEvent::Effect(vt::Effect::Notification { title, body }) => {
                     pane.unseen = !focused;
-                    if let Some(platform) = &self.platform
-                        && let Err(error) = platform.notify(id, &String::from_utf8_lossy(&title), &String::from_utf8_lossy(&body))
+                    if live
+                        && let Some(platform) = &self.platform
+                        && let Err(error) = platform.notify(
+                            id,
+                            &String::from_utf8_lossy(&title),
+                            &String::from_utf8_lossy(&body),
+                        )
                     {
                         self.errors.push(error);
                     }
@@ -771,19 +803,30 @@ impl App {
                         }
                     }
                 }
-                SessionEvent::Exited { code, signal } => {
+                SessionEvent::Exited {
+                    code,
+                    signal,
+                    runtime,
+                } => {
                     pane.exited = true;
                     pane.running = None;
                     pane.title = format!(
                         "Exited {code}{}",
                         signal.map(|s| format!(" ({s})")).unwrap_or_default()
                     );
+                    pane.exit_message = Some(format!("{} — press any key to close", pane.title));
+                    close = live && !hold_after_exit(&config, runtime);
                 }
                 SessionEvent::Error(error) => self.errors.push(error),
                 _ => {}
             }
         }
         let cwd = pane.cwd.clone();
+        if close {
+            self.remember();
+            self.workspace.close_pane(id);
+            self.changed();
+        }
         let mut changed = false;
         for window in &mut self.workspace.windows {
             for tab in &mut window.tabs {
@@ -799,7 +842,15 @@ impl App {
             self.changed();
         }
         if let Some(platform) = &self.platform {
-            platform.set_badge(self.panes.values().filter(|pane| pane.unseen).count());
+            platform.set_badge(
+                self.workspace
+                    .windows
+                    .iter()
+                    .flat_map(|window| &window.tabs)
+                    .flat_map(|tab| tab.panes.keys())
+                    .filter(|id| self.panes.get(id).is_some_and(|pane| pane.unseen))
+                    .count(),
+            );
         }
         for host in self.windows.values() {
             if self
@@ -857,7 +908,13 @@ impl App {
                             .collect()
                     })
                     .unwrap_or_default(),
-                _ => self.panes.keys().copied().collect(),
+                _ => self
+                    .workspace
+                    .windows
+                    .iter()
+                    .flat_map(|window| &window.tabs)
+                    .flat_map(|tab| tab.panes.keys().copied())
+                    .collect(),
             };
             let needs_confirmation = candidates.iter().any(|id| {
                 self.panes.get(id).is_some_and(|p| {
@@ -1259,6 +1316,7 @@ impl App {
                 Ok(loaded) => {
                     self.errors = loaded.diagnostics.iter().map(ToString::to_string).collect();
                     self.loaded = loaded;
+                    self.failed_panes.clear();
                     if let Some(platform) = &mut self.platform
                         && let Err(error) = platform.update_config(&self.loaded.config)
                     {
@@ -1302,24 +1360,35 @@ impl App {
                 }
             }
             Action::Undo | Action::Redo => {
-                let previous = if action == Action::Undo {
-                    self.history.pop()
-                } else {
-                    self.redo.pop()
-                };
-                let Some(previous) = previous else {
+                if !self.undo_layout(action == Action::Redo) {
                     return false;
-                };
-                let current = std::mem::replace(&mut self.workspace, previous);
-                if action == Action::Undo {
-                    self.redo.push(current);
-                } else {
-                    self.history.push(current);
                 }
             }
         }
         self.changed();
         host.repaint();
+        true
+    }
+    fn undo_layout(&mut self, redo: bool) -> bool {
+        let now = Instant::now();
+        self.history.retain(|(expires, _)| *expires > now);
+        self.redo.retain(|(expires, _)| *expires > now);
+        let previous = if redo {
+            self.redo.pop()
+        } else {
+            self.history.pop()
+        };
+        let Some((_, previous)) = previous else {
+            return false;
+        };
+        let current = self.workspace.restore(previous);
+        let record = (now + self.config().undo_timeout, current);
+        if redo {
+            self.history.push(record);
+        } else {
+            self.redo.push(record);
+        }
+        self.changed();
         true
     }
     fn update_fonts(&mut self, host: &mut Host) {
@@ -1392,11 +1461,45 @@ impl App {
             .flat_map(|t| &t.panes)
             .map(|(&id, s)| (id, s.working_directory.clone()))
             .collect::<BTreeMap<_, _>>();
-        self.panes.retain(|id, _| required.contains_key(id));
+        let mut retained = required
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        for (_, state) in self.history.iter().chain(&self.redo) {
+            retained.extend(
+                state
+                    .windows
+                    .iter()
+                    .flat_map(|window| &window.tabs)
+                    .flat_map(|tab| tab.panes.keys().copied()),
+            );
+        }
+        for (_, pane) in self.panes.extract_if(|id, _| !retained.contains(id)) {
+            pane.session.close();
+            self.closing.push(pane.session);
+        }
+        self.closing.retain(|session| !session.has_exited());
+        self.failed_panes.retain(|id, _| retained.contains(id));
         for (id, directory) in required {
             if let Err(error) = self.spawn_pane(id, directory) {
                 self.errors.push(error.to_string());
             }
+        }
+        let mut directories_changed = false;
+        for window in &mut self.workspace.windows {
+            for tab in &mut window.tabs {
+                for (id, saved) in &mut tab.panes {
+                    if let Some(pane) = self.panes.get(id)
+                        && saved.working_directory != pane.cwd
+                    {
+                        saved.working_directory = pane.cwd.clone();
+                        directories_changed = true;
+                    }
+                }
+            }
+        }
+        if directories_changed {
+            self.changed();
         }
         for id in self
             .workspace
@@ -1454,7 +1557,14 @@ impl App {
                     if binding.flags.all
                         && let Action::Text(bytes) = action
                     {
-                        for id in self.panes.keys().copied().collect::<Vec<_>>() {
+                        for id in self
+                            .workspace
+                            .windows
+                            .iter()
+                            .flat_map(|window| &window.tabs)
+                            .flat_map(|tab| tab.panes.keys().copied())
+                            .collect::<Vec<_>>()
+                        {
                             self.write(id, bytes.clone());
                         }
                         performed = true;
@@ -1540,6 +1650,7 @@ impl App {
         let context = self.context.clone();
         let mut commands = Vec::new();
         let mut tab_selection = None;
+        let mut retry_pane = None;
         let mut render_error = None;
         let format = self
             .painter
@@ -1759,6 +1870,7 @@ impl App {
                             };
                             let is_focused = host.focused && id == focused && host.peek.is_none();
                             needs_blink |= is_focused
+                                && !pane.exited
                                 && snapshot.screen.cursor.visible
                                 && snapshot.screen.cursor.blink;
                             let cursor_color = snapshot.cursor_color.unwrap_or(snapshot.foreground);
@@ -1788,7 +1900,7 @@ impl App {
                                     .try_into()
                                     .unwrap_or([[0; 3]; 256]),
                                 focused: is_focused,
-                                cursor_visible: id != focused || !host.composing,
+                                cursor_visible: !pane.exited && (id != focused || !host.composing),
                                 blink_visible: blink_on || !is_focused,
                                 background_opacity: config.background_opacity,
                                 preedit: (is_focused && !host.preedit.is_empty()).then(|| {
@@ -1980,6 +2092,39 @@ impl App {
                             }
                         }
                     }
+                    for (&id, &rect) in &host.rects {
+                        if let Some(error) = self.failed_panes.get(&id) {
+                            ui.scope_builder(
+                                egui::UiBuilder::new().max_rect(rect.shrink(20.0)),
+                                |ui| {
+                                    ui.label(format!("Could not start terminal: {error}"));
+                                    if ui.button("Retry").clicked() {
+                                        retry_pane = Some(id);
+                                    }
+                                },
+                            );
+                        } else if let Some(message) = self
+                            .panes
+                            .get(&id)
+                            .and_then(|pane| pane.exit_message.as_ref())
+                        {
+                            let galley = ui.painter().layout_no_wrap(
+                                message.clone(),
+                                egui::FontId::proportional(13.0),
+                                Color32::WHITE,
+                            );
+                            let bounds = egui::Rect::from_center_size(
+                                rect.center_bottom() - Vec2::new(0.0, 20.0),
+                                galley.size(),
+                            );
+                            ui.painter().rect_filled(
+                                bounds.expand(5.0),
+                                3.0,
+                                Color32::from_black_alpha(230),
+                            );
+                            ui.painter().galley(bounds.min, galley, Color32::WHITE);
+                        }
+                    }
                     if let Some(peek) = host.peek {
                         let mut quadrants = BTreeMap::<Id, egui::Rect>::new();
                         for (&pane, &rect) in &host.rects {
@@ -2135,6 +2280,9 @@ impl App {
             self.focus_pane(host.id, pane);
             host.peek = None;
             host.repaint();
+        }
+        if let Some(id) = retry_pane {
+            self.failed_panes.remove(&id);
         }
         for action in commands {
             self.action(event_loop, host, action, false);
@@ -2406,7 +2554,10 @@ impl ApplicationHandler<Event> for App {
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
-            Event::Output(id) => self.drain(id),
+            Event::Output(id) => {
+                self.drain(id);
+                self.reconcile(event_loop);
+            }
             Event::Repaint(viewport, delay) => {
                 if let Some(host) = self
                     .windows
@@ -2456,6 +2607,10 @@ impl ApplicationHandler<Event> for App {
                         self.action(event_loop, &mut host, action, false);
                         self.windows.insert(key, host);
                         self.reconcile(event_loop);
+                    } else if matches!(action, Action::Undo | Action::Redo) {
+                        if self.undo_layout(action == Action::Redo) {
+                            self.reconcile(event_loop);
+                        }
                     } else if action == Action::ToggleQuickTerminal {
                         let id = self.add_window(true);
                         self.reconcile(event_loop);
@@ -2822,6 +2977,12 @@ impl ApplicationHandler<Event> for App {
             }
         }
         let now = Instant::now();
+        let count = self.history.len() + self.redo.len();
+        self.history.retain(|(expires, _)| *expires > now);
+        self.redo.retain(|(expires, _)| *expires > now);
+        if count != self.history.len() + self.redo.len() || !self.closing.is_empty() {
+            self.reconcile(event_loop);
+        }
         if self.close_at.is_some_and(|at| at <= now) {
             self.save();
             event_loop.exit();
@@ -2834,6 +2995,13 @@ impl ApplicationHandler<Event> for App {
             .save_at
             .into_iter()
             .chain(self.close_at)
+            .chain((!self.closing.is_empty()).then_some(now + Duration::from_millis(20)))
+            .chain(
+                self.history
+                    .iter()
+                    .chain(&self.redo)
+                    .map(|(expires, _)| *expires),
+            )
             .chain(self.smoke.as_ref().map(|_| now + Duration::from_millis(50)))
             .min();
         for host in self.windows.values_mut() {
@@ -2850,8 +3018,59 @@ impl ApplicationHandler<Event> for App {
     }
     fn exiting(&mut self, _: &ActiveEventLoop) {
         self.save();
-        self.panes.clear();
+        for session in self
+            .panes
+            .values()
+            .map(|pane| &pane.session)
+            .chain(&self.closing)
+        {
+            session.close();
+        }
     }
+}
+
+impl App {
+    fn shutdown(&mut self) {
+        for host in self.windows.values() {
+            host.window.set_visible(false);
+        }
+        for session in self
+            .panes
+            .values()
+            .map(|pane| &pane.session)
+            .chain(&self.closing)
+        {
+            session.close();
+        }
+        // Window callbacks are finished. Give the child-owner workers a bounded
+        // interval for HUP/SIGKILL escalation and reaping before main returns.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && self
+                .panes
+                .values()
+                .map(|pane| &pane.session)
+                .chain(&self.closing)
+                .any(|session| !session.has_exited())
+        {
+            for session in self
+                .panes
+                .values()
+                .map(|pane| &pane.session)
+                .chain(&self.closing)
+            {
+                session.events().for_each(drop);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.panes.clear();
+        self.closing.clear();
+    }
+}
+
+fn hold_after_exit(config: &Config, runtime: Duration) -> bool {
+    config.wait_after_command
+        || runtime.as_millis() <= u128::from(config.abnormal_command_exit_runtime)
 }
 
 fn directory_from_osc(value: &str) -> Option<PathBuf> {
@@ -2900,6 +3119,17 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shell_exit_policy_holds_fast_failures_and_respects_wait_setting() {
+        let mut config = Config::default();
+        assert!(hold_after_exit(&config, Duration::from_millis(250)));
+        assert!(!hold_after_exit(&config, Duration::from_secs(1)));
+        config.wait_after_command = true;
+        assert!(hold_after_exit(&config, Duration::from_secs(100)));
+        config.wait_after_command = false;
+        config.abnormal_command_exit_runtime = 0;
+        assert!(!hold_after_exit(&config, Duration::from_millis(1)));
+    }
     #[test]
     fn cwd_reports_become_absolute_paths_before_restoration() {
         assert_eq!(

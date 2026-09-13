@@ -279,6 +279,18 @@ These comparisons use `feed_with_handler` with the reference's absent callback
 defaults. The asynchronous `feed` API's configurable application defaults are
 covered by core tests rather than being substituted for these reference defaults.
 
+`--protocols --case protocol/dnd` compares Kitty OSC 72 commands and host drag
+actions without starting an OS drag session. The `dnd` operation observes state
+or sends `move`, `drop` and `leave`; MIME names and dropped bytes use hex. The
+suite compares registration, acceptance and held data, first-chunk metadata,
+binary/plain response boundaries, MIME/item limits, local-only errors, RIS
+retention and both snapshot encodings. Callback records include state at each
+event, so multiple registrations in one input read cannot hide lost metadata.
+`EffectHandler::drag_and_drop` borrows that state synchronously; deferred `feed`
+returns event tags. The 8 MiB OSC capture boundary still exceeds the harness's
+hex request budget and remains unverified, as do allocation failures and direct
+utility APIs.
+
 Mode fixtures read the available ANSI/DEC entries from the original source.
 `observe_modes` selects mode tags (`number`, `private`) whose current, saved,
 reset-default and report values are compared. `observe_mode_effects` additionally

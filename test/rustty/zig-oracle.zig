@@ -11,6 +11,7 @@ const grid_adapter = @import("zig-grid.zig");
 const glyph_adapter = @import("zig-glyph.zig");
 const page_layout_adapter = @import("zig-page-layout.zig");
 const pages_adapter = @import("zig-pages.zig");
+const dnd_adapter = @import("zig-dnd.zig");
 const Allocator = std.mem.Allocator;
 // libghostty-vt exposes this type through the callback without re-exporting
 // the implementation module. Use that public signature as the source of truth.
@@ -20,6 +21,7 @@ const DeviceAttributes = @typeInfo(@typeInfo(DeviceAttributesFn).pointer.child).
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
+    "drag-and-drop",
     "terminal.pages",
     "graphics.glyphs",
     "terminal.page-layout",
@@ -75,6 +77,7 @@ const Operation = struct {
     colors: ?ColorDefaults = null,
     grid: ?grid_adapter.Operation = null,
     glyph_max_bytes: ?usize = null,
+    dnd: ?dnd_adapter.Operation = null,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -94,6 +97,7 @@ const Request = struct {
     observe_colors: bool = false,
     observe_semantic: bool = false,
     observe_graphics: bool = false,
+    dnd_events: bool = true,
     color_inputs: []const []const u8 = &.{},
     page_layout: ?page_layout_adapter.Request = null,
 };
@@ -265,6 +269,7 @@ const Event = struct {
     notification: ?Notification = null,
     progress: ?Progress = null,
     clipboard: ?Clipboard = null,
+    dnd_state: ?dnd_adapter.State = null,
 };
 const SnapshotProgress = struct {
     stage: []const u8,
@@ -291,6 +296,7 @@ const Response = struct {
     page_layout: ?page_layout_adapter.Result = null,
     glyph_results: []const glyph_adapter.State = &.{},
     page_results: []const pages_adapter.State = &.{},
+    dnd_results: []const ?dnd_adapter.State = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -306,6 +312,7 @@ const Context = struct {
     clipboard_write_enabled: bool,
     clipboard_write_limit: usize,
     host: DecodedHost,
+    dnd_events: bool,
 
     fn append(kind: []const u8, bytes: []const u8) void {
         const self = current.?;
@@ -326,6 +333,13 @@ const Context = struct {
     }
     fn bell(_: *vt.TerminalStream.Handler) void {
         append("bell", "");
+    }
+    fn dragAndDrop(handler: *vt.TerminalStream.Handler, value: vt.kitty.dnd.Event) void {
+        record(.{
+            .kind = "dnd",
+            .data = encoded(@tagName(value)),
+            .dnd_state = dnd_adapter.observe(current.?.alloc, handler.terminal) catch @panic("oracle allocation failed"),
+        });
     }
     fn title(h: *vt.TerminalStream.Handler) void {
         append("title", h.terminal.getTitle() orelse "");
@@ -520,6 +534,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         .clipboard_write_enabled = request.clipboard_write_enabled,
         .clipboard_write_limit = request.clipboard_write_limit,
         .host = try DecodedHost.init(alloc, request.host),
+        .dnd_events = request.dnd_events,
     };
     current = &ctx;
     defer current = null;
@@ -532,6 +547,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     var grid_results: std.ArrayList(grid_adapter.Result) = .empty;
     var glyph_results: std.ArrayList(glyph_adapter.State) = .empty;
     var page_results: std.ArrayList(pages_adapter.State) = .empty;
+    var dnd_results: std.ArrayList(?dnd_adapter.State) = .empty;
     var snapshots: std.ArrayList([]const u8) = .empty;
     var snapshot_source: std.Io.Reader = .fixed(&.{});
     var snapshot_decoder: ?vt.snapshot.Decoder = null;
@@ -539,6 +555,12 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     for (request.operations) |op| {
         if (std.mem.eql(u8, op.op, "pages")) {
             try page_results.append(alloc, try pages_adapter.observe(alloc, &t));
+        } else if (std.mem.eql(u8, op.op, "dnd")) {
+            var output: std.Io.Writer.Allocating = .init(alloc);
+            defer output.deinit();
+            const state = try dnd_adapter.run(alloc, &t, &output.writer, op.dnd orelse return error.MissingDndOperation);
+            if (output.written().len > 0) Context.append("write", output.written());
+            try dnd_results.append(alloc, state);
         } else if (std.mem.eql(u8, op.op, "write")) {
             const bytes = try hexDecode(alloc, op.data);
             if (request.scalar) {
@@ -635,6 +657,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             grid_results.clearRetainingCapacity();
             glyph_results.clearRetainingCapacity();
             page_results.clearRetainingCapacity();
+            dnd_results.clearRetainingCapacity();
         } else if (std.mem.eql(u8, op.op, "snapshot")) {
             var continuation: std.Io.Writer.Allocating = .init(alloc);
             try stream.writeContinuation(&continuation.writer);
@@ -684,6 +707,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     response.grid_results = grid_results.items;
     response.glyph_results = glyph_results.items;
     response.page_results = page_results.items;
+    response.dnd_results = dnd_results.items;
     return response;
 }
 
@@ -710,6 +734,7 @@ fn terminalStream(alloc: Allocator, terminal: *vt.Terminal) vt.TerminalStream {
     result.handler.effects.pwd_changed = Context.pwd;
     result.handler.effects.desktop_notification = Context.notification;
     result.handler.effects.progress_report = Context.progress;
+    result.handler.effects.drag_and_drop = if (current.?.dnd_events) Context.dragAndDrop else null;
     configureClipboard(&result);
     configureHost(&result);
     return result;

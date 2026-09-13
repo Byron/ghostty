@@ -138,8 +138,8 @@
     },
     {
       "id": "drag-and-drop",
-      "status": "pending",
-      "remaining": "Host and terminal directions of Kitty drag/drop state."
+      "status": "partial",
+      "remaining": "OSC 72 metadata, registration/status chunks, callback-time state, host move/drop/leave, binary data replies, local-only errors, MIME/item limits, reset retention and snapshot omission are compared. The 8 MiB OSC capture boundary, allocation failures and direct utility APIs remain."
     },
     {
       "id": "input.key",

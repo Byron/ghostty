@@ -43,6 +43,7 @@ python3 test/rustty/parity.py --no-build --snapshot-wire
 python3 test/rustty/parity.py --no-build --protocols
 python3 test/rustty/parity.py --no-build --grid
 python3 test/rustty/parity.py --no-build --page-layout
+python3 test/rustty/parity.py --pages
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
@@ -128,9 +129,21 @@ search parity; the coverage entry remains partial. `--thorough` includes this
 matrix.
 
 Production scrollback limits use these native dimension-dependent minimums,
-including a zero line limit. Only zero bytes disables normal scrollback. Row
-pruning and Rust allocation charges still differ from native page retention;
-minimum-limit comparisons do not establish full storage compatibility.
+including a zero line limit. Only zero bytes disables normal scrollback.
+Storage charges and pruning use retained page allocations and complete history
+pages. Minimum-limit comparisons alone do not establish full storage compatibility.
+
+`--pages` compares each actual storage page's logical columns, used rows,
+capacity, pooled ownership and allocation charge, plus each screen's aggregate
+row and byte totals. A `pages` operation appends this state to `page_results`.
+Large storage cases use `kind=input` to avoid serializing unrelated cells.
+Boundaries and allocation metadata are compared without regrouping rows or
+normalizing values. The retained cases exercise growth, limits, clearing,
+resize and snapshot admission; resource-driven page splitting remains partial.
+The harness builds the native core in ReleaseSafe for `--pages` and `--thorough`:
+runtime safety remains enabled, while debug-only full-page integrity scans on
+every edit would make large boundary cases quadratic. When reusing binaries with
+`--no-build`, build the oracle with `-Doptimize=ReleaseSafe` for these cases.
 
 Grid cases cover live writes, erasure, reflow, height changes, screen switches,
 resets, handle reuse and scrollback limits, including release of an inactive

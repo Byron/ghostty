@@ -2,25 +2,34 @@
 use crate::page_layout::{BitmapLayout, SetLayout};
 use crate::screen::Style;
 
-/// The insertion-only phase of native PAGE style decoding.
+/// The insertion-only phase of native PAGE reference-counted set decoding.
 ///
 /// Every accepted wire ID retains its reference until all styles and cells
 /// have been decoded. No item can die during admission, but reference counts
 /// still decide ties when Robin Hood insertion displaces an existing item.
-pub(crate) struct StyleAdmission {
+pub(crate) struct SetAdmission<T> {
     table: Vec<u16>,
-    entries: Vec<StyleEntry>,
+    entries: Vec<SetEntry<T>>,
     capacity: usize,
     max_psl: u8,
 }
 
-struct StyleEntry {
-    value: Style,
+struct SetEntry<T> {
+    value: T,
     references: u16,
     psl: u8,
 }
 
+pub(crate) type StyleAdmission = SetAdmission<Style>;
+
 impl StyleAdmission {
+    /// Default styles need no resource; existing styles take another reference.
+    pub fn admit(&mut self, value: Style) -> bool {
+        value == Style::default() || self.admit_hashed(value, value.native_hash())
+    }
+}
+
+impl<T: Eq> SetAdmission<T> {
     pub fn new(layout: SetLayout) -> Self {
         Self {
             table: vec![0; layout.table_cap],
@@ -30,12 +39,8 @@ impl StyleAdmission {
         }
     }
 
-    /// Default styles need no resource; existing styles take another reference.
-    pub fn admit(&mut self, value: Style) -> bool {
-        if value == Style::default() {
-            return true;
-        }
-        let hash = value.native_hash() as usize;
+    pub fn admit_hashed(&mut self, value: T, hash: u64) -> bool {
+        let hash = hash as usize;
         let mask = self.table.len().saturating_sub(1);
         if !self.table.is_empty() {
             for psl in 0..=self.max_psl {
@@ -60,7 +65,7 @@ impl StyleAdmission {
         }
 
         let new_id = u16::try_from(self.entries.len() + 1).unwrap();
-        self.entries.push(StyleEntry {
+        self.entries.push(SetEntry {
             value,
             references: 0,
             psl: 0,
@@ -234,11 +239,151 @@ fn find_free_chunks(bitmaps: &[u64], count: usize) -> Option<usize> {
     None
 }
 
+/// The native page hyperlink hash includes ID kind, raw strings and their
+/// machine-sized lengths. Keep that representation for resource admission.
+pub(crate) fn hyperlink_hash(id: &crate::screen::HyperlinkId, uri: &[u8]) -> u64 {
+    let mut bytes = Vec::new();
+    match id {
+        crate::screen::HyperlinkId::Explicit(id) => {
+            bytes.push(0);
+            bytes.extend_from_slice(id);
+            bytes.extend_from_slice(&id.len().to_le_bytes());
+        }
+        crate::screen::HyperlinkId::Implicit(id) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+    }
+    bytes.extend_from_slice(uri);
+    bytes.extend_from_slice(&uri.len().to_le_bytes());
+    wyhash(&bytes)
+}
+
+// Zig std.hash.Wyhash's one-shot path with seed zero. Reuse it for the native
+// admission hash; Rust's randomized HashMap hash would change collision limits.
+fn wyhash(bytes: &[u8]) -> u64 {
+    const SECRET: [u64; 4] = [
+        0xa0761d6478bd642f,
+        0xe7037ed1a0b428db,
+        0x8ebc6af09c88c6e3,
+        0x589965cc75374cc3,
+    ];
+    fn mix(a: u64, b: u64) -> u64 {
+        let product = u128::from(a) * u128::from(b);
+        product as u64 ^ (product >> 64) as u64
+    }
+    fn read8(bytes: &[u8]) -> u64 {
+        u64::from_le_bytes(bytes[..8].try_into().unwrap())
+    }
+    fn read4(bytes: &[u8]) -> u64 {
+        u32::from_le_bytes(bytes[..4].try_into().unwrap()).into()
+    }
+
+    let mut state = [mix(SECRET[0], SECRET[1]); 3];
+    let (mut a, mut b) = if bytes.len() <= 16 {
+        if bytes.len() >= 4 {
+            let end = bytes.len() - 4;
+            let quarter = (bytes.len() >> 3) << 2;
+            (
+                (read4(bytes) << 32) | read4(&bytes[quarter..]),
+                (read4(&bytes[end..]) << 32) | read4(&bytes[end - quarter..]),
+            )
+        } else if !bytes.is_empty() {
+            (
+                (u64::from(bytes[0]) << 16)
+                    | (u64::from(bytes[bytes.len() >> 1]) << 8)
+                    | u64::from(bytes[bytes.len() - 1]),
+                0,
+            )
+        } else {
+            (0, 0)
+        }
+    } else {
+        let mut offset = 0;
+        if bytes.len() >= 48 {
+            while offset + 48 < bytes.len() {
+                for i in 0..3 {
+                    let chunk = &bytes[offset + 16 * i..];
+                    state[i] = mix(read8(chunk) ^ SECRET[i + 1], read8(&chunk[8..]) ^ state[i]);
+                }
+                offset += 48;
+            }
+            state[0] ^= state[1] ^ state[2];
+        }
+        while offset + 16 < bytes.len() {
+            state[0] = mix(
+                read8(&bytes[offset..]) ^ SECRET[1],
+                read8(&bytes[offset + 8..]) ^ state[0],
+            );
+            offset += 16;
+        }
+        (
+            read8(&bytes[bytes.len() - 16..]),
+            read8(&bytes[bytes.len() - 8..]),
+        )
+    };
+    a ^= SECRET[1];
+    b ^= state[0];
+    let product = u128::from(a) * u128::from(b);
+    mix(
+        product as u64 ^ SECRET[0] ^ bytes.len() as u64,
+        (product >> 64) as u64 ^ SECRET[1],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::page_layout::PageCapacity;
     use crate::screen::Color;
+
+    #[test]
+    fn hyperlink_hash_matches_native_page_entry_vectors() {
+        use crate::screen::HyperlinkId;
+        // Native PageEntry.hash on macOS ARM64, including the 16/48-byte
+        // Wyhash boundaries and raw binary URI/ID strings.
+        let vectors = [
+            (0, 0x8ca46852722ececa, 0xea584159da1c779f),
+            (1, 0x22caeae0ed236f09, 0x5e1845c6a0962c92),
+            (2, 0x7b726a8475e68706, 0x333e7aebe4e18ade),
+            (3, 0xbf820fa1d9be285f, 0xcad4ab387e858e75),
+            (4, 0x918fdce1766e7fa3, 0x3d5351f7c5600d99),
+            (8, 0xfbfbf09bfb803b5d, 0x255b5f48b5ac1c27),
+            (15, 0xac96333ec480985c, 0x72ae9a546971c06b),
+            (16, 0x88b1cf6377bc8c37, 0x8a56db12c261c914),
+            (17, 0xc26652a324feb74e, 0x8f3e0095b4c8ba57),
+            (31, 0x4f2e3a9aa46c2192, 0x8a52b63418672ed4),
+            (32, 0x922fd9fd53ea99bf, 0xac7fc83006291f62),
+            (33, 0x1c09df58ddfd7522, 0x8b32444d8b27738d),
+            (35, 0x89e8ea3835745eb9, 0x9d174d4c52f89ae7),
+            (36, 0xa32dc6b2460fbdeb, 0xff0fdd189fac8629),
+            (47, 0xe25fd0283c6705a3, 0xf32f43078a3b0d65),
+            (48, 0xd100975c254ee54f, 0xb21c1077e0ce6139),
+            (49, 0xaa2e5a1d228dffa9, 0x4c349863cf66410e),
+            (50, 0x4c10afa4a2588c50, 0x42322df84a406b20),
+            (63, 0xae7e6922a158f652, 0x58ce416647b15d0b),
+            (64, 0x357f83fb8d57310, 0xf11a6c1ded38001f),
+            (65, 0xc2a4908e64c4d5c4, 0xbbda3a747839f1e3),
+            (95, 0x4a689a7a88531d7c, 0xdbe9a8b4bd4ce96a),
+            (96, 0x80c4a91ae8a6421, 0x125d79f1646824e2),
+            (97, 0x8edf41c219259112, 0x4a960346c0d2c022),
+            (128, 0x13452b884c680dcc, 0xb4d349e0e7ef42d6),
+            (255, 0x5b525ebb343090f4, 0xe9966ba272d2f74b),
+            (256, 0x92c0b34170e416ad, 0x1129d45aae96d8d),
+            (1024, 0x1012e709faff6abe, 0xe8e4d8e30ef45f45),
+        ];
+        for (len, implicit, explicit) in vectors {
+            let uri: Vec<_> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+            let id: Vec<_> = (0..(len * 3 + 5) % 97)
+                .map(|i| (i * 13 + 7) as u8)
+                .collect();
+            assert_eq!(
+                hyperlink_hash(&HyperlinkId::Implicit(0x01020304), &uri),
+                implicit
+            );
+            assert_eq!(hyperlink_hash(&HyperlinkId::Explicit(id), &uri), explicit);
+        }
+    }
 
     fn style_set(capacity: u16) -> StyleAdmission {
         StyleAdmission::new(

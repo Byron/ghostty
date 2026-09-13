@@ -35,7 +35,7 @@ pub(crate) enum LayoutError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct PageCapacity {
+pub struct PageCapacity {
     pub cols: u16,
     pub rows: u16,
     pub styles: u16,
@@ -60,7 +60,7 @@ impl Default for PageCapacity {
 impl PageCapacity {
     /// Production capacity. Zig unit tests use a smaller grapheme arena;
     /// Rust unit tests still exercise the production layout used by the app.
-    pub const STANDARD: Self = Self {
+    pub(crate) const STANDARD: Self = Self {
         cols: 215,
         rows: 215,
         styles: 128,
@@ -69,7 +69,7 @@ impl PageCapacity {
         string_bytes: 2048,
     };
 
-    pub fn initial(cols: u16) -> Result<Self, LayoutError> {
+    pub(crate) fn initial(cols: u16) -> Result<Self, LayoutError> {
         match Self::STANDARD.adjust_columns(cols) {
             Ok(capacity) => Ok(capacity),
             // Native initialCapacity preserves the standard row count when
@@ -88,7 +88,7 @@ impl PageCapacity {
 
     /// Change columns while preserving the original allocation size and all
     /// resource capacities. The initialized row count belongs to the page.
-    pub fn adjust_columns(self, cols: u16) -> Result<Self, LayoutError> {
+    pub(crate) fn adjust_columns(self, cols: u16) -> Result<Self, LayoutError> {
         if cols == 0 {
             return Err(LayoutError::InvalidDimensions);
         }
@@ -110,7 +110,7 @@ impl PageCapacity {
         Err(LayoutError::OutOfMemory)
     }
 
-    pub fn layout(self) -> Result<PageLayout, LayoutError> {
+    pub(crate) fn layout(self) -> Result<PageLayout, LayoutError> {
         if !cfg!(target_pointer_width = "64") {
             return Err(LayoutError::UnsupportedPlatform);
         }
@@ -152,7 +152,7 @@ impl PageCapacity {
         })
     }
 
-    pub fn metadata(self) -> Result<MetaLayout, LayoutError> {
+    pub(crate) fn metadata(self) -> Result<MetaLayout, LayoutError> {
         let styles_layout = set_layout(
             usize::from(self.styles),
             STYLE_ITEM_SIZE,

@@ -129,6 +129,31 @@ def requests():
     yield case("empty", b"")
     yield case("unicode", "é界👩🏽‍💻".encode())
     yield case("styles-links", b"\x1b[1;3;38:2::10:20:30mA\x1b]8;id=x;https://example.org\x1b\\B")
+    for count in (103, 104, 207, 208, 256):
+        yield case(f"encoding-resources/styles/{count}",
+                   b"".join(f"\x1b[38;5;{index}mX".encode() for index in range(count)),
+                   cols=64, rows=4)
+    import snapshot_resources
+    colliding = []
+    number = 0
+    while len(colliding) < 33:
+        if snapshot_resources._style_hash(snapshot_resources._style_value(number)) & 127 == 127:
+            colliding.append(number)
+        number += 1
+    yield case("encoding-resources/style-collision",
+               b"".join(f"\x1b[38;2;{value & 255};{value >> 8 & 255};{value >> 16 & 255}mX".encode()
+                        for value in colliding), cols=16, rows=3)
+    for count in (2, 3, 32, 40):
+        yield case(f"encoding-resources/links/{count}",
+                   b"".join(f"\x1b]8;id={index};https://example.org/{index}/{'x' * 128}\x07XXXXX".encode()
+                            for index in range(count)), cols=80, rows=4)
+    for count in (102, 103, 200):
+        yield case(f"encoding-resources/linked-cells/{count}",
+                   b"\x1b]8;id=one;https://example.org\x07" + b"x" * count,
+                   cols=80, rows=3)
+    for count in (30, 31, 32, 64):
+        yield case(f"encoding-resources/graphemes/{count}",
+                   ("\x1b[?2027h" + ("A" + "\u0301" * 64) * count).encode(), cols=16, rows=4)
     yield case("saved-cursor", b"A\x1b[31m\x1b7\x1b[4;8HB", b"\x1b8C")
     yield case("alt-active", b"primary\x1b[?1049halternate", b"\x1b[?1049lZ")
     yield case("alt-inactive", b"primary\x1b[?47halternate\x1b[?47l", b"\x1b[?47hZ")

@@ -17,6 +17,8 @@ mod grid_adapter;
 mod input;
 #[path = "rust-page-layout.rs"]
 mod page_layout_adapter;
+#[path = "rust-pages.rs"]
+mod pages_adapter;
 #[path = "rust-parser.rs"]
 mod parser;
 #[path = "rust-paste.rs"]
@@ -25,6 +27,7 @@ mod paste;
 mod semantic_adapter;
 
 const CAPABILITIES: &[&str] = &[
+    "terminal.pages",
     "graphics.glyphs",
     "terminal.page-layout",
     "terminal.selection",
@@ -590,7 +593,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[],"page_layout":null,"glyph_results":[]})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[],"page_layout":null,"glyph_results":[],"page_results":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -647,6 +650,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     let mut grid = grid_adapter::Context::default();
     let mut grid_results = Vec::new();
     let mut glyph_results = Vec::new();
+    let mut page_results = Vec::new();
     let mut host = Host::new(request)?;
     host.host.configure(&mut terminal);
     let mut snapshots = Vec::new();
@@ -655,6 +659,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     let snapshot_offset = std::rc::Rc::new(std::cell::Cell::new(0));
     for operation in &request.operations {
         match operation.op.as_str() {
+            "pages" => page_results.push(pages_adapter::observe(&terminal)),
             "write" => {
                 let bytes = unhex(&operation.data)?;
                 if request.scalar {
@@ -776,6 +781,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 mode_results.clear();
                 grid_results.clear();
                 glyph_results.clear();
+                page_results.clear();
             }
             "snapshot" => {
                 snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
@@ -842,6 +848,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     result["mode_results"] = json!(mode_results);
     result["grid_results"] = json!(grid_results);
     result["glyph_results"] = json!(glyph_results);
+    result["page_results"] = json!(page_results);
     Ok(result)
 }
 

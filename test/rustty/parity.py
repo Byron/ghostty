@@ -21,6 +21,7 @@ import charsets
 import grid_requests
 import search_pages
 import page_layout_requests
+import page_lifecycle_requests
 import host_queries
 import mode_defaults
 import color_protocols
@@ -427,6 +428,7 @@ def main():
     parser.add_argument("--protocols", action="store_true", help="compare terminal protocol queries and host effects")
     parser.add_argument("--grid", action="store_true", help="compare selection, literal search and tracked grid references")
     parser.add_argument("--page-layout", action="store_true", help="compare native page/resource layout arithmetic without backing allocations")
+    parser.add_argument("--pages", action="store_true", help="compare native page lifetimes, boundaries and allocation charges")
     parser.add_argument("--max-failures", type=int, default=20)
     parser.add_argument("--artifacts", type=Path, default=ARTIFACTS, help="isolated output directory for concurrent suites")
     parser.add_argument("--zig-bin", type=Path, default=ROOT / "zig-out/bin/vt-oracle")
@@ -438,7 +440,10 @@ def main():
     ARTIFACTS = args.artifacts.resolve()
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     if not args.no_build:
-        subprocess.run(["zig", "build", "vt-oracle", "-Demit-lib-vt=true", "-Demit-macos-app=false"], cwd=ROOT, check=True)
+        zig_build = ["zig", "build", "vt-oracle", "-Demit-lib-vt=true", "-Demit-macos-app=false"]
+        if args.pages or args.thorough:
+            zig_build.append("-Doptimize=ReleaseSafe")
+        subprocess.run(zig_build, cwd=ROOT, check=True)
         subprocess.run(["cargo", "build", "--offline", "-p", "rustty-vt", "--example", "parity"], cwd=ROOT, check=True)
     peers = []
     failures = 0
@@ -470,6 +475,9 @@ def main():
                                 if not args.case or args.case in request["id"])
             if args.page_layout or args.thorough:
                 requests.extend((request, covers) for request, covers in page_layout_requests.requests()
+                                if not args.case or args.case in request["id"])
+            if args.pages or args.thorough:
+                requests.extend((request, covers) for request, covers in page_lifecycle_requests.requests(peers[0])
                                 if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, covers) for request, covers in search_pages.requests()

@@ -8,7 +8,8 @@
 //! Column resizes reflow them; edits beyond a narrow row extend it safely.
 use crate::modes::Modes;
 use crate::page_layout::PageCapacity;
-use crate::page_resources::{BitmapAllocator, StyleAdmission};
+use crate::page_list::PageList;
+use crate::page_resources::{BitmapAllocator, SetAdmission, StyleAdmission, hyperlink_hash};
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
     Cell, Color, Cursor, CursorShape, HyperlinkId, Margins, Row, Screen, ScrollbackLimits,
@@ -153,19 +154,23 @@ impl Link {
                 .unwrap_or_else(|| uri.as_bytes().to_vec()),
         })
     }
-    fn encode(&self, out: &mut Vec<u8>) -> io::Result<()> {
+    fn validate(&self) -> io::Result<()> {
         if self.uri.is_empty() {
             return Err(invalid("empty snapshot hyperlink URI"));
         }
+        if matches!(&self.id, HyperlinkId::Explicit(id) if id.is_empty()) {
+            return Err(invalid("empty snapshot hyperlink ID"));
+        }
+        Ok(())
+    }
+    fn encode(&self, out: &mut Vec<u8>) -> io::Result<()> {
+        self.validate()?;
         match &self.id {
             HyperlinkId::Implicit(id) => {
                 out.push(1);
                 out.extend_from_slice(&id.to_le_bytes());
             }
             HyperlinkId::Explicit(id) => {
-                if id.is_empty() {
-                    return Err(invalid("empty snapshot hyperlink ID"));
-                }
                 out.push(2);
                 bytes_string(out, id)?;
             }
@@ -280,10 +285,10 @@ fn encode_terminal(t: &Terminal) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn encode_screen(screen: &Screen, key: usize) -> io::Result<Vec<u8>> {
+fn encode_screen(screen: &Screen, key: usize, page_count: usize) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     u16_bytes(&mut out, key)?;
-    u16_bytes(&mut out, screen.rows.len())?;
+    u16_bytes(&mut out, page_count)?;
     out.extend_from_slice(&(screen.history.len() as u64).to_le_bytes());
     let c = &screen.cursor;
     u16_bytes(&mut out, c.col)?;
@@ -328,119 +333,192 @@ fn encode_screen(screen: &Screen, key: usize) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn encode_page(row: &Row) -> io::Result<Vec<u8>> {
+fn encoding_capacity(
+    mut capacity: PageCapacity,
+    styles: &[Style],
+    links: &[Link],
+    linked_cells: usize,
+    suffixes: &[(usize, usize, Vec<u32>)],
+) -> io::Result<PageCapacity> {
+    fn grow(value: u32, maximum: u32) -> io::Result<u32> {
+        if value == maximum {
+            return Err(invalid("snapshot resources exceed native page capacity"));
+        }
+        Ok(value.saturating_mul(2).max(1).min(maximum))
+    }
+
+    if suffixes.iter().any(|(_, _, cps)| cps.len() > 64) {
+        return Err(invalid("snapshot grapheme exceeds the native suffix limit"));
+    }
+    for link in links {
+        link.validate()?;
+    }
+    // ponytail: live resource growth/splitting is not yet in the page ledger.
+    // Until those mutation hooks exist, grow only emitted hints as needed to
+    // keep native decode from silently discarding owned cell resources.
+    let link_hashes: Vec<_> = links
+        .iter()
+        .map(|link| hyperlink_hash(&link.id, &link.uri))
+        .collect();
+    loop {
+        let layout = capacity
+            .layout()
+            .map_err(|_| invalid("invalid snapshot encoding capacity"))?;
+        let mut changed = false;
+        let mut style_set = StyleAdmission::new(layout.styles_layout);
+        if !styles.iter().all(|&style| style_set.admit(style)) {
+            capacity.styles = grow(u32::from(capacity.styles), u32::from(u16::MAX))? as u16;
+            changed = true;
+        }
+        let mut link_set = SetAdmission::new(layout.hyperlink_set_layout);
+        if linked_cells > layout.hyperlink_map_layout.capacity as usize * 80 / 100
+            || !links
+                .iter()
+                .zip(&link_hashes)
+                .all(|(link, &hash)| link_set.admit_hashed(link, hash))
+        {
+            capacity.hyperlink_bytes =
+                grow(u32::from(capacity.hyperlink_bytes), u32::from(u16::MAX))? as u16;
+            changed = true;
+        }
+        let mut strings = BitmapAllocator::<32>::new(layout.string_alloc_layout);
+        if !links.iter().all(|link| {
+            (match &link.id {
+                HyperlinkId::Explicit(id) => strings.alloc(id.len()).is_some(),
+                HyperlinkId::Implicit(_) => true,
+            }) && strings.alloc(link.uri.len()).is_some()
+        }) {
+            capacity.string_bytes = grow(capacity.string_bytes, u32::MAX)?;
+            changed = true;
+        }
+        let mut graphemes = BitmapAllocator::<16>::new(layout.grapheme_alloc_layout);
+        if suffixes.len() > layout.grapheme_map_layout.capacity as usize
+            || !suffixes.iter().all(|(_, _, cps)| {
+                let mut previous = None;
+                for count in (1..=cps.len()).step_by(4) {
+                    let Some(offset) = graphemes.alloc(count * 4) else {
+                        return false;
+                    };
+                    if let Some(previous) = previous {
+                        graphemes.free(previous, (count - 1) * 4);
+                    }
+                    previous = Some(offset);
+                }
+                true
+            })
+        {
+            capacity.grapheme_bytes = grow(capacity.grapheme_bytes, u32::MAX)?;
+            changed = true;
+        }
+        if !changed {
+            return Ok(capacity);
+        }
+    }
+}
+
+fn encode_page(rows: &[&Row], capacity: PageCapacity, columns: u16) -> io::Result<Vec<u8>> {
+    if rows
+        .iter()
+        .any(|row| row.cells.len() != usize::from(columns))
+    {
+        return Err(invalid(
+            "snapshot rows do not match their physical page width",
+        ));
+    }
     let mut styles = Vec::new();
     let mut style_ids = HashMap::new();
     let mut links = Vec::new();
     let mut link_ids = HashMap::new();
-    let mut words = Vec::with_capacity(row.cells.len());
+    let mut page_words = Vec::with_capacity(rows.len());
     let mut suffixes = Vec::new();
-    for (col, cell) in row.cells.iter().enumerate() {
-        let mut chars = cell.text.chars();
-        let cp = chars.next().map_or(0, u32::from);
-        let tail: Vec<_> = chars.map(u32::from).collect();
-        let mut kind = u64::from(!tail.is_empty());
-        let mut content = u64::from(cp);
-        if !tail.is_empty() {
-            suffixes.push((col, tail));
-        }
-        let blank_style = Style {
-            background: cell.style.background,
-            ..Style::default()
-        };
-        let mut style_value = cell.style;
-        if cell.text.is_empty() && cell.style == blank_style && cell.width == 1 && !cell.spacer_head
-        {
-            match cell.style.background {
-                Color::Indexed(index) => {
-                    kind = 2;
-                    content = index.into();
-                    style_value = Style::default();
-                }
-                Color::Rgb(r, g, b) => {
-                    kind = 3;
-                    content = u64::from(r) | (u64::from(g) << 8) | (u64::from(b) << 16);
-                    style_value = Style::default();
-                }
-                Color::Default => {}
+    let mut linked_cells = 0;
+    for (row_index, row) in rows.iter().enumerate() {
+        let mut words = Vec::with_capacity(usize::from(columns));
+        for (col, cell) in row.cells.iter().enumerate() {
+            let mut chars = cell.text.chars();
+            let cp = chars.next().map_or(0, u32::from);
+            let tail: Vec<_> = chars.map(u32::from).collect();
+            let mut kind = u64::from(!tail.is_empty());
+            let mut content = u64::from(cp);
+            if !tail.is_empty() {
+                suffixes.push((row_index, col, tail));
             }
-        }
-        let style_id = if style_value == Style::default() {
-            0
-        } else {
-            *style_ids.entry(style_value).or_insert_with(|| {
-                styles.push(style_value);
-                styles.len()
-            })
-        };
-        let link_id = if cell.hyperlink.is_some() {
-            let link = Link::from_cell(cell).unwrap();
-            *link_ids.entry(link.clone()).or_insert_with(|| {
-                links.push(link);
-                links.len()
-            })
-        } else {
-            0
-        };
-        if style_id > u16::MAX as usize || link_id > 511 {
-            return Err(invalid("snapshot row exceeds native table capacity"));
-        }
-        let width = if cell.spacer_head {
-            3
-        } else {
-            match cell.width {
-                2 => 1,
-                0 => 2,
-                _ => 0,
+            let blank_style = Style {
+                background: cell.style.background,
+                ..Style::default()
+            };
+            let mut style_value = cell.style;
+            if cell.text.is_empty()
+                && cell.style == blank_style
+                && cell.width == 1
+                && !cell.spacer_head
+            {
+                match cell.style.background {
+                    Color::Indexed(index) => {
+                        kind = 2;
+                        content = index.into();
+                        style_value = Style::default();
+                    }
+                    Color::Rgb(r, g, b) => {
+                        kind = 3;
+                        content = u64::from(r) | (u64::from(g) << 8) | (u64::from(b) << 16);
+                        style_value = Style::default();
+                    }
+                    Color::Default => {}
+                }
             }
-        };
-        words.push(
-            kind | (content << 2)
-                | ((style_id as u64) << 26)
-                | (width << 42)
-                | (u64::from(cell.protected) << 44)
-                | (u64::from(link_id != 0) << 45)
-                | (u64::from(semantic(cell.semantic)) << 46)
-                | ((link_id as u64) << 48),
-        );
-    }
-    let mut out = Vec::new();
-    u16_bytes(&mut out, row.cells.len())?;
-    u16_bytes(&mut out, 1)?;
-    u16_bytes(&mut out, styles.len())?;
-    u16_bytes(&mut out, links.len())?;
-    u16_bytes(&mut out, styles.len().max(16))?;
-    u16_bytes(&mut out, links.len().saturating_mul(128).max(192))?;
-    let grapheme_bytes = suffixes
-        .iter()
-        .map(|(_, cps)| (cps.len() + 1) * 8 + 128)
-        .sum::<usize>();
-    u32_bytes(
-        &mut out,
-        grapheme_bytes
-            .max(1024)
-            .checked_next_power_of_two()
-            .ok_or_else(|| invalid("snapshot grapheme capacity overflow"))?,
-    )?;
-    let string_bytes = links
-        .iter()
-        .map(|l| {
-            l.uri.len()
-                + match &l.id {
-                    HyperlinkId::Explicit(id) => id.len(),
+            let style_id = if style_value == Style::default() {
+                0
+            } else {
+                *style_ids.entry(style_value).or_insert_with(|| {
+                    styles.push(style_value);
+                    styles.len()
+                })
+            };
+            let link_id = if cell.hyperlink.is_some() {
+                linked_cells += 1;
+                let link = Link::from_cell(cell).unwrap();
+                *link_ids.entry(link.clone()).or_insert_with(|| {
+                    links.push(link);
+                    links.len()
+                })
+            } else {
+                0
+            };
+            if style_id > u16::MAX as usize || link_id > 511 {
+                return Err(invalid("snapshot page exceeds native table capacity"));
+            }
+            let width = if cell.spacer_head {
+                3
+            } else {
+                match cell.width {
+                    2 => 1,
+                    0 => 2,
                     _ => 0,
                 }
-                + 32
-        })
-        .sum::<usize>();
-    u32_bytes(
-        &mut out,
-        string_bytes
-            .saturating_mul(2)
-            .max(2048)
-            .checked_next_power_of_two()
-            .ok_or_else(|| invalid("snapshot string capacity overflow"))?,
-    )?;
+            };
+            words.push(
+                kind | (content << 2)
+                    | ((style_id as u64) << 26)
+                    | (width << 42)
+                    | (u64::from(cell.protected) << 44)
+                    | (u64::from(link_id != 0) << 45)
+                    | (u64::from(semantic(cell.semantic)) << 46)
+                    | ((link_id as u64) << 48),
+            );
+        }
+        page_words.push(words);
+    }
+    let capacity = encoding_capacity(capacity, &styles, &links, linked_cells, &suffixes)?;
+    let mut out = Vec::new();
+    u16_bytes(&mut out, usize::from(columns))?;
+    u16_bytes(&mut out, rows.len())?;
+    u16_bytes(&mut out, styles.len())?;
+    u16_bytes(&mut out, links.len())?;
+    u16_bytes(&mut out, usize::from(capacity.styles))?;
+    u16_bytes(&mut out, usize::from(capacity.hyperlink_bytes))?;
+    u32_bytes(&mut out, capacity.grapheme_bytes as usize)?;
+    u32_bytes(&mut out, capacity.string_bytes as usize)?;
     for (i, value) in styles.into_iter().enumerate() {
         u16_bytes(&mut out, i + 1)?;
         style(&mut out, value);
@@ -449,36 +527,38 @@ fn encode_page(row: &Row) -> io::Result<Vec<u8>> {
         u16_bytes(&mut out, i + 1)?;
         value.encode(&mut out)?;
     }
-    let count = words.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1);
-    let word_or = words.iter().fold(0u64, |a, &b| a | b);
-    let width = if word_or & !0x3fc == 0 {
-        0
-    } else if word_or & !0x3fffc == 0 {
-        1
-    } else if word_or <= u64::from(u32::MAX) {
-        2
-    } else {
-        3
-    };
-    let row_semantic = match row.semantic {
-        SemanticContent::Prompt => 1,
-        SemanticContent::Input => 2,
-        _ => 0,
-    };
-    out.push(
-        u8::from(row.wrapped)
-            | (u8::from(row.wrap_continuation) << 1)
-            | (row_semantic << 2)
-            | (width << 4),
-    );
-    u16_bytes(&mut out, count)?;
-    for word in words.into_iter().take(count) {
-        let word = if width < 2 { word >> 2 } else { word };
-        out.extend_from_slice(&word.to_le_bytes()[..1usize << width]);
+    for (row, words) in rows.iter().zip(page_words) {
+        let count = words.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1);
+        let word_or = words.iter().fold(0u64, |a, &b| a | b);
+        let width = if word_or & !0x3fc == 0 {
+            0
+        } else if word_or & !0x3fffc == 0 {
+            1
+        } else if word_or <= u64::from(u32::MAX) {
+            2
+        } else {
+            3
+        };
+        let row_semantic = match row.semantic {
+            SemanticContent::Prompt => 1,
+            SemanticContent::Input => 2,
+            _ => 0,
+        };
+        out.push(
+            u8::from(row.wrapped)
+                | (u8::from(row.wrap_continuation) << 1)
+                | (row_semantic << 2)
+                | (width << 4),
+        );
+        u16_bytes(&mut out, count)?;
+        for word in words.into_iter().take(count) {
+            let word = if width < 2 { word >> 2 } else { word };
+            out.extend_from_slice(&word.to_le_bytes()[..1usize << width]);
+        }
     }
     u32_bytes(&mut out, suffixes.len())?;
-    for (col, cps) in suffixes {
-        u16_bytes(&mut out, 0)?;
+    for (row, col, cps) in suffixes {
+        u16_bytes(&mut out, row)?;
         u16_bytes(&mut out, col)?;
         u16_bytes(&mut out, cps.len())?;
         for cp in cps {
@@ -498,9 +578,29 @@ pub fn encode(terminal: &Terminal, destination: &mut impl Write) -> io::Result<(
     let screens = [Some(&terminal.primary), terminal.alternate.as_ref()];
     for (key, screen) in screens.iter().enumerate() {
         if let Some(screen) = screen {
-            record(destination, 2, &encode_screen(screen, key)?)?;
-            for row in &screen.rows {
-                record(destination, 3, &encode_page(row)?)?;
+            let rows: Vec<_> = screen.all_rows().collect();
+            let mut start = 0;
+            let mut active_page = 0;
+            for page in &screen.pages.pages {
+                if start + usize::from(page.rows) > screen.history.len() {
+                    break;
+                }
+                start += usize::from(page.rows);
+                active_page += 1;
+            }
+            record(
+                destination,
+                2,
+                &encode_screen(screen, key, screen.pages.pages.len() - active_page)?,
+            )?;
+            for page in screen.pages.pages.iter().skip(active_page) {
+                let end = start + usize::from(page.rows);
+                record(
+                    destination,
+                    3,
+                    &encode_page(&rows[start..end], page.capacity, page.columns)?,
+                )?;
+                start = end;
             }
         }
     }
@@ -508,12 +608,27 @@ pub fn encode(terminal: &Terminal, destination: &mut impl Write) -> io::Result<(
     record(destination, 5, &[])?;
     for (key, screen) in screens.iter().enumerate() {
         if let Some(screen) = screen {
+            let rows: Vec<_> = screen.all_rows().collect();
+            let mut start = 0;
+            let mut history_pages = Vec::new();
+            for page in &screen.pages.pages {
+                let end = start + usize::from(page.rows);
+                if end > screen.history.len() {
+                    break;
+                }
+                history_pages.push((page, start, end));
+                start = end;
+            }
             let mut header = Vec::new();
             u16_bytes(&mut header, key)?;
-            u32_bytes(&mut header, screen.history.len())?;
+            u32_bytes(&mut header, history_pages.len())?;
             record(destination, 4, &header)?;
-            for row in screen.history.iter().rev() {
-                record(destination, 3, &encode_page(row)?)?;
+            for (page, start, end) in history_pages.into_iter().rev() {
+                record(
+                    destination,
+                    3,
+                    &encode_page(&rows[start..end], page.capacity, page.columns)?,
+                )?;
             }
         }
     }
@@ -705,6 +820,11 @@ struct Sequence {
     key: usize,
     remaining: u32,
     apply: bool,
+}
+
+struct DecodedPage {
+    capacity: PageCapacity,
+    rows: Vec<Row>,
 }
 
 /// Read through READY first, then apply one history page per `next_history`.
@@ -1051,8 +1171,11 @@ impl<R: Read> Decoder<R> {
         }
         r.finish()?;
         let mut contents = Vec::new();
+        let mut pages = PageList::default();
         for _ in 0..count {
-            contents.extend(self.page()?);
+            let page = self.page()?;
+            pages.append(page.capacity, page.rows.len() as u16);
+            contents.extend(page.rows);
         }
         if contents.len() < usize::from(rows) {
             return Err(invalid("snapshot pages do not cover active rows"));
@@ -1067,15 +1190,15 @@ impl<R: Read> Decoder<R> {
         screen.cursor.pending_wrap = flags & 1 != 0 && screen.cursor.col == physical_cols - 1;
         screen.history = contents.into();
         screen.history_bytes = screen.history.iter().map(Row::storage_bytes).sum();
-        screen.enforce_limits();
+        screen.pages = pages;
         Ok((key, screen, extent))
     }
 
-    fn page(&mut self) -> io::Result<Vec<Row>> {
+    fn page(&mut self) -> io::Result<DecodedPage> {
         let payload = self.record(3)?;
         self.decode_page(&payload)
     }
-    fn decode_page(&mut self, payload: &[u8]) -> io::Result<Vec<Row>> {
+    fn decode_page(&mut self, payload: &[u8]) -> io::Result<DecodedPage> {
         let mut r = Slice::new(payload);
         let cols = usize::from(r.u16()?);
         let rows = usize::from(r.u16()?);
@@ -1253,7 +1376,10 @@ impl<R: Read> Decoder<R> {
             }
         }
         r.finish()?;
-        Ok(result)
+        Ok(DecodedPage {
+            capacity,
+            rows: result,
+        })
     }
 
     pub fn next_history(&mut self, terminal: &mut Terminal) -> io::Result<Option<HistoryProgress>> {
@@ -1287,18 +1413,24 @@ impl<R: Read> Decoder<R> {
                             && s.metadata.reflow_generation == self.reflow_generations[sequence.key]
                     })
                 {
-                    let mut rows = self.decode_page(&payload)?;
+                    let page = self.decode_page(&payload)?;
+                    let mut rows = page.rows;
                     let bytes = rows.iter().map(Row::storage_bytes).sum::<usize>();
+                    let allocation_bytes = page
+                        .capacity
+                        .layout()
+                        .map_err(|_| invalid("invalid page layout"))?
+                        .allocation_bytes(false);
                     let limits = screen.effective_limits();
-                    let allowed = screen.limits.bytes != Some(0)
-                        && limits
-                            .lines
-                            .is_none_or(|max| rows.len() + screen.history.len() <= max)
-                        && limits
-                            .bytes
-                            .is_none_or(|max| bytes.saturating_add(screen.storage_bytes()) <= max);
+                    let allowed = limits
+                        .lines
+                        .is_none_or(|max| rows.len() + screen.history.len() <= max)
+                        && limits.bytes.is_none_or(|max| {
+                            allocation_bytes.saturating_add(screen.storage_bytes()) <= max
+                        });
                     if allowed {
                         count = rows.len();
+                        screen.pages.prepend(page.capacity, count as u16);
                         for row in &mut rows {
                             row.id = screen.next_row;
                             screen.next_row = screen.next_row.wrapping_add(1);

@@ -107,6 +107,11 @@
       "remaining": "Page/resource capacity and offset arithmetic, column adjustment and pooled/exact allocation charge are compared on macOS ARM64 without backing allocations. Page lifetime, splitting, retained resource entries, fragmentation, reflow inheritance and other platform ABIs remain."
     },
     {
+      "id": "terminal.pages",
+      "status": "partial",
+      "remaining": "Initialization, growth, whole-page pruning, clear/reset, dimension changes, reflow and snapshot admission compare native boundaries, capacities and allocation charges on macOS ARM64. Live managed-resource growth/splitting, compression and complete lifecycle combinations remain."
+    },
+    {
       "id": "terminal.tracked",
       "status": "partial",
       "remaining": "Live coordinates/codepoints are compared through reflow, erasure, resets, handle reuse and screen switches. Owner isolation, reset lifetime, inactive release, line shifts and alternate/history pin motion pass; rebinding, exact pruning and snapshot restoration remain."

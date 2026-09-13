@@ -212,3 +212,18 @@ fn generated_edits_keep_wide_cells_and_cursor_in_bounds() {
         invariant(&t);
     }
 }
+
+#[test]
+fn viewport_snapshot_excludes_history_and_hides_scrolled_cursor() {
+    let mut t = Terminal::new(8, 2, 100);
+    t.feed(b"one\r\ntwo\r\nthree\r\nfour");
+    t.screen_mut().scroll_viewport(2);
+    let snapshot = t.screen().snapshot_viewport();
+    assert!(snapshot.history.is_empty());
+    assert_eq!(
+        snapshot.rows.iter().map(|r| r.text()).collect::<Vec<_>>(),
+        ["one", "two"]
+    );
+    assert!(!snapshot.cursor.visible);
+    assert_eq!(snapshot.rows[0].id, t.screen().history[0].id);
+}

@@ -22,6 +22,7 @@ const capabilities = [_][]const u8{
     "terminal.styles",
     "terminal.screens",
     "terminal.cursor",
+    "terminal.modes",
     "effects.pty",
     "effects.title",
     "effects.pwd",
@@ -49,6 +50,11 @@ const Operation = struct {
     clipboard_write_limit: ?usize = null,
     host: ?HostOptions = null,
     cell_size: ?[2]u32 = null,
+    number: u16 = 0,
+    private: bool = false,
+    value: bool = false,
+    cursor_shape: []const u8 = "block",
+    cursor_blink: ?bool = false,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -63,6 +69,24 @@ const Request = struct {
     clipboard_write_enabled: bool = true,
     clipboard_write_limit: usize = 64 * 1024 * 1024,
     host: HostOptions = .{},
+    observe_modes: []const ModeTag = &.{},
+    observe_mode_effects: bool = false,
+};
+const ModeTag = struct { number: u16, private: bool };
+const Mode = struct {
+    number: u16,
+    private: bool,
+    current: ?bool,
+    saved: ?bool,
+    default: ?bool,
+    report: u8,
+    default_configurable: bool,
+};
+const ModeEffects = struct {
+    cursor_visible: bool,
+    cursor_blink: bool,
+    mouse_mode: u16,
+    mouse_format: u16,
 };
 const HostScheme = enum { none, light, dark };
 const HostSize = struct {
@@ -173,6 +197,8 @@ const Observation = struct {
     margins: [4]u16,
     title: []const u8,
     pwd: []const u8,
+    modes: []const Mode,
+    mode_effects: ?ModeEffects,
 };
 const Notification = struct { title: []const u8, body: []const u8 };
 const Progress = struct { state: u8, value: ?u8 };
@@ -212,6 +238,7 @@ const Response = struct {
     parser: ?parser_adapter.Result = null,
     snapshots: []const []const u8 = &.{},
     snapshot_progress: []const SnapshotProgress = &.{},
+    mode_results: []const bool = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -432,6 +459,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     var stream = terminalStream(alloc, &t);
     defer stream.deinit();
     var observations: std.ArrayList(Observation) = .empty;
+    var mode_results: std.ArrayList(bool) = .empty;
     var snapshots: std.ArrayList([]const u8) = .empty;
     var snapshot_source: std.Io.Reader = .fixed(&.{});
     var snapshot_decoder: ?vt.snapshot.Decoder = null;
@@ -453,6 +481,35 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             stream.nextSlice("\x1bc");
         } else if (std.mem.eql(u8, op.op, "terminal_reset")) {
             t.fullReset();
+        } else if (std.mem.eql(u8, op.op, "mode_set") or
+            std.mem.eql(u8, op.op, "mode_default") or
+            std.mem.eql(u8, op.op, "mode_raw_default") or
+            std.mem.eql(u8, op.op, "mode_save") or
+            std.mem.eql(u8, op.op, "mode_restore"))
+        {
+            const success = if (vt.modes.modeFromInt(op.number, !op.private)) |mode| apply: {
+                if (std.mem.eql(u8, op.op, "mode_set")) {
+                    t.modes.set(mode, op.value);
+                } else if (std.mem.eql(u8, op.op, "mode_default")) {
+                    // Match the original C embedder policy; raw ModeState's
+                    // setDefault intentionally accepts every known mode.
+                    if (!vt.modes.defaultConfigurable(mode)) break :apply false;
+                    t.modes.setDefault(mode, op.value);
+                } else if (std.mem.eql(u8, op.op, "mode_raw_default")) {
+                    t.modes.setDefault(mode, op.value);
+                } else if (std.mem.eql(u8, op.op, "mode_save")) {
+                    t.modes.save(mode);
+                } else {
+                    _ = t.modes.restore(mode);
+                }
+                break :apply true;
+            } else false;
+            try mode_results.append(alloc, success);
+        } else if (std.mem.eql(u8, op.op, "modes_reset")) {
+            t.modes.reset();
+        } else if (std.mem.eql(u8, op.op, "cursor_defaults")) {
+            t.setDefaultCursorStyle(std.meta.stringToEnum(vt.Screen.CursorStyle, op.cursor_shape) orelse return error.InvalidCursorShape);
+            t.setDefaultCursorBlink(op.cursor_blink);
         } else if (std.mem.eql(u8, op.op, "host_options")) {
             ctx.host = try DecodedHost.init(alloc, op.host orelse return error.MissingHostOptions);
             configureHost(&stream);
@@ -462,12 +519,13 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             if (op.clipboard_write_limit) |value| ctx.clipboard_write_limit = value;
             configureClipboard(&stream);
         } else if (std.mem.eql(u8, op.op, "observe")) {
-            try observations.append(alloc, try observe(alloc, &t));
+            try observations.append(alloc, try observe(alloc, &t, request));
         } else if (std.mem.eql(u8, op.op, "input")) {
             Context.append("input", try input_adapter.encode(alloc, &t, op.input orelse return error.MissingInput));
         } else if (std.mem.eql(u8, op.op, "checkpoint")) {
             observations.clearRetainingCapacity();
             ctx.events.clearRetainingCapacity();
+            mode_results.clearRetainingCapacity();
         } else if (std.mem.eql(u8, op.op, "snapshot")) {
             var continuation: std.Io.Writer.Allocating = .init(alloc);
             try stream.writeContinuation(&continuation.writer);
@@ -506,11 +564,12 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         } else return error.UnsupportedOperation;
     }
     if (ctx.invalid_read_status) return error.UnsupportedClipboardReadStatus;
-    if (observe_terminal) try observations.append(alloc, try observe(alloc, &t));
+    if (observe_terminal) try observations.append(alloc, try observe(alloc, &t, request));
     response.observations = observations.items;
     response.events = ctx.events.items;
     response.snapshots = snapshots.items;
     response.snapshot_progress = snapshot_progress.items;
+    response.mode_results = mode_results.items;
     return response;
 }
 
@@ -561,7 +620,22 @@ fn configureHost(stream: *vt.TerminalStream) void {
     stream.handler.terminal.flags.visible = host.options.visible;
 }
 
-fn observe(alloc: Allocator, t: *vt.Terminal) !Observation {
+fn observe(alloc: Allocator, t: *vt.Terminal, request: Request) !Observation {
+    const modes = try alloc.alloc(Mode, request.observe_modes.len);
+    for (request.observe_modes, modes) |tag, *result| {
+        const mode = vt.modes.modeFromInt(tag.number, !tag.private);
+        const saved: vt.modes.ModeState = .{ .values = t.modes.saved };
+        const defaults: vt.modes.ModeState = .{ .values = t.modes.default };
+        result.* = .{
+            .number = tag.number,
+            .private = tag.private,
+            .current = if (mode) |value| t.modes.get(value) else null,
+            .saved = if (mode) |value| saved.get(value) else null,
+            .default = if (mode) |value| defaults.get(value) else null,
+            .report = @intFromEnum(t.modes.getReport(.{ .value = @truncate(tag.number), .ansi = !tag.private }).state),
+            .default_configurable = if (mode) |value| vt.modes.defaultConfigurable(value) else false,
+        };
+    }
     return .{
         .cols = t.cols,
         .rows = t.rows,
@@ -571,6 +645,25 @@ fn observe(alloc: Allocator, t: *vt.Terminal) !Observation {
         .margins = .{ t.scrolling_region.top, t.scrolling_region.bottom, t.scrolling_region.left, t.scrolling_region.right },
         .title = try alloc.dupe(u8, t.getTitle() orelse ""),
         .pwd = try alloc.dupe(u8, t.getPwd() orelse ""),
+        .modes = modes,
+        .mode_effects = if (request.observe_mode_effects) .{
+            .cursor_visible = t.modes.get(.cursor_visible),
+            .cursor_blink = t.modes.get(.cursor_blinking),
+            .mouse_mode = switch (t.flags.mouse_event) {
+                .none => 0,
+                .x10 => 9,
+                .normal => 1000,
+                .button => 1002,
+                .any => 1003,
+            },
+            .mouse_format = switch (t.flags.mouse_format) {
+                .x10 => 0,
+                .utf8 => 1005,
+                .sgr => 1006,
+                .urxvt => 1015,
+                .sgr_pixels => 1016,
+            },
+        } else null,
     };
 }
 

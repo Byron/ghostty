@@ -124,6 +124,21 @@ These comparisons use `feed_with_handler` with the reference's absent callback
 defaults. The asynchronous `feed` API's configurable application defaults are
 covered by core tests rather than being substituted for these reference defaults.
 
+Mode fixtures read the available ANSI/DEC entries from the original source.
+`observe_modes` selects mode tags (`number`, `private`) whose current, saved,
+reset-default and report values are compared. `observe_mode_effects` additionally
+compares cursor visibility/blink and active mouse mode/format. The raw
+`mode_set`, `mode_save`, `mode_restore`, `mode_raw_default` and `modes_reset`
+operations call the mode-state API without handler transitions. `mode_default`
+instead applies the original embedder's `defaultConfigurable` policy; its Rust
+counterpart calls the guarded terminal API. Acceptance is recorded in
+`mode_results`. These distinct cases prevent raw bit state from being mistaken
+for semantic configuration. `cursor_defaults` sets the configured shape and
+optional blink policy through the terminal APIs. Stream cases cover mode reports,
+saved-state reuse, transitions, reset behavior, cursor defaults and malformed
+parameters. The pinned reference ignores ANSI DECRQM and DECSTR, and truncates
+unknown DECRQM mode tags to 15 bits; these behaviors are retained explicitly.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;

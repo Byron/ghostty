@@ -722,18 +722,10 @@ impl Terminal {
         }
     }
 
-    pub fn print(&mut self, mut cp: char) {
+    pub fn print(&mut self, cp: char) {
         self.clamp_cursor();
         if self.status_display {
             return;
-        }
-        let charset = {
-            let cs = &mut self.screen_mut().charset;
-            let slot = cs.single.take().unwrap_or(cs.gl);
-            cs.slots[slot]
-        };
-        if cp as u32 <= 255 {
-            cp = map_charset(cp, charset);
         }
         let current = self.screen().cursor.clone();
         let right = if current.col > self.margins.right {
@@ -856,11 +848,26 @@ impl Terminal {
             }
             let cell = self.screen().rows[cursor.row].cells[col].clone();
             self.screen_mut().cursor.col = col;
-            self.put_cell(String::new(), 1, right == self.cols as usize - 1);
+            if cell.text.chars().nth(1).is_some() {
+                // Native moves existing grapheme data without printing a
+                // spacer head, so the pending single shift reaches the base.
+                let spacer_head = right == self.cols as usize - 1;
+                let row = &mut self.screen_mut().rows[cursor.row];
+                row.cells[col].text.clear();
+                row.cells[col].width = 1;
+                row.cells[col].spacer_head = spacer_head;
+                row.dirty = true;
+            } else {
+                self.put_cell(String::new(), 1, right == self.cols as usize - 1);
+            }
             self.print_wrap();
             col = self.screen().cursor.col;
             self.put_cell(cell.text, width, false);
         } else if width != old_width {
+            if width == 2 {
+                // Widening writes a spacer tail, which consumes the shift.
+                self.screen_mut().charset.single = None;
+            }
             let row = &mut self.screen_mut().rows[cursor.row];
             row.cells[col].width = width;
             if col < right {
@@ -883,7 +890,17 @@ impl Terminal {
         self.changed();
     }
 
-    fn put_cell(&mut self, text: String, width: u8, spacer_head: bool) {
+    fn put_cell(&mut self, mut text: String, width: u8, spacer_head: bool) {
+        // Map only when writing a cell. Width, combining behavior, and REP
+        // use the original scalar; even an empty spacer consumes one shift.
+        let charset = &mut self.screen_mut().charset;
+        let slot = charset.single.take().unwrap_or(charset.gl);
+        if let Some(cp) = text.chars().next() {
+            let mapped = map_charset(cp, charset.slots[slot]);
+            if cp != mapped {
+                text.replace_range(..cp.len_utf8(), &mapped.to_string());
+            }
+        }
         let cursor = self.screen().cursor.clone();
         self.ensure_row_cells(cursor.row, cursor.col + usize::from(width));
         let old_width = self.screen().rows[cursor.row].cells[cursor.col].width;
@@ -1487,7 +1504,6 @@ impl Terminal {
                     _ => Charset::Ascii,
                 };
             }
-            ([b'%'], b'G') => self.screen_mut().charset.slots = [Charset::Utf8; 4],
             ([b'#'], b'8') => {
                 self.reset_margins();
                 for row in &mut self.screen_mut().rows {
@@ -2185,6 +2201,9 @@ fn sgr_report(style: Style) -> String {
 }
 
 fn map_charset(cp: char, set: Charset) -> char {
+    if matches!(set, Charset::British | Charset::DecSpecial) && cp as u32 > 255 {
+        return ' ';
+    }
     if set == Charset::British && cp == '#' {
         return '£';
     }

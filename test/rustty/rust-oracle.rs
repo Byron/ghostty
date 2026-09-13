@@ -28,6 +28,8 @@ const CAPABILITIES: &[&str] = &[
     "input.focus-paste",
     "parser.raw-events",
     "snapshot.cross-decode",
+    "snapshot.streaming",
+    "snapshot.fixtures",
 ];
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -105,7 +107,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[]})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -136,6 +138,9 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     let mut observations = Vec::new();
     let mut events: Vec<Value> = Vec::new();
     let mut snapshots = Vec::new();
+    let mut snapshot_progress = Vec::new();
+    let mut snapshot_decoder = None;
+    let snapshot_offset = std::rc::Rc::new(std::cell::Cell::new(0));
     for operation in &request.operations {
         let effects = match operation.op.as_str() {
             "write" => {
@@ -181,6 +186,36 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     rustty_vt::snapshot::DecodeOptions::default(),
                 )
                 .map_err(|_| "InvalidSnapshot")?;
+                snapshot_decoder = None;
+                Vec::new()
+            }
+            "restore_ready" => {
+                snapshot_offset.set(0);
+                let mut decoder = rustty_vt::snapshot::Decoder::new(
+                    SnapshotReader {
+                        data: io::Cursor::new(unhex(&operation.data)?),
+                        offset: snapshot_offset.clone(),
+                    },
+                    rustty_vt::snapshot::DecodeOptions::default(),
+                );
+                terminal = decoder.ready().map_err(|_| "InvalidSnapshot")?;
+                snapshot_progress.push(json!({"stage":"ready", "offset":snapshot_offset.get(),
+                    "history_rows":decoder.history_rows(), "screen":null, "rows":0, "remaining":0}));
+                snapshot_decoder = Some(decoder);
+                Vec::new()
+            }
+            "restore_next" => {
+                let progress = snapshot_decoder
+                    .as_mut()
+                    .ok_or("MissingSnapshotDecoder")?
+                    .next_history(&mut terminal)
+                    .map_err(|_| "InvalidSnapshot")?;
+                snapshot_progress.push(match progress {
+                    Some(value) => json!({"stage":"history", "offset":snapshot_offset.get(),
+                        "history_rows":[0,0], "screen":value.screen, "rows":value.rows, "remaining":value.remaining_pages}),
+                    None => json!({"stage":"finish", "offset":snapshot_offset.get(),
+                        "history_rows":[0,0], "screen":null, "rows":0, "remaining":0}),
+                });
                 Vec::new()
             }
             _ => return Err("UnsupportedOperation"),
@@ -212,7 +247,20 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     result["observations"] = json!(observations);
     result["events"] = json!(events);
     result["snapshots"] = json!(snapshots);
+    result["snapshot_progress"] = json!(snapshot_progress);
     Ok(result)
+}
+
+struct SnapshotReader {
+    data: io::Cursor<Vec<u8>>,
+    offset: std::rc::Rc<std::cell::Cell<usize>>,
+}
+impl Read for SnapshotReader {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let n = self.data.read(bytes)?;
+        self.offset.set(self.offset.get() + n);
+        Ok(n)
+    }
 }
 
 fn dimensions(cols: u16, rows: u16) -> Result<(), &'static str> {

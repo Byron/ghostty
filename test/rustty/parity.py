@@ -85,6 +85,8 @@ def difference(left, right, path="response"):
 def variants(request, exhaustive=False):
     """Delivery boundaries change; operation/observation ordering never changes."""
     yield request
+    if request.get("expected_error"):
+        return
     if request.get("kind", "terminal") not in ("terminal", "input", "parser", "snapshot"):
         return
     for name, chunks in (("scalar", [1]), ("chunks", [2, 7, 1, 13, 4])):
@@ -255,11 +257,16 @@ def save_failure(request, left, right, reason):
 def compare(peers, request):
     if request.get("kind") == "snapshot":
         return snapshots.compare(peers, request, difference)
-    left, right = [peer.request(request) for peer in peers]
+    expected_error = request.get("expected_error")
+    sent = {k: v for k, v in request.items() if k != "expected_error"}
+    left, right = [peer.request(sent) for peer in peers]
     # Capabilities are checked independently of observed behavior.
     comparable = [{k: v for k, v in response.items() if k != "capabilities"} for response in (left, right)]
     reason = difference(*comparable)
-    if not left["ok"] or not right["ok"]:
+    if expected_error:
+        if any(response["ok"] or response["err"] != expected_error for response in (left, right)):
+            reason = reason or f"expected decoder rejection: {expected_error}"
+    elif not left["ok"] or not right["ok"]:
         reason = reason or f"request failed: {left.get('err')} / {right.get('err')}"
     return left, right, reason
 
@@ -341,6 +348,7 @@ def main():
     parser.add_argument("--input", action="store_true", help="compare keyboard, mouse, focus and paste encoding")
     parser.add_argument("--parser", action="store_true", help="compare raw parser events and inherited parser corpus")
     parser.add_argument("--snapshots", action="store_true", help="cross-decode both snapshot encodings and resume terminal input")
+    parser.add_argument("--snapshot-wire", action="store_true", help="compare snapshot fixtures, streaming, malformed input and mixed PAGE widths")
     parser.add_argument("--max-failures", type=int, default=20)
     parser.add_argument("--artifacts", type=Path, default=ARTIFACTS, help="isolated output directory for concurrent suites")
     parser.add_argument("--zig-bin", type=Path, default=ROOT / "zig-out/bin/vt-oracle")
@@ -381,6 +389,13 @@ def main():
                                 if not args.case or args.case in request["id"])
             if args.snapshots or args.thorough:
                 requests.extend((request, covers) for request, covers in snapshots.requests()
+                                if not args.case or args.case in request["id"])
+            if args.snapshot_wire or args.thorough:
+                requests.extend((request, covers) for request, covers in snapshots.streaming_requests(ROOT)
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in snapshots.invalid_requests(ROOT)
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in snapshots.wire_requests(ROOT, peers[0])
                                 if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())

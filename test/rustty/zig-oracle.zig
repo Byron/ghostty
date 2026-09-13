@@ -9,11 +9,11 @@ const Allocator = std.mem.Allocator;
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
-    "terminal.write",    "terminal.resize",       "terminal.reset",   "terminal.observe",
-    "terminal.cells",    "terminal.styles",       "terminal.screens", "terminal.cursor",
-    "effects.pty",       "effects.title",         "effects.pwd",      "effects.bell",
-    "unicode.width",     "input.key",             "input.mouse",      "input.focus-paste",
-    "parser.raw-events", "snapshot.cross-decode",
+    "terminal.write",    "terminal.resize",       "terminal.reset",     "terminal.observe",
+    "terminal.cells",    "terminal.styles",       "terminal.screens",   "terminal.cursor",
+    "effects.pty",       "effects.title",         "effects.pwd",        "effects.bell",
+    "unicode.width",     "input.key",             "input.mouse",        "input.focus-paste",
+    "parser.raw-events", "snapshot.cross-decode", "snapshot.streaming", "snapshot.fixtures",
 };
 
 const Operation = struct {
@@ -78,6 +78,14 @@ const Observation = struct {
     pwd: []const u8,
 };
 const Event = struct { kind: []const u8, data: []const u8 = "" };
+const SnapshotProgress = struct {
+    stage: []const u8,
+    offset: usize,
+    history_rows: [2]u64 = .{ 0, 0 },
+    screen: ?u8 = null,
+    rows: usize = 0,
+    remaining: u32 = 0,
+};
 const Response = struct {
     id: []const u8,
     ok: bool = true,
@@ -88,6 +96,7 @@ const Response = struct {
     widths: []const i8 = &.{},
     parser: ?parser_adapter.Result = null,
     snapshots: []const []const u8 = &.{},
+    snapshot_progress: []const SnapshotProgress = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -192,6 +201,9 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     defer current = null;
     var observations: std.ArrayList(Observation) = .empty;
     var snapshots: std.ArrayList([]const u8) = .empty;
+    var snapshot_source: std.Io.Reader = .fixed(&.{});
+    var snapshot_decoder: ?vt.snapshot.Decoder = null;
+    var snapshot_progress: std.ArrayList(SnapshotProgress) = .empty;
     for (request.operations) |op| {
         if (std.mem.eql(u8, op.op, "write")) {
             const bytes = try hexDecode(alloc, op.data);
@@ -222,21 +234,48 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             var source: std.Io.Reader = .fixed(try hexDecode(alloc, op.data));
             var decoded = vt.snapshot.decode(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
             defer decoded.deinit(alloc);
-            stream.deinit();
-            t.deinit(alloc);
-            t = decoded.toOwned();
-            stream = terminalStream(alloc, &t);
-            switch (decoded.continuation) {
-                .ground => {},
-                .bytes => |bytes| stream.nextSlice(bytes),
-            }
+            restoreTerminal(alloc, &t, &stream, &decoded);
+            snapshot_decoder = null;
+        } else if (std.mem.eql(u8, op.op, "restore_ready")) {
+            snapshot_source = .fixed(try hexDecode(alloc, op.data));
+            snapshot_decoder = .init(&snapshot_source);
+            var decoded = snapshot_decoder.?.ready(alloc, io, .{ .max_continuation_bytes = 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
+            defer decoded.deinit(alloc);
+            restoreTerminal(alloc, &t, &stream, &decoded);
+            try snapshot_progress.append(alloc, .{
+                .stage = "ready",
+                .offset = snapshot_source.seek,
+                .history_rows = .{ decoded.history_rows.get(.primary) orelse 0, decoded.history_rows.get(.alternate) orelse 0 },
+            });
+        } else if (std.mem.eql(u8, op.op, "restore_next")) {
+            const decoder = if (snapshot_decoder) |*value| value else return error.MissingSnapshotDecoder;
+            const progress = decoder.next(alloc, &t) catch return error.InvalidSnapshot;
+            try snapshot_progress.append(alloc, if (progress) |value| .{
+                .stage = "history",
+                .offset = snapshot_source.seek,
+                .screen = @intCast(@intFromEnum(value.key)),
+                .rows = value.rows,
+                .remaining = value.remaining,
+            } else .{ .stage = "finish", .offset = snapshot_source.seek });
         } else return error.UnsupportedOperation;
     }
     if (observe_terminal) try observations.append(alloc, try observe(alloc, &t));
     response.observations = observations.items;
     response.events = ctx.events.items;
     response.snapshots = snapshots.items;
+    response.snapshot_progress = snapshot_progress.items;
     return response;
+}
+
+fn restoreTerminal(alloc: Allocator, terminal: *vt.Terminal, stream: *vt.TerminalStream, decoded: *vt.snapshot.Decoded) void {
+    stream.deinit();
+    terminal.deinit(alloc);
+    terminal.* = decoded.toOwned();
+    stream.* = terminalStream(alloc, terminal);
+    switch (decoded.continuation) {
+        .ground => {},
+        .bytes => |bytes| stream.nextSlice(bytes),
+    }
 }
 
 fn terminalStream(alloc: Allocator, terminal: *vt.Terminal) vt.TerminalStream {

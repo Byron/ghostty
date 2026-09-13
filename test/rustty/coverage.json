@@ -158,13 +158,13 @@
     },
     {
       "id": "snapshot.streaming",
-      "status": "pending",
-      "remaining": "READY/history/FINISH checkpoints, incomplete continuation and failure handling."
+      "status": "partial",
+      "remaining": "READY/history/FINISH state and source offsets are compared with live mutations and transport tails; complete reset-generation behavior, continuation replay, I/O failures and limits remain."
     },
     {
       "id": "snapshot.fixtures",
-      "status": "pending",
-      "remaining": "Decode all existing snapshot wire fixtures and exercise corrupt/truncated input."
+      "status": "partial",
+      "remaining": "Complete-v1, every truncation and selected corruptions are compared; remaining component fixtures and mixed PAGE behavior need coverage. Original Zig asserts on some mixed-width cursor states; reference-limit cases remain in thorough runs."
     },
     {
       "id": "fuzz.resource-limits",

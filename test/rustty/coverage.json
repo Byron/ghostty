@@ -79,7 +79,7 @@
     {
       "id": "parser.events",
       "status": "partial",
-      "remaining": "Validated title/PWD, color, notification and clipboard semantics plus fixed capture/prefix cases are compared; remaining OSC commands, streaming capture allocation and complete malformed contexts remain."
+      "remaining": "Validated title/PWD, color, notification and clipboard semantics plus fixed capture/prefix cases are compared. Native OSC 66/99 deliberately unimplemented terminal callbacks are verified as no-ops across payload/capture boundaries, malformed input and continuation. Remaining OSC commands, typed metadata APIs, streaming capture allocation and complete malformed contexts remain."
     },
     {
       "id": "terminal.modes",
@@ -164,7 +164,7 @@
     {
       "id": "effects.host",
       "status": "partial",
-      "remaining": "OSC9/777 notification bytes, ConEmu classification/progress/fresh prompts, fixed captures and explicit host query decisions are compared; Kitty notifications and disabled callback combinations remain."
+      "remaining": "OSC9/777 notification bytes, ConEmu classification/progress/fresh prompts, fixed captures and explicit host query decisions are compared. Native OSC 99 has no notification callback or replies, including multipart/query/close messages; that unsupported behavior is verified. Disabled callback combinations remain."
     },
     {
       "id": "snapshot.cross-decode",

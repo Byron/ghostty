@@ -1,14 +1,14 @@
 //! GHOSTSNP version 1 terminal persistence.
 //!
 //! The encoder streams active rows before history. Decode budgets bound record
-//! sizes and the total cells restored. Native PAGE capacities bound grapheme
-//! suffix storage; style and hyperlink capacity accounting remains incomplete.
+//! sizes and the total cells restored. Native PAGE capacities bound style
+//! admission and grapheme suffix storage; hyperlink accounting remains incomplete.
 //! Version 1 excludes graphics and selection.
 //! Physical PAGE widths are preserved on restore and during in-bounds edits.
 //! Column resizes reflow them; edits beyond a narrow row extend it safely.
 use crate::modes::Modes;
 use crate::page_layout::PageCapacity;
-use crate::page_resources::BitmapAllocator;
+use crate::page_resources::{BitmapAllocator, StyleAdmission};
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
     Cell, Color, Cursor, CursorShape, HyperlinkId, Margins, Row, Screen, ScrollbackLimits,
@@ -1103,11 +1103,18 @@ impl<R: Read> Decoder<R> {
             .layout()
             .map_err(|_| invalid("invalid snapshot page capacity"))?;
         let mut styles = HashMap::new();
+        let mut style_admission = StyleAdmission::new(layout.styles_layout);
         for _ in 0..style_count {
             let id = r.u16()?;
             let value = decode_style(&mut r)?;
             if id != 0 {
-                styles.entry(id).or_insert(value);
+                styles.entry(id).or_insert_with(|| {
+                    if style_admission.admit(value) {
+                        value
+                    } else {
+                        Style::default()
+                    }
+                });
             }
         }
         let mut links = HashMap::new();

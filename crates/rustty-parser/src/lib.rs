@@ -13,6 +13,26 @@ pub const MAX_PARAMS: usize = 24;
 pub const MAX_INTERMEDIATES: usize = 4;
 pub const MAX_OSC_BYTES: usize = 8 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContinuationError {
+    LimitExceeded,
+    NoPendingState,
+    NonCanonical,
+    ReplayWouldCommit,
+}
+
+impl std::fmt::Display for ContinuationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::LimitExceeded => "unfinished parser state exceeded the continuation budget",
+            Self::NoPendingState => "continuation contains no unfinished parser state",
+            Self::NonCanonical => "continuation contains bytes before its effective replay start",
+            Self::ReplayWouldCommit => "continuation would repeat a completed terminal action",
+        })
+    }
+}
+impl std::error::Error for ContinuationError {}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum State {
@@ -96,6 +116,9 @@ pub struct Parser {
     osc_limit: usize,
     osc_overflow: bool,
     utf8: Utf8Decoder,
+    continuation: Vec<u8>,
+    continuation_limit: usize,
+    continuation_broken: bool,
 }
 
 impl Default for Parser {
@@ -119,6 +142,9 @@ impl Parser {
             osc_limit: MAX_OSC_BYTES,
             osc_overflow: false,
             utf8: Utf8Decoder::default(),
+            continuation: Vec::new(),
+            continuation_limit: MAX_OSC_BYTES,
+            continuation_broken: false,
         }
     }
 
@@ -136,6 +162,106 @@ impl Parser {
         self.clear();
         self.osc.clear();
         self.osc_overflow = false;
+        self.continuation.clear();
+        self.continuation_broken = false;
+    }
+
+    /// Bound the replay state retained for snapshots. Zero permits ground-only
+    /// snapshots. An overflow heals after reaching ground or a fresh replay start.
+    pub fn set_continuation_limit(&mut self, limit: usize) {
+        self.continuation_limit = limit;
+        if self.continuation.len() > limit {
+            self.continuation.clear();
+            self.continuation_broken = true;
+        }
+    }
+
+    /// Return the canonical unfinished input tail used by GHOSTSNP version 1.
+    /// Controls whose effects already committed inside a sequence are omitted.
+    pub fn continuation(&self) -> Result<Vec<u8>, ContinuationError> {
+        if self.continuation_broken {
+            return Err(ContinuationError::LimitExceeded);
+        }
+        let mut scanner = Self::new();
+        let mut result = Vec::with_capacity(self.continuation.len());
+        for &byte in &self.continuation {
+            let state = (scanner.state, scanner.utf8.state);
+            let committed = scanner.scan_byte(byte);
+            if committed && state == (scanner.state, scanner.utf8.state) && !scanner.is_ground() {
+                continue;
+            }
+            result.push(byte);
+        }
+        Ok(result)
+    }
+
+    pub fn validate_continuation(bytes: &[u8]) -> Result<(), ContinuationError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut scanner = Self::new();
+        let mut committed = false;
+        for &byte in bytes {
+            committed |= scanner.scan_byte(byte);
+        }
+        if scanner.is_ground() {
+            return Err(ContinuationError::NoPendingState);
+        }
+        if scanner.replay_start(bytes) != Some(0) {
+            return Err(ContinuationError::NonCanonical);
+        }
+        if committed {
+            return Err(ContinuationError::ReplayWouldCommit);
+        }
+        Ok(())
+    }
+
+    fn scan_byte(&mut self, byte: u8) -> bool {
+        let mut committed = false;
+        self.advance_byte(byte, &mut |event| {
+            committed |= !matches!(
+                event,
+                Event::DcsHook { .. } | Event::DcsPut(_) | Event::ApcStart | Event::ApcPut(_)
+            );
+        });
+        committed
+    }
+
+    fn replay_start(&self, bytes: &[u8]) -> Option<usize> {
+        if self.state != State::Ground {
+            bytes.iter().rposition(|&b| b == 0x1b)
+        } else {
+            bytes.iter().rposition(|&b| b & 0xc0 != 0x80)
+        }
+    }
+
+    fn retain_continuation(&mut self, bytes: &[u8]) {
+        if self.is_ground() {
+            self.continuation.clear();
+            self.continuation_broken = false;
+            return;
+        }
+        let bytes = if let Some(start) = self.replay_start(bytes) {
+            self.continuation.clear();
+            self.continuation_broken = false;
+            &bytes[start..]
+        } else {
+            bytes
+        };
+        if self.continuation_broken {
+            return;
+        }
+        if bytes.len()
+            > self
+                .continuation_limit
+                .saturating_sub(self.continuation.len())
+            || self.continuation.try_reserve(bytes.len()).is_err()
+        {
+            self.continuation.clear();
+            self.continuation_broken = true;
+        } else {
+            self.continuation.extend_from_slice(bytes);
+        }
     }
 
     /// Limit retained OSC bytes. A lower limit also discards any oversized
@@ -150,20 +276,25 @@ impl Parser {
 
     pub fn advance(&mut self, bytes: &[u8], mut handler: impl FnMut(Event<'_>)) {
         for &byte in bytes {
-            if self.state != State::Ground {
-                self.control(byte, &mut handler);
-                continue;
-            }
+            self.advance_byte(byte, &mut handler);
+        }
+        self.retain_continuation(bytes);
+    }
+
+    fn advance_byte(&mut self, byte: u8, handler: &mut impl FnMut(Event<'_>)) {
+        if self.state != State::Ground {
+            self.control(byte, handler);
+            return;
+        }
+        let (codepoint, consumed) = self.utf8.next(byte);
+        if let Some(codepoint) = codepoint {
+            self.codepoint(codepoint, handler);
+        }
+        if !consumed {
             let (codepoint, consumed) = self.utf8.next(byte);
+            debug_assert!(consumed);
             if let Some(codepoint) = codepoint {
-                self.codepoint(codepoint, &mut handler);
-            }
-            if !consumed {
-                let (codepoint, consumed) = self.utf8.next(byte);
-                debug_assert!(consumed);
-                if let Some(codepoint) = codepoint {
-                    self.codepoint(codepoint, &mut handler);
-                }
+                self.codepoint(codepoint, handler);
             }
         }
     }

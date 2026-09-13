@@ -13,7 +13,7 @@ use rustty_app::{
     presentation::{
         Activity, CompletionFlash, DirectoryLabel, TabAccent, common_directory_name, directory_name,
     },
-    workspace::{Axis, Id, Peek, Rect, Tab, WindowState, Workspace},
+    workspace::{self, Axis, Id, Peek, Rect, SavedPane, Tab, WindowState, Workspace},
 };
 use rustty_font::{FontConfig, FontFeature};
 use rustty_render::{Frame, RenderOptions};
@@ -62,6 +62,7 @@ struct Pane {
     input: VecDeque<Vec<u8>>,
     input_bytes: usize,
     title: String,
+    title_override: Option<String>,
     cwd: PathBuf,
     running: Option<Instant>,
     activity: Activity,
@@ -72,6 +73,20 @@ struct Pane {
     links: vt::search::LinkMatcher,
 }
 impl Pane {
+    fn update_saved(&self, saved: &mut SavedPane) -> bool {
+        let title = (!self.title.is_empty()).then_some(self.title.as_str());
+        if saved.working_directory == self.cwd
+            && saved.title.as_deref() == title
+            && saved.title_override == self.title_override
+        {
+            return false;
+        }
+        saved.working_directory.clone_from(&self.cwd);
+        saved.title = title.map(str::to_owned);
+        saved.title_override.clone_from(&self.title_override);
+        true
+    }
+
     fn write(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
         QueuedInput {
             session: &self.session,
@@ -146,6 +161,18 @@ enum Confirmation {
     Paste(PendingPaste),
 }
 
+struct LayoutPicker {
+    choices: Vec<workspace::SavedLayout>,
+    path: String,
+    error: Option<String>,
+}
+
+enum LayoutCommand {
+    Open(PathBuf),
+    Browse,
+    Close,
+}
+
 struct Host {
     id: Id,
     viewport: ViewportId,
@@ -178,6 +205,7 @@ struct Host {
     focus_text_input: bool,
     popup_open: bool,
     messages_open: bool,
+    layout_picker: Option<LayoutPicker>,
     palette: bool,
     palette_query: String,
     confirm: Option<Confirmation>,
@@ -191,6 +219,7 @@ impl Host {
             || self.palette
             || self.popup_open
             || self.messages_open
+            || self.layout_picker.is_some()
             || self.confirm.is_some()
             || !self.clipboard_request.is_empty()
     }
@@ -701,6 +730,17 @@ impl App {
                 return Err(error.into());
             }
         };
+        let saved = self
+            .workspace
+            .windows
+            .iter()
+            .flat_map(|window| &window.tabs)
+            .find_map(|tab| tab.panes.get(&id));
+        let title_override = saved.and_then(|pane| pane.title_override.clone());
+        let title = title_override
+            .clone()
+            .or_else(|| saved.and_then(|pane| pane.title.clone()))
+            .unwrap_or_default();
         self.panes.insert(
             id,
             Pane {
@@ -709,7 +749,8 @@ impl App {
                 wake_pending,
                 input: VecDeque::new(),
                 input_bytes: 0,
-                title: String::new(),
+                title,
+                title_override,
                 cwd: directory,
                 running: None,
                 activity: Activity::default(),
@@ -815,6 +856,7 @@ impl App {
             focus_text_input: false,
             popup_open: false,
             messages_open: false,
+            layout_picker: None,
             palette: false,
             palette_query: String::new(),
             confirm: None,
@@ -1027,18 +1069,20 @@ impl App {
         {
             self.errors.push(error.to_string());
         }
-        if let Ok(terminal) = pane.session.terminal() {
-            pane.title = terminal.title.clone();
-            if let Some(directory) = directory_from_osc(&terminal.working_directory) {
-                pane.cwd = directory;
-            }
+        if let Ok(terminal) = pane.session.terminal()
+            && let Some(directory) = directory_from_osc(&terminal.working_directory)
+        {
+            pane.cwd = directory;
         }
         let events = pane.session.events().collect::<Vec<_>>();
         for event in events {
             match event {
                 SessionEvent::Effect(vt::Effect::Title(title)) => {
-                    pane.activity
-                        .title_changed(&String::from_utf8_lossy(&title));
+                    let title = String::from_utf8_lossy(&title);
+                    pane.activity.title_changed(&title);
+                    if pane.title_override.is_none() {
+                        pane.title = title.into_owned();
+                    }
                 }
                 SessionEvent::Effect(vt::Effect::Progress { state, .. }) => {
                     stopped |= pane.activity.progress_reported(state, Instant::now());
@@ -1116,7 +1160,6 @@ impl App {
             pane.running = None;
             stopped |= pane.activity.clear();
         }
-        let cwd = pane.cwd.clone();
         let indicators_changed = stopped
             || previous_title != pane.title
             || previous_status
@@ -1140,10 +1183,9 @@ impl App {
         for window in &mut self.workspace.windows {
             for tab in &mut window.tabs {
                 if let Some(saved) = tab.panes.get_mut(&id)
-                    && saved.working_directory != cwd
+                    && let Some(pane) = self.panes.get(&id)
                 {
-                    saved.working_directory = cwd.clone();
-                    changed = true;
+                    changed |= pane.update_saved(saved);
                 }
             }
         }
@@ -1821,6 +1863,19 @@ impl App {
                     self.errors.push(error);
                 }
             }
+            Action::OpenLayout => {
+                let choices = workspace::saved_layouts(&self.config_loader.home, &self.state_path);
+                let path = choices
+                    .iter()
+                    .find(|choice| choice.available)
+                    .map(|choice| choice.path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                host.layout_picker = Some(LayoutPicker {
+                    choices,
+                    path,
+                    error: None,
+                });
+            }
             Action::ReloadConfig => {
                 if let Some(theme) = event_loop.system_theme() {
                     self.config_loader.dark_mode = theme == Theme::Dark;
@@ -2021,20 +2076,17 @@ impl App {
                 self.errors.push(error.to_string());
             }
         }
-        let mut directories_changed = false;
+        let mut metadata_changed = false;
         for window in &mut self.workspace.windows {
             for tab in &mut window.tabs {
                 for (id, saved) in &mut tab.panes {
-                    if let Some(pane) = self.panes.get(id)
-                        && saved.working_directory != pane.cwd
-                    {
-                        saved.working_directory = pane.cwd.clone();
-                        directories_changed = true;
+                    if let Some(pane) = self.panes.get(id) {
+                        metadata_changed |= pane.update_saved(saved);
                     }
                 }
             }
         }
-        if directories_changed {
+        if metadata_changed {
             self.changed();
         }
         for id in self
@@ -2220,6 +2272,7 @@ impl App {
         );
         self.activity_flashes.remove(&active.id);
         let mut commands = Vec::new();
+        let mut layout_command = None;
         let mut tab_selection = None;
         let mut presentation_changed = false;
         let mut retry_pane = None;
@@ -2978,6 +3031,9 @@ impl App {
                         });
                     });
             }
+            if let Some(picker) = &mut host.layout_picker {
+                layout_command = show_layout_picker(ctx, picker).or(layout_command.take());
+            }
             let _ = show_messages(ctx, &mut self.errors);
             host.messages_open = !self.errors.is_empty();
         });
@@ -3003,6 +3059,9 @@ impl App {
         }
         for action in commands {
             self.action(event_loop, host, action, false);
+        }
+        if let Some(command) = layout_command {
+            self.layout_command(host, command);
         }
         if let Some(update) = &mut output.platform_output.accesskit_update {
             for text in host.accessibility.values() {
@@ -3073,6 +3132,51 @@ impl App {
                     .layer_id_at(position)
                     .is_none_or(|layer| layer.order == egui::Order::Background)
             })
+    }
+    fn layout_command(&mut self, host: &mut Host, command: LayoutCommand) {
+        let result = match command {
+            LayoutCommand::Close => {
+                host.layout_picker = None;
+                Ok(())
+            }
+            LayoutCommand::Browse => self
+                .platform
+                .as_ref()
+                .ok_or_else(|| "macOS file services are unavailable".to_owned())
+                .and_then(Platform::choose_layout_path)
+                .map(|path| {
+                    if let Some(path) = path
+                        && let Some(picker) = &mut host.layout_picker
+                    {
+                        picker.path = path.to_string_lossy().into_owned();
+                        picker.error = None;
+                    }
+                }),
+            LayoutCommand::Open(path) => {
+                let path = path
+                    .to_str()
+                    .and_then(|path| path.strip_prefix("~/"))
+                    .map(|path| self.config_loader.home.join(path))
+                    .unwrap_or(path);
+                workspace::load_layout(&path)
+                    .and_then(|layout| {
+                        let mut next = self.workspace.clone();
+                        next.append_layout(layout)?;
+                        self.remember();
+                        self.workspace = next;
+                        self.changed();
+                        host.layout_picker = None;
+                        Ok(())
+                    })
+                    .map_err(|error| format!("Could not open saved layout: {error}"))
+            }
+        };
+        if let Err(error) = result
+            && let Some(picker) = &mut host.layout_picker
+        {
+            picker.error = Some(error);
+        }
+        host.repaint();
     }
     fn mouse(&mut self, host: &mut Host, action: vt::MouseAction, button: Option<vt::MouseButton>) {
         if let Some((id, axis, bounds)) = host.divider_drag {
@@ -3267,6 +3371,7 @@ fn palette_actions() -> Vec<(&'static str, Action)> {
         ("Equalize splits", Action::EqualizeSplits),
         ("Find", Action::StartSearch),
         ("Open configuration", Action::OpenConfig),
+        ("Open saved layout", Action::OpenLayout),
         ("Reload configuration", Action::ReloadConfig),
         ("Toggle quick terminal", Action::ToggleQuickTerminal),
         ("Undo layout change", Action::Undo),
@@ -3353,6 +3458,11 @@ impl ApplicationHandler<Event> for App {
                         }
                     }
                 } else if let PlatformEvent::Action(action) = event {
+                    if action == Action::OpenLayout && self.windows.is_empty() {
+                        let id = self.add_window(false);
+                        self.reconcile(event_loop);
+                        self.active = Some(id);
+                    }
                     let key = self
                         .windows
                         .iter()
@@ -4044,6 +4154,73 @@ fn directory_from_osc(value: &str) -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+fn show_layout_picker(ctx: &egui::Context, picker: &mut LayoutPicker) -> Option<LayoutCommand> {
+    let mut open = true;
+    let mut command = None;
+    egui::Window::new("Open saved layout")
+        .open(&mut open)
+        .collapsible(false)
+        .default_width(560.0)
+        .show(ctx, |ui| {
+            ui.label("Open saved tabs and panes in new windows.");
+            ui.label("New shells start in the saved directories.");
+            ui.add_space(8.0);
+            for choice in &picker.choices {
+                let selected = Path::new(&picker.path) == choice.path;
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            choice.available,
+                            egui::Button::selectable(selected, &choice.name),
+                        )
+                        .on_hover_text(choice.path.display().to_string())
+                        .clicked()
+                    {
+                        picker.path = choice.path.to_string_lossy().into_owned();
+                        picker.error = None;
+                    }
+                    if !choice.available {
+                        ui.weak("No saved layout found");
+                    }
+                });
+            }
+            ui.separator();
+            ui.label("Saved layout file or folder");
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut picker.path)
+                            .desired_width(ui.available_width() - 80.0),
+                    )
+                    .changed()
+                {
+                    picker.error = None;
+                }
+                if ui.button("Browse…").clicked() {
+                    command = Some(LayoutCommand::Browse);
+                }
+            });
+            if let Some(error) = &picker.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    command = Some(LayoutCommand::Close);
+                }
+                if ui
+                    .add_enabled(!picker.path.trim().is_empty(), egui::Button::new("Open"))
+                    .clicked()
+                {
+                    command = Some(LayoutCommand::Open(PathBuf::from(picker.path.trim())));
+                }
+            });
+        });
+    if !open || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        command = Some(LayoutCommand::Close);
+    }
+    command
+}
+
 fn show_messages(ctx: &egui::Context, errors: &mut Vec<String>) -> Option<egui::Response> {
     if errors.is_empty() {
         return None;
@@ -4142,6 +4319,82 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_layout_picker_opens_the_selected_path_and_cancels() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let path = PathBuf::from("/tmp/saved-rustty-workspace.json");
+        let mut picker = LayoutPicker {
+            choices: vec![workspace::SavedLayout {
+                name: "Rustty".into(),
+                path: path.clone(),
+                available: true,
+            }],
+            path: path.display().to_string(),
+            error: None,
+        };
+        let mut frame = |events| {
+            let mut command = None;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        Pos2::ZERO,
+                        Vec2::new(800.0, 600.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |_| {
+                    command = show_layout_picker(&context, &mut picker).or(command.take());
+                },
+            );
+            let open = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .and_then(|update| {
+                    update.nodes.iter().find_map(|(_, node)| {
+                        if node.label() != Some("Open") {
+                            return None;
+                        }
+                        let rect = node.bounds()?;
+                        Some(Pos2::new(
+                            ((rect.x0 + rect.x1) / 2.0) as f32,
+                            ((rect.y0 + rect.y1) / 2.0) as f32,
+                        ))
+                    })
+                });
+            output.textures_delta.clear();
+            (command, open)
+        };
+        frame(vec![]);
+        let point = frame(vec![]).1.expect("accessible Open button");
+        let mut command = None;
+        for pressed in [true, false] {
+            command = frame(vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ])
+            .0;
+        }
+        assert!(matches!(command, Some(LayoutCommand::Open(selected)) if selected == path));
+        let command = frame(vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }])
+        .0;
+        assert!(matches!(command, Some(LayoutCommand::Close)));
+    }
 
     #[test]
     fn messages_close_by_click_or_escape_without_terminal_focus() {

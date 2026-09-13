@@ -33,6 +33,12 @@ Tabs, splits, zoom, quadrant navigation, clipboard and
 search use the configured Ghostty keybindings. Window layouts and pane directories
 are saved separately under `com.rustty.app`.
 
+File → Open Saved Layout lists the last saved layouts from Ghostty Local,
+Ghostty and Rustty, and can browse for another Rustty workspace JSON or Ghostty
+saved-state folder. Imported tabs and panes open in new windows with fresh shells
+in their saved directories. Existing sessions and the source files stay intact;
+the imported layout participates in Rustty's normal saving and undo history.
+
 Tab colors apply to tab controls, split focus outlines and completion flashes;
 unassigned tabs use the macOS system accent. Inactive tabs and directory labels
 underline running commands, while `▶` counts panes explicitly reporting work

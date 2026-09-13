@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
     ptr::NonNull,
     rc::Rc,
     sync::{
@@ -31,9 +31,10 @@ use objc2::{
 use objc2_app_kit::{
     NSAccessibility, NSAnimatablePropertyContainer, NSAnimationContext, NSApplication,
     NSApplicationActivationOptions, NSColor, NSColorSpace, NSEvent, NSFloatingWindowLevel, NSMenu,
-    NSPasteboard, NSPasteboardAccessBehavior, NSPasteboardItem, NSPasteboardTypeString,
-    NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen, NSUserInterfaceItemIdentification,
-    NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowTabbingMode,
+    NSModalResponseCancel, NSModalResponseOK, NSOpenPanel, NSPasteboard,
+    NSPasteboardAccessBehavior, NSPasteboardItem, NSPasteboardTypeString, NSPopUpMenuWindowLevel,
+    NSRunningApplication, NSScreen, NSUserInterfaceItemIdentification, NSView, NSWindow,
+    NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowTabbingMode,
     NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_core_foundation::{
@@ -588,6 +589,38 @@ impl Platform {
         open_native_url(&url)
     }
 
+    pub fn choose_layout_path(&self) -> Result<Option<PathBuf>, String> {
+        let panel = NSOpenPanel::openPanel(self.mtm);
+        panel.setTitle(Some(&NSString::from_str("Import Saved Layout")));
+        panel.setMessage(Some(&NSString::from_str(
+            "Choose a Rustty workspace JSON file or a Ghostty .savedState folder.",
+        )));
+        panel.setPrompt(Some(&NSString::from_str("Import")));
+        panel.setCanChooseFiles(true);
+        panel.setCanChooseDirectories(true);
+        panel.setAllowsMultipleSelection(false);
+        panel.setCanCreateDirectories(false);
+        panel.setTreatsFilePackagesAsDirectories(false);
+        // The string-based API avoids adding a UniformTypeIdentifiers dependency.
+        #[allow(deprecated)]
+        panel.setAllowedFileTypes(Some(&NSArray::from_slice(&[
+            &*NSString::from_str("json"),
+            &*NSString::from_str("savedState"),
+        ])));
+        let response = panel.runModal();
+        if response == NSModalResponseCancel {
+            return Ok(None);
+        }
+        if response != NSModalResponseOK {
+            return Err("Could not display the saved layout picker".into());
+        }
+        panel
+            .URL()
+            .and_then(|url| url.to_file_path())
+            .map(Some)
+            .ok_or_else(|| "The selected layout has no valid file path".into())
+    }
+
     pub fn open_config(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -1139,6 +1172,7 @@ fn make_menu() -> Result<(Menu, Vec<(MenuItem, Action)>), String> {
     for (name, action) in [
         ("New Window", Action::NewWindow),
         ("New Tab", Action::NewTab),
+        ("Open Saved Layout…", Action::OpenLayout),
         ("Split Right", Action::NewSplit(Direction::Right)),
         ("Split Down", Action::NewSplit(Direction::Down)),
         ("Close Surface", Action::CloseSurface),

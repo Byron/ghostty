@@ -159,14 +159,13 @@ impl Terminal {
         if cols == self.cols && rows == self.rows {
             return;
         }
-        self.primary.resize(cols.into(), rows.into(), true);
+        self.primary
+            .resize(cols.into(), rows.into(), self.modes.dec(7));
         if let Some(alt) = &mut self.alternate {
             alt.resize(cols.into(), rows.into(), false);
         }
-        let old_cols = self.tabstops.len();
-        self.tabstops.resize(cols.into(), false);
-        for i in old_cols..self.tabstops.len() {
-            self.tabstops[i] = i > 0 && i % 8 == 0;
+        if cols != self.cols {
+            self.tabstops = (0..cols).map(|i| i > 0 && i % 8 == 0).collect();
         }
         self.cols = cols;
         self.rows = rows;
@@ -462,6 +461,12 @@ impl Terminal {
 
     fn put_cell(&mut self, text: String, width: u8, spacer_head: bool) {
         let cursor = self.screen().cursor.clone();
+        let old_width = self.screen().rows[cursor.row].cells[cursor.col].width;
+        if cursor.row > 0 && cursor.col <= 1 && old_width != width && old_width != 1 {
+            let previous = &mut self.screen_mut().rows[cursor.row - 1];
+            previous.cells.last_mut().unwrap().spacer_head = false;
+            previous.dirty = true;
+        }
         let row = &mut self.screen_mut().rows[cursor.row];
         row.erase(
             cursor.col,
@@ -697,8 +702,9 @@ impl Terminal {
     }
 
     fn insert_blanks(&mut self, count: usize) {
+        self.screen_mut().cursor.pending_wrap = false;
         let cur = self.screen().cursor.clone();
-        if cur.col > self.margins.right {
+        if cur.col < self.margins.left || cur.col > self.margins.right {
             return;
         }
         let end = self.margins.right + 1;
@@ -707,22 +713,25 @@ impl Terminal {
         row.cells[cur.col..end].rotate_right(count);
         row.cells[cur.col..cur.col + count].fill(Cell::blank(cur.style.background));
         row.repair_wide(cur.style.background);
-        row.wrapped = false;
         self.changed();
     }
 
     fn delete_chars(&mut self, count: usize) {
         let cur = self.screen().cursor.clone();
-        if cur.col > self.margins.right {
+        if cur.col < self.margins.left || cur.col > self.margins.right {
             return;
         }
         let end = self.margins.right + 1;
         let count = count.max(1).min(end - cur.col);
+        self.screen_mut().split_cell_boundary(cur.col);
+        self.screen_mut().split_cell_boundary(cur.col + count);
+        self.screen_mut().split_cell_boundary(end);
         let row = &mut self.screen_mut().rows[cur.row];
         row.cells[cur.col..end].rotate_left(count);
         row.cells[end - count..end].fill(Cell::blank(cur.style.background));
         row.repair_wide(cur.style.background);
         row.wrapped = false;
+        self.screen_mut().cursor.pending_wrap = false;
         self.changed();
     }
 
@@ -975,13 +984,17 @@ impl Terminal {
             ([], b'X') => {
                 let cur = self.screen().cursor.clone();
                 let protected = self.screen().iso_protection;
+                let end = cur.col.saturating_add(count).min(self.cols as usize);
+                self.screen_mut().split_cell_boundary(cur.col);
+                self.screen_mut().split_cell_boundary(end);
                 self.screen_mut().rows[cur.row].erase(
                     cur.col,
-                    cur.col.saturating_add(count),
+                    end,
                     cur.style.background,
                     protected,
                 );
                 self.screen_mut().rows[cur.row].wrapped = false;
+                self.screen_mut().cursor.pending_wrap = false;
                 self.changed();
             }
             ([], b'L' | b'M') => {

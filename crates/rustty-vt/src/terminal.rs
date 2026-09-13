@@ -1,8 +1,8 @@
-use crate::clipboard;
 use crate::modes::Modes;
 use crate::query::{self, Query};
 use crate::screen::*;
 use crate::unicode::{self, properties};
+use crate::{clipboard, dnd};
 use base64::Engine;
 use rustty_parser::{Event, Parser};
 
@@ -15,6 +15,8 @@ pub enum Effect {
     Bell,
     ClipboardRead(clipboard::Read),
     ClipboardWrite(clipboard::Write),
+    /// Drag target registration, acceptance, or drop completion changed.
+    DragAndDrop(dnd::Event),
     /// Serviced by built-in query defaults or the synchronous host callbacks.
     Query(Query),
     Notification {
@@ -39,6 +41,12 @@ pub enum Effect {
 /// twice. OSC 52 writes need no acknowledgement; unanswered reads return empty.
 pub trait EffectHandler {
     fn effect(&mut self, effect: Effect);
+
+    /// Observe DND state before the next parser event can change it.
+    /// The default forwards only the event, like deferred `Terminal::feed`.
+    fn drag_and_drop(&mut self, event: dnd::Event, _state: Option<&dnd::State>) {
+        self.effect(Effect::DragAndDrop(event));
+    }
 
     fn color_scheme(&mut self) -> Option<query::ColorScheme> {
         None
@@ -110,6 +118,8 @@ pub struct Terminal {
     /// A transfer retains the value that was configured when it began.
     pub clipboard_write_limit: usize,
     pub glyphs: crate::glyph::Glyphs,
+    /// OSC 72 state, allocated on registration and omitted from snapshots.
+    pub kitty_dnd: Option<dnd::State>,
     pub(crate) clipboard: clipboard::kitty::State,
     pub title: String,
     pub working_directory: String,
@@ -172,6 +182,7 @@ impl Terminal {
             visible: true,
             clipboard_write_limit: 64 * 1024 * 1024,
             glyphs: crate::glyph::Glyphs::default(),
+            kitty_dnd: None,
             clipboard: clipboard::kitty::State::default(),
             title: String::new(),
             working_directory: String::new(),
@@ -280,6 +291,8 @@ impl Terminal {
     /// Feed input with runtime `query_defaults` and return deferred host effects.
     /// Query replies use the current terminal geometry. For fully headless or
     /// readonly hosts, use `feed_with_handler` and opt into the needed callbacks.
+    /// DND effects carry event tags; use `feed_with_handler` to observe the state
+    /// at each event instead of the final state after the complete input batch.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut pending = Vec::new();
@@ -301,8 +314,8 @@ impl Terminal {
         effects
     }
 
-    /// Feed bytes while servicing host queries and clipboard requests before
-    /// the next parser event. Replies are delivered through `handler.effect`.
+    /// Feed bytes while servicing host queries, clipboard requests, and DND
+    /// state callbacks before the next parser event. Replies go to `handler.effect`.
     /// Hosts that need deferred consent can use `feed` and `Read::reply` instead.
     pub fn feed_with_handler(&mut self, bytes: &[u8], handler: &mut impl EffectHandler) {
         let mut effects = Vec::new();
@@ -313,6 +326,9 @@ impl Terminal {
             self.handle(event, &mut effects, write_enabled, read_enabled);
             for effect in effects.drain(..) {
                 match effect {
+                    Effect::DragAndDrop(event) => {
+                        handler.drag_and_drop(event, self.kitty_dnd.as_ref());
+                    }
                     Effect::ClipboardRead(request) => {
                         let result = if read_enabled {
                             handler.clipboard_read(&request)
@@ -497,6 +513,11 @@ impl Terminal {
         let shell_command_events = self.shell_command_events;
         let visible = self.visible;
         let clipboard = std::mem::take(&mut self.clipboard);
+        // RIS interrupts chunking while retaining the drag registration and data.
+        let mut kitty_dnd = self.kitty_dnd.take();
+        if let Some(state) = &mut kitty_dnd {
+            state.chunking = dnd::Chunking::default();
+        }
         let clipboard_write_limit = self.clipboard_write_limit;
         let mut glyphs = std::mem::take(&mut self.glyphs);
         glyphs.reset();
@@ -535,6 +556,7 @@ impl Terminal {
         self.shell_command_events = shell_command_events;
         self.visible = visible;
         self.clipboard = clipboard;
+        self.kitty_dnd = kitty_dnd;
         self.clipboard_write_limit = clipboard_write_limit;
         self.glyphs = glyphs;
         self.width_px = width_px;
@@ -2332,6 +2354,7 @@ impl Terminal {
                 clipboard_read_enabled,
                 effects,
             ),
+            72 => dnd::handle(&mut self.kitty_dnd, data, bell, effects),
             133 => self.osc133(data, effects),
             1 | 22 => {}
             _ => effects.push(Effect::UnknownSequence(format!("OSC {number}"))),

@@ -31,6 +31,7 @@ import reset_stream
 import dnd_requests
 import style_lifecycle_requests
 import selection_requests
+import selection_adjust_requests
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -486,6 +487,10 @@ def main():
                 requests.extend((request, covers) for request, covers in selection_requests.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in selection_requests.snapshot_requests(peers[0])
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in selection_adjust_requests.requests()
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in selection_adjust_requests.snapshot_requests(peers[0])
                                 if not args.case or args.case in request["id"])
             if args.page_layout or args.thorough:
                 requests.extend((request, covers) for request, covers in page_layout_requests.requests()

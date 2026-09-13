@@ -86,7 +86,7 @@ minimized inherited failures with their original corpus source identifiers.
 `--grid` compares direct selection, literal search and tracked-reference APIs.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,
 `clear_selection`, `select_word`, `select_word_between`, `select_line`,
-`select_all`, `select_output`, `track`, `untrack`, `viewport`, `limits`, `search`
+`select_all`, `select_output`, `adjust_selection`, `track`, `untrack`, `viewport`, `limits`, `search`
 and `observe`.
 Points name `active`, `viewport`, `screen` or `history` coordinates. Observations
 translate each implementation's own handles to those coordinates and include
@@ -120,6 +120,15 @@ and per-cell content kinds. It preserves explicit spaces, rejects prompt/input
 clicks, and retains the native screen-origin fallback before the first prompt.
 Cases include absent and clipped prompts, continuation groups, unwritten and
 background-only cells, history, alternate screens and mixed-width pages.
+
+`--grid --case grid/selection-adjust/` compares all ten native adjustment motions.
+The `adjust_selection` action takes an `adjustment` and changes the installed
+selection's logical end, preserving its anchor and rectangular mode. It does
+not scroll the viewport. Horizontal motion skips unwritten cells but includes
+printed spaces; down skips unwritten rows. Direct page motion clamps only at
+its destination, while down retains clamps from intervening narrow pages.
+The 150 fixtures passed 450 delivery comparisons, including reversed and
+collapsed endpoints, wide spacers, hard/soft wraps, history and restored pages.
 
 Literal search formats each retained page separately and follows native active
 and history traversal, including repeated soft-wrap matches and trimmed blank
@@ -208,7 +217,7 @@ resets, handle reuse and scrollback limits, including release of an inactive
 screen's tracked handle. Restoring a new terminal while
 the adapter owns tracked handles is explicitly unsupported; those external
 lifetimes need a separate API comparison. Complete selection mutation lifetimes,
-adjustments, gestures and styled selection formatting remain uncovered, as do
+gestures and styled selection formatting remain uncovered, as do
 incremental search and search selection. The failing grid cases
 remain part of `--grid` and `--thorough`.
 

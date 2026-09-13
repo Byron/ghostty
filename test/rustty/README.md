@@ -100,6 +100,16 @@ for OSC 52, which has no write acknowledgement or session grants. Cases compare
 binary data, text MIME preference, selectors, base64 validation, terminators,
 host decisions and ordering with other effects. No system clipboard is accessed.
 
+Kitty OSC 5522 cases additionally compare metadata validation, read MIME filtering,
+targets listings, DATA chunk boundaries, streamed write transactions, aliases,
+write acknowledgements and remembered grants. Both adapters use the native
+status/result APIs. `clipboard_read_enabled`, `clipboard_write_enabled` and
+`clipboard_write_limit` configure the host; a `clipboard_options` operation may
+change those settings during a transaction. `terminal_reset` directly resets
+the terminal state, while `reset` delivers RIS through the parser, so their
+different effects on clipboard grants are tested explicitly. One-time passwords
+from paste events and exhaustive allocation/resource limits remain uncovered.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;

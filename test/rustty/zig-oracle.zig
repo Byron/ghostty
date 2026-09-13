@@ -40,6 +40,9 @@ const Operation = struct {
     cols: u16 = 0,
     rows: u16 = 0,
     input: ?input_adapter.Event = null,
+    clipboard_read_enabled: ?bool = null,
+    clipboard_write_enabled: ?bool = null,
+    clipboard_write_limit: ?usize = null,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -50,6 +53,9 @@ const Request = struct {
     operations: []const Operation = &.{},
     codepoints: []const u32 = &.{},
     clipboard_replies: []const ClipboardReply = &.{},
+    clipboard_read_enabled: bool = true,
+    clipboard_write_enabled: bool = true,
+    clipboard_write_limit: usize = 64 * 1024 * 1024,
 };
 const ClipboardStatus = enum { success, denied, unsupported, busy, invalid_data, io_error, none };
 const ClipboardReply = struct {
@@ -158,6 +164,9 @@ const Context = struct {
     clipboard_replies: []const DecodedClipboardReply,
     clipboard_reply_index: usize = 0,
     invalid_read_status: bool = false,
+    clipboard_read_enabled: bool,
+    clipboard_write_enabled: bool,
+    clipboard_write_limit: usize,
 
     fn append(kind: []const u8, bytes: []const u8) void {
         const self = current.?;
@@ -314,8 +323,6 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         .kitty_image_loading_limits = .direct,
     });
     defer t.deinit(alloc);
-    var stream = terminalStream(alloc, &t);
-    defer stream.deinit();
     const clipboard_replies = try alloc.alloc(DecodedClipboardReply, request.clipboard_replies.len);
     for (request.clipboard_replies, clipboard_replies) |source, *destination| {
         const contents = try alloc.alloc(vt.clipboard.Content, source.contents.len);
@@ -326,9 +333,17 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         for (source.available, available) |mime, *decoded| decoded.* = try hexDecode(alloc, mime);
         destination.* = .{ .status = source.status, .contents = contents, .available = available, .remember = source.remember };
     }
-    var ctx: Context = .{ .alloc = alloc, .clipboard_replies = clipboard_replies };
+    var ctx: Context = .{
+        .alloc = alloc,
+        .clipboard_replies = clipboard_replies,
+        .clipboard_read_enabled = request.clipboard_read_enabled,
+        .clipboard_write_enabled = request.clipboard_write_enabled,
+        .clipboard_write_limit = request.clipboard_write_limit,
+    };
     current = &ctx;
     defer current = null;
+    var stream = terminalStream(alloc, &t);
+    defer stream.deinit();
     var observations: std.ArrayList(Observation) = .empty;
     var snapshots: std.ArrayList([]const u8) = .empty;
     var snapshot_source: std.Io.Reader = .fixed(&.{});
@@ -345,6 +360,13 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             try stream.handler.resize(.{ .cols = op.cols, .rows = op.rows });
         } else if (std.mem.eql(u8, op.op, "reset")) {
             stream.nextSlice("\x1bc");
+        } else if (std.mem.eql(u8, op.op, "terminal_reset")) {
+            t.fullReset();
+        } else if (std.mem.eql(u8, op.op, "clipboard_options")) {
+            if (op.clipboard_read_enabled) |value| ctx.clipboard_read_enabled = value;
+            if (op.clipboard_write_enabled) |value| ctx.clipboard_write_enabled = value;
+            if (op.clipboard_write_limit) |value| ctx.clipboard_write_limit = value;
+            configureClipboard(&stream);
         } else if (std.mem.eql(u8, op.op, "observe")) {
             try observations.append(alloc, try observe(alloc, &t));
         } else if (std.mem.eql(u8, op.op, "input")) {
@@ -421,9 +443,15 @@ fn terminalStream(alloc: Allocator, terminal: *vt.Terminal) vt.TerminalStream {
     result.handler.effects.pwd_changed = Context.pwd;
     result.handler.effects.desktop_notification = Context.notification;
     result.handler.effects.progress_report = Context.progress;
-    result.handler.effects.clipboard_write = Context.clipboardWrite;
-    result.handler.effects.clipboard_read = Context.clipboardRead;
+    configureClipboard(&result);
     return result;
+}
+
+fn configureClipboard(stream: *vt.TerminalStream) void {
+    const ctx = current.?;
+    stream.handler.effects.clipboard_write = if (ctx.clipboard_write_enabled) Context.clipboardWrite else null;
+    stream.handler.effects.clipboard_read = if (ctx.clipboard_read_enabled) Context.clipboardRead else null;
+    stream.handler.kitty_clipboard_write_max_bytes = ctx.clipboard_write_limit;
 }
 
 fn observe(alloc: Allocator, t: *vt.Terminal) !Observation {

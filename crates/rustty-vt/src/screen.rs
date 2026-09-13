@@ -350,6 +350,9 @@ pub struct Screen {
     pub(crate) metadata: crate::snapshot::ScreenMetadata,
     #[serde(skip)]
     pub graphics: crate::graphics::Graphics,
+    /// Logical width. Restored physical rows may retain a different width until
+    /// the terminal receives its next mutation and reflows them.
+    pub columns: usize,
     pub rows: Vec<Row>,
     pub history: VecDeque<Row>,
     pub cursor: Cursor,
@@ -373,6 +376,7 @@ impl Screen {
         Self {
             metadata: crate::snapshot::ScreenMetadata::default(),
             graphics: crate::graphics::Graphics::default(),
+            columns: cols,
             rows: (0..rows)
                 .map(|i| Row::new(i as u64, cols, Color::Default))
                 .collect(),
@@ -410,6 +414,7 @@ impl Screen {
         Self {
             metadata: self.metadata.clone(),
             graphics: self.graphics.snapshot(self),
+            columns: self.columns,
             rows: self.viewport().cloned().collect(),
             history: VecDeque::new(),
             cursor,
@@ -630,7 +635,13 @@ impl Screen {
     }
 
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
-        let old_cols = self.rows[0].cells.len();
+        let old_cols = self.columns;
+        let columns_changed = cols != old_cols || self.metadata.needs_reflow;
+        if columns_changed {
+            self.metadata.reflow_generation = self.metadata.reflow_generation.wrapping_add(1);
+        }
+        self.columns = cols;
+        self.metadata.needs_reflow = false;
         let old_rows = self.rows.len();
         let cursor_y = self.cursor.row;
         let old_cursor = GridPoint {
@@ -663,7 +674,7 @@ impl Screen {
             );
         }
         let mut mapped_cursor = old_cursor;
-        if cols != old_cols && reflow {
+        if columns_changed && reflow {
             let height = if height_first { rows } else { old_rows };
             let active_start = contents.len().saturating_sub(height);
             let old_wrapped = contents
@@ -847,7 +858,7 @@ impl Screen {
             }
             contents = output;
             self.graphics.reflow(&map);
-        } else if cols != old_cols {
+        } else if columns_changed {
             for row in &mut contents {
                 row.cells.resize(cols, Cell::default());
                 row.repair_wide(Color::Default);

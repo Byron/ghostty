@@ -332,3 +332,86 @@ fn kitty_keyboard_ring_overflows_pops_and_resumes_after_restore() {
         );
     }
 }
+
+#[test]
+fn mixed_physical_widths_roundtrip_and_reflow_only_for_live_input() {
+    let mut source = Terminal::new(4, 1, 10);
+    source.feed(b"abcd");
+    let narrow_page = records(&encode_to_vec(&source).unwrap())[2].clone();
+    let mut logical = Terminal::new(8, 2, 10);
+    logical.feed(b"\x1b[31");
+    let mut stream = records(&encode_to_vec(&logical).unwrap());
+    stream[2] = narrow_page;
+    stream[1].1[12..14].copy_from_slice(&3u16.to_le_bytes());
+    stream[1].1[17] = 1; // pending wrap at the physical edge, x=3
+    let mut terminal = decode(frame(&stream).as_slice(), DecodeOptions::default()).unwrap();
+    assert_eq!(terminal.screen().columns, 8);
+    assert_eq!(terminal.screen().rows[0].cells.len(), 4);
+    assert_eq!(terminal.screen().cursor.col, 3);
+    assert!(terminal.screen().cursor.pending_wrap);
+    let restored = decode(
+        encode_to_vec(&terminal).unwrap().as_slice(),
+        DecodeOptions::default(),
+    )
+    .unwrap();
+    same_terminal(&terminal, &restored);
+    terminal.feed(b"");
+    assert_eq!(terminal.screen().rows[0].cells.len(), 4);
+    terminal.feed(b"mX");
+    assert!(terminal.screen().all_rows().all(|row| row.cells.len() == 8));
+    assert_eq!(text(&terminal.screen().rows), ["abcd", "X"]);
+    assert!(!terminal.screen().rows[0].wrapped);
+    assert_eq!(
+        terminal.screen().rows[1].cells[0].style.foreground,
+        Color::Indexed(1)
+    );
+
+    let mut query = decode(frame(&stream).as_slice(), DecodeOptions::default()).unwrap();
+    query.feed(b"m\x1b[6n\x1b[?7$p\x1bP$qm\x1b\\");
+    assert_eq!(query.screen().rows[0].cells.len(), 4);
+    assert_eq!(query.screen().cursor.col, 3);
+
+    // Wider physical rows preserve their hidden suffix until normalization.
+    let mut source = Terminal::new(8, 1, 10);
+    source.feed(b"abcdef");
+    let wide_page = records(&encode_to_vec(&source).unwrap())[2].clone();
+    let mut stream = records(&encode_to_vec(&Terminal::new(4, 2, 10)).unwrap());
+    stream[2] = wide_page;
+    let bytes = frame(&stream);
+    for input in [
+        b"X".as_slice(),
+        b"\x1b[8;8H!",
+        b"\x1b[?69h\x1b[2;3s\x1b[2S",
+        b"\x1b[3J",
+        b"\x1b[?1049hY\x1b[?1049lZ",
+    ] {
+        let mut terminal = decode(bytes.as_slice(), DecodeOptions::default()).unwrap();
+        assert_eq!(terminal.screen().rows[0].text(), "abcdef");
+        terminal.feed(input);
+        assert!(terminal.screen().all_rows().all(|row| row.cells.len() == 4));
+        assert!(terminal.screen().cursor.col < 4);
+        assert!(terminal.screen().cursor.row < 2);
+    }
+}
+
+#[test]
+fn history_restore_stops_after_lazy_normalization_changes_the_row_layout() {
+    let mut stream = records(&fixture());
+    let narrow_page = records(&encode_to_vec(&Terminal::new(1, 1, 10)).unwrap())[2].clone();
+    let first_history_page = stream.iter().position(|(tag, _)| *tag == 4).unwrap() + 1;
+    stream[first_history_page] = narrow_page;
+    let bytes = frame(&stream);
+    let mut decoder = Decoder::new(bytes.as_slice(), DecodeOptions::default());
+    let mut terminal = decoder.ready().unwrap();
+    assert_eq!(
+        decoder.next_history(&mut terminal).unwrap().unwrap().rows,
+        1
+    );
+    assert_eq!(terminal.primary_screen().history[0].cells.len(), 1);
+    terminal.feed(b"X");
+    assert_eq!(
+        decoder.next_history(&mut terminal).unwrap().unwrap().rows,
+        0
+    );
+    assert!(decoder.next_history(&mut terminal).unwrap().is_none());
+}

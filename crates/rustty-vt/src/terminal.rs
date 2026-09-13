@@ -167,6 +167,18 @@ impl Terminal {
         effects
     }
 
+    fn normalize_rows(&mut self) {
+        let (cols, rows) = (usize::from(self.cols), usize::from(self.rows));
+        if self.primary.metadata.needs_reflow {
+            self.primary.resize(cols, rows, self.modes.dec(7));
+        }
+        if let Some(screen) = &mut self.alternate
+            && screen.metadata.needs_reflow
+        {
+            screen.resize(cols, rows, false);
+        }
+    }
+
     pub fn limits(&self) -> ScrollbackLimits {
         self.primary.limits
     }
@@ -407,6 +419,7 @@ impl Terminal {
     }
 
     pub fn print(&mut self, mut cp: char) {
+        self.normalize_rows();
         if self.status_display {
             return;
         }
@@ -603,11 +616,12 @@ impl Terminal {
 
     fn print_wrap(&mut self) {
         let y = self.screen().cursor.row;
-        if self.margins.left == 0 && self.margins.right == self.cols as usize - 1 {
+        let mark_wrap = self.screen().cursor.col == usize::from(self.cols) - 1;
+        if mark_wrap {
             self.screen_mut().rows[y].wrapped = true;
         }
         self.index();
-        if self.margins.left == 0 && self.margins.right == self.cols as usize - 1 {
+        if mark_wrap {
             let y = self.screen().cursor.row;
             self.screen_mut().rows[y].wrap_continuation = true;
         }
@@ -616,6 +630,7 @@ impl Terminal {
     }
 
     pub fn carriage_return(&mut self) {
+        self.normalize_rows();
         let col = if self.modes.dec(6) || self.screen().cursor.col >= self.margins.left {
             self.margins.left
         } else {
@@ -627,6 +642,7 @@ impl Terminal {
     }
 
     pub fn cursor_position(&mut self, row: usize, col: usize) {
+        self.normalize_rows();
         let (top, left, bottom, right) = if self.modes.dec(6) {
             (
                 self.margins.top,
@@ -645,6 +661,7 @@ impl Terminal {
     }
 
     fn cursor_vertical(&mut self, amount: usize, down: bool) {
+        self.normalize_rows();
         let y = self.screen().cursor.row;
         let target = if down {
             let bottom = if y <= self.margins.bottom {
@@ -667,6 +684,7 @@ impl Terminal {
     }
 
     fn cursor_right(&mut self, amount: usize) {
+        self.normalize_rows();
         let x = self.screen().cursor.col;
         let right = if x <= self.margins.right {
             self.margins.right
@@ -679,6 +697,7 @@ impl Terminal {
     }
 
     fn cursor_left(&mut self, amount: usize) {
+        self.normalize_rows();
         let mut remaining = amount.max(1);
         let reverse = self.modes.dec(7) && (self.modes.dec(45) || self.modes.dec(1045));
         let extended = self.modes.dec(1045);
@@ -722,6 +741,7 @@ impl Terminal {
     }
 
     pub fn index(&mut self) {
+        self.normalize_rows();
         let y = self.screen().cursor.row;
         if y == self.margins.bottom {
             let x = self.screen().cursor.col;
@@ -736,6 +756,7 @@ impl Terminal {
     }
 
     fn reverse_index(&mut self) {
+        self.normalize_rows();
         if self.screen().cursor.row == self.margins.top {
             self.scroll_down(1);
         } else {
@@ -746,6 +767,7 @@ impl Terminal {
     }
 
     fn scroll_up(&mut self, count: usize, history: bool) {
+        self.normalize_rows();
         let m = self.margins;
         let count = count.max(1).min(m.bottom - m.top + 1);
         let cols = self.cols as usize;
@@ -774,6 +796,7 @@ impl Terminal {
     }
 
     fn scroll_down(&mut self, count: usize) {
+        self.normalize_rows();
         let m = self.margins;
         let cols = self.cols as usize;
         let count = count.max(1).min(m.bottom - m.top + 1);
@@ -797,6 +820,7 @@ impl Terminal {
     }
 
     fn tab(&mut self, count: usize, backward: bool) {
+        self.normalize_rows();
         for _ in 0..count.min(self.cols as usize) {
             let col = self.screen().cursor.col;
             let next = if backward {
@@ -813,6 +837,7 @@ impl Terminal {
     }
 
     fn insert_blanks(&mut self, count: usize) {
+        self.normalize_rows();
         self.screen_mut().cursor.pending_wrap = false;
         let cur = self.screen().cursor.clone();
         if cur.col < self.margins.left || cur.col > self.margins.right {
@@ -828,6 +853,7 @@ impl Terminal {
     }
 
     fn delete_chars(&mut self, count: usize) {
+        self.normalize_rows();
         let cur = self.screen().cursor.clone();
         if cur.col < self.margins.left || cur.col > self.margins.right {
             return;
@@ -847,6 +873,7 @@ impl Terminal {
     }
 
     pub fn erase_line(&mut self, mode: u16, protected: bool) {
+        self.normalize_rows();
         let cursor = self.screen().cursor.clone();
         let protected = protected || self.screen().iso_protection;
         let cols = self.cols as usize;
@@ -866,6 +893,7 @@ impl Terminal {
     }
 
     pub fn erase_display(&mut self, mode: u16, protected: bool) {
+        self.normalize_rows();
         let cursor = self.screen().cursor.clone();
         let cols = self.cols as usize;
         let rows = self.rows as usize;
@@ -906,6 +934,7 @@ impl Terminal {
     }
 
     pub fn save_cursor(&mut self) {
+        self.normalize_rows();
         let origin = self.modes.dec(6);
         let screen = self.screen_mut();
         screen.saved_cursor = Some(SavedCursor {
@@ -916,6 +945,7 @@ impl Terminal {
     }
 
     pub fn restore_cursor(&mut self) {
+        self.normalize_rows();
         let saved = self.screen().saved_cursor.clone().unwrap_or(SavedCursor {
             cursor: Cursor::default(),
             origin: false,
@@ -936,6 +966,7 @@ impl Terminal {
     }
 
     pub fn set_mode(&mut self, private: bool, mode: u16, value: bool) {
+        self.normalize_rows();
         if !self.modes.set(private, mode, value) {
             return;
         }
@@ -1052,6 +1083,7 @@ impl Terminal {
             }
             ([b'%'], b'G') => self.screen_mut().charset.slots = [Charset::Utf8; 4],
             ([b'#'], b'8') => {
+                self.normalize_rows();
                 self.reset_margins();
                 for row in &mut self.screen_mut().rows {
                     for cell in &mut row.cells {
@@ -1110,6 +1142,7 @@ impl Terminal {
             ([], b'@') => self.insert_blanks(count),
             ([], b'P') => self.delete_chars(count),
             ([], b'X') => {
+                self.normalize_rows();
                 let cur = self.screen().cursor.clone();
                 let protected = self.screen().iso_protection;
                 let end = cur.col.saturating_add(count).min(self.cols as usize);

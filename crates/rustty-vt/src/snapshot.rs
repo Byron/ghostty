@@ -3,7 +3,8 @@
 //! The encoder streams active rows before history. Decode budgets bound record
 //! sizes and the total cells restored; PAGE allocation hints are advisory and
 //! do not control native allocation. Version 1 excludes graphics and selection.
-//! Mixed-width PAGEs currently require a separate reflow step and are rejected.
+//! Physical PAGE widths are preserved on restore. The terminal normalizes mixed
+//! widths at the next live mutation, so saving a restored snapshot is lossless.
 use crate::modes::Modes;
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
@@ -713,6 +714,7 @@ pub struct Decoder<R> {
     finished: bool,
     cols: u16,
     identities: [Option<u64>; 2],
+    reflow_generations: [u64; 2],
     history_rows: [u64; 2],
     history_seen: [bool; 2],
     history_remaining: usize,
@@ -729,6 +731,7 @@ impl<R: Read> Decoder<R> {
             finished: false,
             cols: 0,
             identities: [None; 2],
+            reflow_generations: [0; 2],
             history_rows: [0; 2],
             history_seen: [false; 2],
             history_remaining: 0,
@@ -921,6 +924,7 @@ impl<R: Read> Decoder<R> {
             seen[key] = true;
             self.history_rows[key] = extent;
             self.identities[key] = Some(screen.metadata.identity);
+            self.reflow_generations[key] = screen.metadata.reflow_generation;
             if key == 0 {
                 terminal.primary = screen;
             } else {
@@ -1002,11 +1006,14 @@ impl<R: Read> Decoder<R> {
             v @ 0..=7 => v,
             _ => 0,
         };
-        let mut flags = r.array()?;
-        for flags in &mut flags {
+        let mut keyboard_flags = r.array()?;
+        for flags in &mut keyboard_flags {
             *flags &= 31;
         }
-        screen.kitty_keyboard = KittyKeyboard { flags, index };
+        screen.kitty_keyboard = KittyKeyboard {
+            flags: keyboard_flags,
+            index,
+        };
         let click = r.array::<2>()?;
         m.semantic_click = if matches!(click, [0, 0] | [1, 0..=1] | [2, 0..=2]) {
             click
@@ -1047,19 +1054,17 @@ impl<R: Read> Decoder<R> {
         if contents.len() < usize::from(rows) {
             return Err(invalid("snapshot pages do not cover active rows"));
         }
-        if contents
+        screen.metadata.needs_reflow = contents
             .iter()
-            .any(|row| row.cells.len() != usize::from(cols))
-        {
-            return Err(invalid(
-                "mixed-width snapshot pages require lazy reflow support",
-            ));
-        }
+            .any(|row| row.cells.len() != usize::from(cols));
         for (i, row) in contents.iter_mut().enumerate() {
             row.id = i as u64;
         }
         screen.next_row = contents.len() as u64;
         screen.rows = contents.split_off(contents.len() - usize::from(rows));
+        let physical_cols = screen.rows[screen.cursor.row].cells.len();
+        screen.cursor.col = x.min(physical_cols - 1);
+        screen.cursor.pending_wrap = flags & 1 != 0 && screen.cursor.col == physical_cols - 1;
         screen.history = contents.into();
         screen.history_bytes = screen.history.iter().map(Row::storage_bytes).sum();
         screen.enforce_limits();
@@ -1227,13 +1232,12 @@ impl<R: Read> Decoder<R> {
                 let mut count = 0;
                 if sequence.apply
                     && t.cols == self.cols
-                    && let Some(screen) = target
-                        .filter(|s| Some(s.metadata.identity) == self.identities[sequence.key])
+                    && let Some(screen) = target.filter(|s| {
+                        Some(s.metadata.identity) == self.identities[sequence.key]
+                            && s.metadata.reflow_generation == self.reflow_generations[sequence.key]
+                    })
                 {
                     let mut rows = self.decode_page(&payload)?;
-                    if rows.iter().any(|r| r.cells.len() != usize::from(t.cols)) {
-                        return Err(invalid("incompatible snapshot history width"));
-                    }
                     let bytes = rows.iter().map(Row::storage_bytes).sum::<usize>();
                     let allowed = screen.limits.bytes != Some(0)
                         && screen
@@ -1245,6 +1249,8 @@ impl<R: Read> Decoder<R> {
                             .bytes
                             .is_none_or(|max| bytes.saturating_add(screen.storage_bytes()) <= max);
                     if allowed {
+                        screen.metadata.needs_reflow |=
+                            rows.iter().any(|r| r.cells.len() != usize::from(t.cols));
                         count = rows.len();
                         for row in &mut rows {
                             row.id = screen.next_row;
@@ -1336,6 +1342,8 @@ impl Default for TerminalMetadata {
 #[derive(Clone, Debug)]
 pub(crate) struct ScreenMetadata {
     pub identity: u64,
+    pub reflow_generation: u64,
+    pub needs_reflow: bool,
     pub hyperlink_implicit_id: u32,
     pub protected_mode: u8,
     pub semantic_click: [u8; 2],
@@ -1347,6 +1355,8 @@ impl Default for ScreenMetadata {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
             identity: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            reflow_generation: 0,
+            needs_reflow: false,
             hyperlink_implicit_id: 0,
             protected_mode: 0,
             semantic_click: [0; 2],

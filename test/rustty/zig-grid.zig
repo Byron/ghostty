@@ -104,6 +104,7 @@ pub const Context = struct {
         } else if (std.mem.eql(u8, op.action, "select_word") or
             std.mem.eql(u8, op.action, "select_word_between") or
             std.mem.eql(u8, op.action, "select_line") or
+            std.mem.eql(u8, op.action, "select_output") or
             std.mem.eql(u8, op.action, "select_all"))
         {
             // The native selectWord API takes an explicit boundary set; these
@@ -129,6 +130,7 @@ pub const Context = struct {
                     break :selected null;
                 };
                 if (std.mem.eql(u8, op.action, "select_word")) break :selected screen.selectWord(pin, boundaries);
+                if (std.mem.eql(u8, op.action, "select_output")) break :selected screen.selectOutput(pin);
                 var options: vt.Screen.SelectLine = .{ .pin = pin };
                 if (!(op.trim_line orelse true)) options.whitespace = null else if (whitespace) |value| options.whitespace = value;
                 options.semantic_prompt_boundary = op.semantic_prompt_boundary orelse true;

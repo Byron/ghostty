@@ -94,7 +94,7 @@
     {
       "id": "terminal.selection",
       "status": "partial",
-      "remaining": "Direct bounds/text, rectangles, wide/grapheme cells and whitespace/wrap cases pass. Pure word, word-between, line and all queries pass 249 comparisons across 83 fixtures, including custom boundaries, semantic transitions, history and mixed physical widths. Complete mutation lifetimes, output selection, adjustments, gestures and styled formats remain."
+      "remaining": "Direct bounds/text, rectangles, wide/grapheme cells and whitespace/wrap cases pass. Pure word, word-between, line, all and output queries pass 384 comparisons across 128 fixtures, including custom boundaries, semantic transitions, prompt/continuation groups, history and mixed physical widths. Complete mutation lifetimes, adjustments, gestures and styled formats remain."
     },
     {
       "id": "terminal.search",

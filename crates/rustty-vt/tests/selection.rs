@@ -141,6 +141,57 @@ fn word_selection_keeps_native_hard_edge_and_wide_spacer_boundaries() {
 }
 
 #[test]
+fn output_selection_uses_prompt_groups_and_retains_explicit_spaces() {
+    let mut terminal = Terminal::new(16, 5, 100);
+    terminal.feed(
+        b"pre\r\n\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n\x1b]133;C\x07  out \r\n\r\n\x1b]133;A\x07$ ",
+    );
+    let screen = terminal.screen_mut();
+    let initial = screen.select_all();
+    screen.selection = initial;
+    for (clicked, start, end) in [
+        ((0, 5), (0, 0), (0, 2)),
+        ((2, 3), (2, 0), (2, 5)),
+        ((2, 8), (2, 0), (2, 5)),
+        ((3, 1), (2, 0), (2, 5)),
+    ] {
+        assert_eq!(
+            screen.select_output(screen.point(clicked.0, clicked.1).unwrap()),
+            Some(Selection {
+                start: screen.point(start.0, start.1).unwrap(),
+                end: screen.point(end.0, end.1).unwrap(),
+                rectangular: false,
+            })
+        );
+    }
+    for (row, col) in [(1, 0), (1, 2), (4, 7)] {
+        assert!(
+            screen
+                .select_output(screen.point(row, col).unwrap())
+                .is_none()
+        );
+    }
+    assert_eq!(screen.selection, initial);
+
+    let mut terminal = Terminal::new(4, 2, 100);
+    terminal.feed(b"free");
+    let screen = terminal.screen();
+    assert!(screen.select_output(screen.point(0, 0).unwrap()).is_none());
+
+    terminal.feed(b"\x1b[2J\x1b[2;1H\x1b]133;A\x07$ ");
+    let screen = terminal.screen();
+    let origin = screen.point(0, 0).unwrap();
+    assert_eq!(
+        screen.select_output(origin),
+        Some(Selection {
+            start: origin,
+            end: origin,
+            rectangular: false,
+        })
+    );
+}
+
+#[test]
 fn selection_preserves_native_whitespace_wrap_and_wide_cell_boundaries() {
     for (text, start, end, rectangular, expected) in [
         ("", (1, 0), (6, 1), false, ""),

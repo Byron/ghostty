@@ -81,7 +81,11 @@ impl Context {
                 }
             }
             "clear_selection" => terminal.screen_mut().selection = None,
-            "select_word" | "select_word_between" | "select_line" | "select_all" => {
+            "select_word"
+            | "select_word_between"
+            | "select_line"
+            | "select_all"
+            | "select_output" => {
                 let screen = terminal.screen();
                 let boundaries = codepoints(op.boundary_codepoints.as_deref())?;
                 let boundaries = boundaries.as_deref().unwrap_or(DEFAULT_WORD_BOUNDARIES);
@@ -104,6 +108,8 @@ impl Context {
                 } else if let Some(point) = point(screen, &op.point, columns)? {
                     if op.action == "select_word" {
                         screen.select_word(point, boundaries)
+                    } else if op.action == "select_output" {
+                        screen.select_output(point)
                     } else {
                         screen.select_line(
                             point,

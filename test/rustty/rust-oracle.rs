@@ -9,6 +9,8 @@ use std::io::{self, BufRead, Read, Write};
 
 #[path = "rust-graphics.rs"]
 mod graphics_adapter;
+#[path = "rust-grid.rs"]
+mod grid_adapter;
 #[path = "rust-input.rs"]
 mod input;
 #[path = "rust-parser.rs"]
@@ -19,6 +21,9 @@ mod paste;
 mod semantic_adapter;
 
 const CAPABILITIES: &[&str] = &[
+    "terminal.selection",
+    "terminal.search",
+    "terminal.tracked",
     "graphics.kitty",
     "graphics.png",
     "terminal.write",
@@ -133,6 +138,8 @@ struct Operation {
     cursor_blink: Option<bool>,
     #[serde(default)]
     colors: Option<ColorDefaults>,
+    #[serde(default)]
+    grid: Option<grid_adapter::Operation>,
 }
 
 #[derive(Default, Deserialize)]
@@ -573,7 +580,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[]})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -618,6 +625,8 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     }
     let mut observations = Vec::new();
     let mut mode_results = Vec::new();
+    let mut grid = grid_adapter::Context::default();
+    let mut grid_results = Vec::new();
     let mut host = Host::new(request)?;
     host.host.configure(&mut terminal);
     let mut snapshots = Vec::new();
@@ -723,6 +732,10 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             "observe" => {
                 observations.push(observe(&terminal, request));
             }
+            "grid" => grid_results.push(grid.run(
+                &mut terminal,
+                operation.grid.as_ref().ok_or("MissingGridOperation")?,
+            )?),
             "input" => {
                 let bytes =
                     input::encode(&terminal, operation.input.as_ref().ok_or("MissingInput")?)?;
@@ -737,12 +750,16 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 observations.clear();
                 host.events.clear();
                 mode_results.clear();
+                grid_results.clear();
             }
             "snapshot" => {
                 snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
                     .map_err(|_| "SnapshotEncodeFailed")?));
             }
             "restore" => {
+                if grid.has_handles() {
+                    return Err("UnsupportedGridRestore");
+                }
                 terminal = rustty_vt::snapshot::decode(
                     &unhex(&operation.data)?[..],
                     rustty_vt::snapshot::DecodeOptions::default(),
@@ -753,6 +770,9 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 snapshot_decoder = None;
             }
             "restore_ready" => {
+                if grid.has_handles() {
+                    return Err("UnsupportedGridRestore");
+                }
                 snapshot_offset.set(0);
                 let mut decoder = rustty_vt::snapshot::Decoder::new(
                     SnapshotReader {
@@ -795,6 +815,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     result["snapshots"] = json!(snapshots);
     result["snapshot_progress"] = json!(snapshot_progress);
     result["mode_results"] = json!(mode_results);
+    result["grid_results"] = json!(grid_results);
     Ok(result)
 }
 

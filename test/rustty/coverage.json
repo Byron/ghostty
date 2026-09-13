@@ -93,18 +93,18 @@
     },
     {
       "id": "terminal.selection",
-      "status": "pending",
-      "remaining": "Selection extraction, rectangular/wide/grapheme bounds and viewport."
+      "status": "partial",
+      "remaining": "Direct bounds/text, rectangles, wide/grapheme cells and whitespace/wrap cases pass. Selection mutations, word/line/output selection, gestures, adjustments and styled formats remain."
     },
     {
       "id": "terminal.search",
-      "status": "pending",
-      "remaining": "Regex/literal search across wraps/history and tracked results."
+      "status": "partial",
+      "remaining": "Literal endpoints and native result order are compared across wraps/history and edits. Overlaps, arbitrary byte needles, incremental feed/tick, selected matches, viewport results and regex extension coverage remain."
     },
     {
       "id": "terminal.tracked",
-      "status": "pending",
-      "remaining": "Tracked references through reflow, erasure and pruning."
+      "status": "partial",
+      "remaining": "Live coordinates/codepoints are compared through reflow, erasure, resets, handle reuse and screen switches. Lifetime/rebinding, inactive release, exact pruning and snapshot restoration remain."
     },
     {
       "id": "graphics.kitty",

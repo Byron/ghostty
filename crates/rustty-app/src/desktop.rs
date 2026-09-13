@@ -896,7 +896,7 @@ impl App {
                 let contents = text
                     .map(|text| Content {
                         mime: b"text/plain".to_vec(),
-                        data: text.into_bytes(),
+                        data: text.into_bytes().into(),
                     })
                     .into_iter()
                     .collect::<Vec<_>>();

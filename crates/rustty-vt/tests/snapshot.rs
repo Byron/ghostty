@@ -192,6 +192,31 @@ fn corrupt_truncated_and_excessive_snapshots_are_rejected() {
 }
 
 #[test]
+fn streaming_restore_uses_the_minimum_scrollback_budget() {
+    for limits in [
+        ScrollbackLimits {
+            bytes: None,
+            lines: Some(0),
+        },
+        ScrollbackLimits {
+            bytes: Some(1),
+            lines: None,
+        },
+    ] {
+        let bytes = fixture();
+        let mut decoder = Decoder::new(bytes.as_slice(), DecodeOptions::default());
+        let mut terminal = decoder.ready().unwrap();
+        terminal.set_limits(limits);
+        let mut rows = 0;
+        while let Some(progress) = decoder.next_history(&mut terminal).unwrap() {
+            rows += progress.rows;
+        }
+        assert_eq!(rows, 4);
+        assert_eq!(text(&terminal.primary_screen().history), ["A", "", "B", ""]);
+    }
+}
+
+#[test]
 fn streaming_restore_discards_history_after_limits_or_resize_change() {
     for resize in [false, true] {
         let bytes = fixture();

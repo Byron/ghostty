@@ -8,6 +8,7 @@ const paste_adapter = @import("zig-paste.zig");
 const semantic_adapter = @import("zig-semantic.zig");
 const graphics_adapter = @import("zig-graphics.zig");
 const grid_adapter = @import("zig-grid.zig");
+const page_layout_adapter = @import("zig-page-layout.zig");
 const Allocator = std.mem.Allocator;
 // libghostty-vt exposes this type through the callback without re-exporting
 // the implementation module. Use that public signature as the source of truth.
@@ -17,6 +18,7 @@ const DeviceAttributes = @typeInfo(@typeInfo(DeviceAttributesFn).pointer.child).
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
+    "terminal.page-layout",
     "terminal.selection",
     "terminal.search",
     "terminal.tracked",
@@ -88,6 +90,7 @@ const Request = struct {
     observe_semantic: bool = false,
     observe_graphics: bool = false,
     color_inputs: []const []const u8 = &.{},
+    page_layout: ?page_layout_adapter.Request = null,
 };
 const ColorDefaults = struct {
     foreground: ?[3]u8 = null,
@@ -280,6 +283,7 @@ const Response = struct {
     mode_results: []const bool = &.{},
     parsed_colors: []const ?[3]u16 = &.{},
     grid_results: []const grid_adapter.Result = &.{},
+    page_layout: ?page_layout_adapter.Result = null,
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -456,6 +460,10 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     if (request.observe_graphics) graphics_adapter.install();
     var response: Response = .{ .id = request.id };
     if (std.mem.eql(u8, request.kind, "capabilities")) return response;
+    if (std.mem.eql(u8, request.kind, "page_layout")) {
+        response.page_layout = try page_layout_adapter.run(request.page_layout orelse .{});
+        return response;
+    }
     if (std.mem.eql(u8, request.kind, "parser")) {
         response.parser = try parser_adapter.run(alloc, request.operations);
         return response;

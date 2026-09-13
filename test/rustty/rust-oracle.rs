@@ -13,6 +13,8 @@ mod graphics_adapter;
 mod grid_adapter;
 #[path = "rust-input.rs"]
 mod input;
+#[path = "rust-page-layout.rs"]
+mod page_layout_adapter;
 #[path = "rust-parser.rs"]
 mod parser;
 #[path = "rust-paste.rs"]
@@ -21,6 +23,7 @@ mod paste;
 mod semantic_adapter;
 
 const CAPABILITIES: &[&str] = &[
+    "terminal.page-layout",
     "terminal.selection",
     "terminal.search",
     "terminal.tracked",
@@ -75,6 +78,7 @@ struct Request {
     observe_semantic: bool,
     observe_graphics: bool,
     color_inputs: Vec<String>,
+    page_layout: Option<page_layout_adapter::Request>,
 }
 
 impl Default for Request {
@@ -98,6 +102,7 @@ impl Default for Request {
             observe_semantic: false,
             observe_graphics: false,
             color_inputs: Vec::new(),
+            page_layout: None,
         }
     }
 }
@@ -580,13 +585,22 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[]})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[],"page_layout":null})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
     let mut result = response(&request.id, None);
     match request.kind.as_str() {
         "capabilities" => return Ok(result),
+        "page_layout" => {
+            result["page_layout"] = page_layout_adapter::run(
+                request
+                    .page_layout
+                    .as_ref()
+                    .unwrap_or(&page_layout_adapter::Request::default()),
+            )?;
+            return Ok(result);
+        }
         "parser" => {
             result["parser"] = parser::run(&request.operations)?;
             return Ok(result);

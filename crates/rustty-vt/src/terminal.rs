@@ -1190,12 +1190,12 @@ impl Terminal {
                 };
                 screen.remap_grid_rows(&pins);
                 let row = screen.rows.remove(m.top);
+                screen.rows.insert(m.bottom, blank);
                 if shift_history {
                     screen.push_history(row);
                 } else {
                     screen.discard_row(row.id);
                 }
-                screen.rows.insert(m.bottom, blank);
             } else {
                 for y in m.top..m.bottom {
                     self.copy_row_region(y + 1, y, m.left, m.right + 1, bg);
@@ -1447,9 +1447,9 @@ impl Terminal {
         let screen = self.screen_mut();
         for _ in 0..count {
             let row = screen.rows.remove(0);
-            screen.push_history(row);
             let blank = screen.blank_row(cols, Color::Default);
             screen.rows.push(blank);
+            screen.push_history(row);
         }
         if screen.cursor.row < count {
             screen.cursor.row = 0;

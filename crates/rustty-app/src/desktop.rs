@@ -1195,6 +1195,20 @@ impl App {
         action: Action,
         approved: bool,
     ) -> bool {
+        let ui_input = host.ui_input();
+        let clipboard = if ui_input {
+            match action {
+                Action::PasteFromClipboard => host.egui.clipboard_text(),
+                Action::PasteFromSelection => self.selection_text(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if input::edit_menu_action(host.egui.egui_input_mut(), &action, ui_input, clipboard) {
+            host.repaint();
+            return true;
+        }
         let focused = self.focused(host.id);
         if !approved
             && matches!(

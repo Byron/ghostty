@@ -734,15 +734,19 @@ impl Screen {
     /// Move external pins and selection endpoints independently of row contents.
     /// Line edits retain physical coordinates; history scrolling moves them.
     pub(crate) fn remap_grid_rows(&mut self, rows: &HashMap<u64, u64>) {
-        for point in self.tracked.0.values_mut().flatten().chain(
-            self.selection
-                .iter_mut()
-                .flat_map(|selection| [&mut selection.start, &mut selection.end]),
-        ) {
+        for point in self.grid_points_mut() {
             if let Some(&row) = rows.get(&point.row) {
                 point.row = row;
             }
         }
+    }
+
+    pub(crate) fn grid_points_mut(&mut self) -> impl Iterator<Item = &mut GridPoint> {
+        self.tracked.0.values_mut().flatten().chain(
+            self.selection
+                .iter_mut()
+                .flat_map(|selection| [&mut selection.start, &mut selection.end]),
+        )
     }
 
     pub(crate) fn discard_row(&mut self, id: u64) {

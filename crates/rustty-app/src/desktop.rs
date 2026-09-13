@@ -34,7 +34,7 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     platform::macos::WindowAttributesExtMacOS,
-    window::{CursorIcon, Fullscreen, Window, WindowId},
+    window::{CursorIcon, Fullscreen, Theme, Window, WindowId},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -56,6 +56,7 @@ impl From<egui_winit::accesskit_winit::Event> for Event {
 
 struct Pane {
     session: Session,
+    host_state: (bool, vt::query::ColorScheme),
     wake_pending: Arc<AtomicBool>,
     input: VecDeque<Vec<u8>>,
     input_bytes: usize,
@@ -282,6 +283,8 @@ impl egui_wgpu::CallbackTrait for TerminalPaint {
 
 struct App {
     loaded: LoadedConfig,
+    config_loader: config::ConfigLoader,
+    config_args: Vec<String>,
     workspace: Workspace,
     state_path: PathBuf,
     resources: Option<PathBuf>,
@@ -316,7 +319,11 @@ pub fn run() -> Result<()> {
     }
     let show_config = args.iter().any(|arg| arg == "--config-info");
     args.retain(|arg| arg != "--config-info");
-    let mut loaded = Config::load_with_args(&args)?;
+    let event_loop = EventLoop::<Event>::with_user_event().build()?;
+    let resources = resource_dir();
+    let mut config_loader = config::ConfigLoader::from_env()?;
+    config_loader.resources_dir = resources.clone().or(config_loader.resources_dir);
+    let mut loaded = load_config(&mut config_loader, &args, Platform::system_theme());
     if show_config {
         println!(
             "Configuration: {:?}\nOwn settings: {}",
@@ -357,8 +364,6 @@ pub fn run() -> Result<()> {
     } else {
         Workspace::default()
     };
-    let resources = resource_dir();
-    let event_loop = EventLoop::<Event>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let context = egui::Context::default();
     context.enable_accesskit();
@@ -393,6 +398,8 @@ pub fn run() -> Result<()> {
         .map(|s| now + Duration::from_secs(s));
     let mut app = App {
         loaded,
+        config_loader,
+        config_args: args,
         workspace,
         state_path,
         resources,
@@ -523,6 +530,33 @@ impl App {
     fn focused(&self, id: Id) -> Option<Id> {
         self.tab(id).map(|tab| tab.focused)
     }
+    fn visible_panes(&self) -> HashSet<Id> {
+        let mut visible = HashSet::new();
+        for host in self.windows.values() {
+            if let Some(index) = self.index(host.id) {
+                visible.extend(window_visible_panes(
+                    &self.workspace.windows[index],
+                    host.visible,
+                    host.occluded,
+                    host.peek.is_some(),
+                ));
+            }
+        }
+        visible
+    }
+    fn sync_host_state(&mut self) {
+        let visible = self.visible_panes();
+        let scheme = color_scheme(self.config_loader.dark_mode);
+        for (&id, pane) in &mut self.panes {
+            let state = (visible.contains(&id), scheme);
+            if !pane.exited && pane.host_state != state {
+                match pane.session.set_host_state(state.0, state.1) {
+                    Ok(()) => pane.host_state = state,
+                    Err(error) => self.errors.push(error.to_string()),
+                }
+            }
+        }
+    }
     fn changed(&mut self) {
         self.save_at = Some(Instant::now() + Duration::from_millis(500));
     }
@@ -561,7 +595,7 @@ impl App {
         self.changed();
         id
     }
-    fn spawn_pane(&mut self, id: Id, directory: PathBuf) -> Result<()> {
+    fn spawn_pane(&mut self, id: Id, directory: PathBuf, host: Option<&Host>) -> Result<()> {
         if self.panes.contains_key(&id) || self.failed_panes.contains_key(&id) {
             return Ok(());
         }
@@ -588,12 +622,25 @@ impl App {
             .then(|| self.config().initial_command.clone())
             .flatten();
         let started = Instant::now();
+        let visible = self.workspace.windows.iter().any(|window| {
+            let native = host
+                .filter(|host| host.id == window.id)
+                .or_else(|| self.windows.values().find(|host| host.id == window.id));
+            initial_visible_panes(
+                window,
+                native.map(|host| (host.visible, host.occluded, host.peek.is_some())),
+            )
+            .contains(&id)
+        });
+        let host_state = (visible, color_scheme(self.config_loader.dark_mode));
         let session = match Session::spawn(
             self.config(),
             SessionOptions {
                 working_directory: Some(directory.clone()),
                 command,
                 resources: self.resources.clone(),
+                color_scheme: Some(host_state.1),
+                visible: host_state.0,
                 ..Default::default()
             },
             wake,
@@ -608,6 +655,7 @@ impl App {
             id,
             Pane {
                 session,
+                host_state,
                 wake_pending,
                 input: VecDeque::new(),
                 input_bytes: 0,
@@ -676,7 +724,7 @@ impl App {
         egui.init_accesskit(event_loop, &window, self.proxy.clone());
         for tab in &state.tabs {
             for (&pane, saved) in &tab.panes {
-                self.spawn_pane(pane, saved.working_directory.clone())?;
+                self.spawn_pane(pane, saved.working_directory.clone(), None)?;
             }
         }
         window.set_visible(!quick);
@@ -1222,7 +1270,7 @@ impl App {
                     window.tabs.push(Tab::new(tab, pane, directory.clone()));
                     window.active_tab = window.tabs.len() - 1;
                 }
-                if let Err(error) = self.spawn_pane(pane, directory) {
+                if let Err(error) = self.spawn_pane(pane, directory, Some(host)) {
                     self.errors.push(error.to_string());
                 }
             }
@@ -1234,7 +1282,7 @@ impl App {
                 if let Some(tab) = self.tab_mut(host.id) {
                     tab.split(pane, split, direction, directory.clone());
                 }
-                if let Err(error) = self.spawn_pane(pane, directory) {
+                if let Err(error) = self.spawn_pane(pane, directory, Some(host)) {
                     self.errors.push(error.to_string());
                 }
             }
@@ -1580,52 +1628,24 @@ impl App {
                     self.errors.push(error);
                 }
             }
-            Action::ReloadConfig => match Config::load() {
-                Ok(loaded) => {
-                    self.errors = loaded.diagnostics.iter().map(ToString::to_string).collect();
-                    self.loaded = loaded;
-                    self.failed_panes.clear();
-                    if let Some(platform) = &mut self.platform
-                        && let Err(error) = platform.update_config(&self.loaded.config)
-                    {
-                        self.errors.push(error);
-                    }
-                    for pane in self.panes.values() {
-                        if let Err(error) = pane.session.apply_config(&self.loaded.config) {
-                            self.errors.push(error.to_string());
-                        }
-                    }
-                    self.update_fonts(host);
-                    if let Some(platform) = &self.platform {
-                        for window in std::iter::once(&*host).chain(self.windows.values()) {
-                            let quick = self
-                                .workspace
-                                .windows
-                                .iter()
-                                .any(|state| state.id == window.id && state.quick);
-                            if let Err(error) =
-                                platform.configure_window(&window.window, quick, self.config())
-                            {
-                                self.errors.push(error);
-                            }
-                        }
-                    }
+            Action::ReloadConfig => {
+                if let Some(theme) = event_loop.system_theme() {
+                    self.config_loader.dark_mode = theme == Theme::Dark;
                 }
-                Err(error) => self.errors.push(error.to_string()),
-            },
+                self.reload_config(Some(host));
+            }
             Action::IncreaseFontSize(amount) => {
                 self.loaded.config.font_size = (self.config().font_size + amount).clamp(4.0, 200.0);
-                self.update_fonts(host);
+                self.update_fonts(Some(host));
             }
             Action::DecreaseFontSize(amount) => {
                 self.loaded.config.font_size = (self.config().font_size - amount).clamp(4.0, 200.0);
-                self.update_fonts(host);
+                self.update_fonts(Some(host));
             }
             Action::ResetFontSize => {
-                if let Ok(loaded) = Config::load() {
-                    self.loaded.config.font_size = loaded.config.font_size;
-                    self.update_fonts(host);
-                }
+                let loaded = self.config_loader.load_with_args(&self.config_args);
+                self.loaded.config.font_size = loaded.config.font_size;
+                self.update_fonts(Some(host));
             }
             Action::Undo | Action::Redo => {
                 if !self.undo_layout(action == Action::Redo) {
@@ -1659,8 +1679,55 @@ impl App {
         self.changed();
         true
     }
-    fn update_fonts(&mut self, host: &mut Host) {
-        for current in std::iter::once(host).chain(self.windows.values_mut()) {
+    fn update_system_theme(&mut self, theme: Option<Theme>, host: Option<&mut Host>) {
+        if let Some(theme) = theme
+            && self.config_loader.dark_mode != (theme == Theme::Dark)
+        {
+            self.config_loader.dark_mode = theme == Theme::Dark;
+            self.reload_config(host);
+        }
+    }
+    fn reload_config(&mut self, mut host: Option<&mut Host>) {
+        self.loaded = load_config(&mut self.config_loader, &self.config_args, None);
+        if self.smoke.is_some() {
+            smoke::Smoke::configure(&mut self.loaded);
+        }
+        self.errors = self
+            .loaded
+            .diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        self.failed_panes.clear();
+        self.context.set_theme(ui_theme(&self.loaded.config));
+        if let Some(platform) = &mut self.platform
+            && let Err(error) = platform.update_config(&self.loaded.config)
+        {
+            self.errors.push(error);
+        }
+        for pane in self.panes.values() {
+            if let Err(error) = pane.session.apply_config(&self.loaded.config) {
+                self.errors.push(error.to_string());
+            }
+        }
+        self.update_fonts(host.as_deref_mut());
+        if let Some(platform) = &self.platform {
+            for window in host.into_iter().chain(self.windows.values_mut()) {
+                let quick = self
+                    .workspace
+                    .windows
+                    .iter()
+                    .any(|state| state.id == window.id && state.quick);
+                if let Err(error) =
+                    platform.configure_window(&window.window, quick, &self.loaded.config)
+                {
+                    self.errors.push(error);
+                }
+            }
+        }
+    }
+    fn update_fonts(&mut self, host: Option<&mut Host>) {
+        for current in host.into_iter().chain(self.windows.values_mut()) {
             match rustty_render::Renderer::new(font_config(
                 &self.loaded.config,
                 current.window.scale_factor() as f32,
@@ -1700,6 +1767,11 @@ impl App {
         matches.len()
     }
     fn reconcile(&mut self, event_loop: &ActiveEventLoop) {
+        // With no native windows there is no ThemeChanged event to observe.
+        // Refresh before creating a session that could immediately query it.
+        if self.windows.is_empty() {
+            self.update_system_theme(event_loop.system_theme(), None);
+        }
         let removed = self
             .windows
             .iter()
@@ -1752,7 +1824,7 @@ impl App {
         self.closing.retain(|session| !session.has_exited());
         self.failed_panes.retain(|id, _| retained.contains(id));
         for (id, directory) in required {
-            if let Err(error) = self.spawn_pane(id, directory) {
+            if let Err(error) = self.spawn_pane(id, directory, None) {
                 self.errors.push(error.to_string());
             }
         }
@@ -1783,6 +1855,7 @@ impl App {
                 self.errors.push(error.to_string());
             }
         }
+        self.sync_host_state();
         if self.workspace.windows.is_empty() && self.config().quit_after_last_window_closed {
             self.save();
             event_loop.exit();
@@ -3034,6 +3107,7 @@ impl ApplicationHandler<Event> for App {
                         event_loop.exit();
                     }
                 }
+                self.sync_host_state();
             }
             Event::Access(event) => {
                 use egui_winit::accesskit_winit::WindowEvent as AccessEvent;
@@ -3102,6 +3176,7 @@ impl ApplicationHandler<Event> for App {
                     }
                     host.repaint();
                     self.windows.insert(event.window_id, host);
+                    self.sync_host_state();
                 }
             }
         }
@@ -3207,7 +3282,14 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::ScaleFactorChanged { .. } => {
-                self.update_fonts(&mut host);
+                self.update_fonts(Some(&mut host));
+                host.repaint();
+            }
+            WindowEvent::ThemeChanged(theme) => {
+                self.update_system_theme(
+                    event_loop.system_theme().or(Some(theme)),
+                    Some(&mut host),
+                );
                 host.repaint();
             }
             WindowEvent::Focused(focused) => {
@@ -3600,6 +3682,46 @@ fn repaint_is_current(requested_pass: u64, current_pass: u64) -> bool {
     current_pass == requested_pass || requested_pass.checked_add(1) == Some(current_pass)
 }
 
+fn load_config(
+    loader: &mut config::ConfigLoader,
+    args: &[String],
+    theme: Option<Theme>,
+) -> LoadedConfig {
+    if let Some(theme) = theme {
+        loader.dark_mode = theme == Theme::Dark;
+    }
+    loader.load_with_args(args)
+}
+
+fn color_scheme(dark_mode: bool) -> vt::query::ColorScheme {
+    if dark_mode {
+        vt::query::ColorScheme::Dark
+    } else {
+        vt::query::ColorScheme::Light
+    }
+}
+
+fn window_visible_panes(
+    window: &WindowState,
+    visible: bool,
+    occluded: bool,
+    peek: bool,
+) -> Vec<Id> {
+    if !visible || occluded {
+        return Vec::new();
+    }
+    window
+        .tabs
+        .get(window.active_tab)
+        .map_or_else(Vec::new, |tab| tab.visible_tree(peek).panes())
+}
+
+fn initial_visible_panes(window: &WindowState, native: Option<(bool, bool, bool)>) -> Vec<Id> {
+    // Normal windows are shown during creation; quick windows start hidden.
+    let (visible, occluded, peek) = native.unwrap_or((!window.quick, false, false));
+    window_visible_panes(window, visible, occluded, peek)
+}
+
 fn ui_theme(config: &Config) -> egui::ThemePreference {
     match config.window_theme {
         config::WindowTheme::System => egui::ThemePreference::System,
@@ -3621,6 +3743,98 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_selects_dual_themes_and_reload_preserves_cli_overrides() {
+        let directory = std::env::temp_dir().join(format!(
+            "rustty-theme-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let own = directory.join("config/rustty");
+        std::fs::create_dir_all(own.join("themes")).unwrap();
+        let source = "theme = light:Day,dark:Night\nfont-size = 12\n";
+        std::fs::write(own.join("config.rustty"), source).unwrap();
+        std::fs::write(own.join("themes/Day"), "background = ffffff\n").unwrap();
+        std::fs::write(own.join("themes/Night"), "background = 101010\n").unwrap();
+        let mut loader = config::ConfigLoader {
+            home: directory.clone(),
+            xdg_config_home: directory.join("config"),
+            resources_dir: None,
+            dark_mode: true,
+            working_directory: directory.clone(),
+        };
+        let args = [
+            "--font-size=19",
+            "--window-theme=light",
+            "-e",
+            "/bin/echo",
+            "two words",
+        ]
+        .map(str::to_owned);
+        let light = load_config(&mut loader, &args, Some(Theme::Light));
+        assert!(light.diagnostics.is_empty(), "{:?}", light.diagnostics);
+        assert_eq!(light.config.background, config::Rgb::new(255, 255, 255));
+        assert_eq!(
+            color_scheme(loader.dark_mode),
+            vt::query::ColorScheme::Light
+        );
+        let dark = load_config(&mut loader, &args, Some(Theme::Dark));
+        assert_eq!(dark.config.background, config::Rgb::new(16, 16, 16));
+        assert_eq!(color_scheme(loader.dark_mode), vt::query::ColorScheme::Dark);
+        let reloaded = load_config(&mut loader, &args, None);
+        assert_eq!(reloaded.config.background, dark.config.background);
+        assert_eq!(reloaded.config.font_size, 19.0);
+        assert_eq!(ui_theme(&reloaded.config), egui::ThemePreference::Light);
+        assert_eq!(
+            reloaded.config.initial_command,
+            Some(config::Command::Direct(vec![
+                "/bin/echo".into(),
+                "two words".into()
+            ]))
+        );
+        assert_eq!(
+            std::fs::read_to_string(own.join("config.rustty")).unwrap(),
+            source
+        );
+        assert!(!directory.join("Library").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn visibility_follows_native_window_active_tab_zoom_and_peek() {
+        let mut first = Tab::new(10, 1, PathBuf::from("/tmp"));
+        first.root.split(1, 2, 3, Direction::Right);
+        let mut window = WindowState {
+            id: 100,
+            tabs: vec![first, Tab::new(20, 4, PathBuf::from("/tmp"))],
+            active_tab: 0,
+            frame: [0.0, 0.0, 800.0, 600.0],
+            quick: false,
+        };
+        assert_eq!(window_visible_panes(&window, true, false, false), [1, 2]);
+        assert_eq!(initial_visible_panes(&window, None), [1, 2]);
+        window.active_tab = 1;
+        assert_eq!(window_visible_panes(&window, true, false, false), [4]);
+        window.active_tab = 0;
+        window.tabs[0].zoom = Some(1);
+        assert_eq!(window_visible_panes(&window, true, false, false), [1]);
+        assert_eq!(initial_visible_panes(&window, None), [1]);
+        assert_eq!(window_visible_panes(&window, true, false, true), [1, 2]);
+        assert!(window_visible_panes(&window, true, true, true).is_empty());
+        assert!(initial_visible_panes(&window, Some((true, true, false))).is_empty());
+        window.quick = true;
+        assert!(window_visible_panes(&window, false, false, true).is_empty());
+        assert!(initial_visible_panes(&window, None).is_empty());
+        assert_eq!(
+            initial_visible_panes(&window, Some((true, false, true))),
+            [1, 2]
+        );
+    }
+
     #[test]
     fn repaint_callbacks_only_survive_their_own_pass_and_its_follow_up() {
         let context = egui::Context::default();

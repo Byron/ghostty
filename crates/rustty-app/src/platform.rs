@@ -58,7 +58,7 @@ use rustty::vt::clipboard::{self, Content, Location, ReadResult, ReadSuccess, Wr
 use winit::{
     platform::macos::{OptionAsAlt as WinitOptionAsAlt, WindowExtMacOS},
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
-    window::Window,
+    window::{Theme, Window},
 };
 
 #[derive(Clone, Debug)]
@@ -83,6 +83,21 @@ pub struct Platform {
 }
 
 impl Platform {
+    /// Read application appearance after Winit has initialized NSApplication.
+    pub fn system_theme() -> Option<Theme> {
+        let app = NSApplication::sharedApplication(MainThreadMarker::new()?);
+        let light = NSString::from_str("NSAppearanceNameAqua");
+        let dark = NSString::from_str("NSAppearanceNameDarkAqua");
+        let appearance = app
+            .effectiveAppearance()
+            .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[&*light, &*dark]))?;
+        Some(if *appearance == *dark {
+            Theme::Dark
+        } else {
+            Theme::Light
+        })
+    }
+
     pub fn new(callback: EventSink, config: &Config) -> Result<Self, String> {
         let mtm = MainThreadMarker::new().ok_or("platform must initialize on the main thread")?;
         let (menu, menu_actions) = make_menu()?;

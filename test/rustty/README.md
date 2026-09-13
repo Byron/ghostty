@@ -62,10 +62,15 @@ payloads. This comparison therefore does **not** validate OSC command parsing,
 effects or command-specific limits; those need terminal/protocol cases.
 
 The OSC hyperlink cases compare opaque URI/ID bytes in cells, the active cursor
-and restored snapshots. Full OSC 8 parsing remains incomplete: duplicate IDs,
-malformed option traversal and empty-URI endings with a nonempty ID still differ
-from the original implementation. These gaps remain separate from byte-preserving
-observation and are not treated as a parity pass.
+and restored snapshots. Duplicate IDs, malformed option traversal, invalid
+empty-URI endings and cursor restoration now match the native matrix. Complete
+control contexts and storage behavior still need coverage.
+
+Native libghostty-vt updates OSC 133 semantic state without command lifecycle
+callbacks. `Terminal::shell_command_events` explicitly enables Rustty's
+`CommandStart`/`CommandEnd` host extension and defaults to false; application
+sessions enable it. The oracle uses the native default and still rejects
+unexpected effects. VT and session tests verify the opted-in event ordering.
 
 `--snapshots` exports one snapshot from each implementation, restores each
 encoding in both implementations, and resumes terminal input. It compares

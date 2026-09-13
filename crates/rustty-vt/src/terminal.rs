@@ -21,7 +21,9 @@ pub enum Effect {
         title: Vec<u8>,
         body: Vec<u8>,
     },
+    /// Rustty host extension, enabled by `Terminal::shell_command_events`.
     CommandStart,
+    /// Rustty host extension, enabled by `Terminal::shell_command_events`.
     CommandEnd {
         exit_code: Option<i32>,
     },
@@ -98,6 +100,10 @@ pub struct Terminal {
     pub query_defaults: query::Defaults,
     /// Allow CSI 21 t to report the raw title. Disabled by default.
     pub title_report: bool,
+    /// Emit command lifecycle effects for OSC 133 C/D. Disabled for native VT
+    /// compatibility; application sessions opt in. Retained through reset,
+    /// but not persisted in terminal snapshots.
+    pub shell_command_events: bool,
     /// Externally owned view visibility, retained through reset.
     pub visible: bool,
     /// Maximum total decoded bytes in a Kitty clipboard write transaction.
@@ -160,6 +166,7 @@ impl Terminal {
             terminfo_name: None,
             query_defaults: query::Defaults::default(),
             title_report: false,
+            shell_command_events: false,
             visible: true,
             clipboard_write_limit: 64 * 1024 * 1024,
             clipboard: clipboard::kitty::State::default(),
@@ -458,6 +465,7 @@ impl Terminal {
         let terminfo_name = self.terminfo_name.take();
         let query_defaults = self.query_defaults.clone();
         let title_report = self.title_report;
+        let shell_command_events = self.shell_command_events;
         let visible = self.visible;
         let clipboard = std::mem::take(&mut self.clipboard);
         let clipboard_write_limit = self.clipboard_write_limit;
@@ -485,6 +493,7 @@ impl Terminal {
         self.terminfo_name = terminfo_name;
         self.query_defaults = query_defaults;
         self.title_report = title_report;
+        self.shell_command_events = shell_command_events;
         self.visible = visible;
         self.clipboard = clipboard;
         self.clipboard_write_limit = clipboard_write_limit;
@@ -1967,9 +1976,11 @@ impl Terminal {
                 "B" => self.screen_mut().cursor.semantic = SemanticContent::Input,
                 "C" => {
                     self.screen_mut().cursor.semantic = SemanticContent::Output;
-                    effects.push(Effect::CommandStart);
+                    if self.shell_command_events {
+                        effects.push(Effect::CommandStart);
+                    }
                 }
-                "D" => effects.push(Effect::CommandEnd {
+                "D" if self.shell_command_events => effects.push(Effect::CommandEnd {
                     exit_code: text.split(';').nth(1).and_then(|v| v.parse().ok()),
                 }),
                 _ => {}

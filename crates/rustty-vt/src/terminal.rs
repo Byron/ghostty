@@ -73,6 +73,17 @@ pub struct Terminal {
 impl Terminal {
     /// Dimensions are clamped to one cell; `resize` rejects zero dimensions.
     pub fn new(cols: u16, rows: u16, scrollback_limit: usize) -> Self {
+        Self::with_limits(
+            cols,
+            rows,
+            ScrollbackLimits {
+                bytes: None,
+                lines: Some(scrollback_limit),
+            },
+        )
+    }
+
+    pub fn with_limits(cols: u16, rows: u16, limits: ScrollbackLimits) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
         Self {
@@ -97,7 +108,7 @@ impl Terminal {
             modify_other_keys: false,
             mouse_mode: 0,
             mouse_format: 0,
-            primary: Screen::new(cols.into(), rows.into(), scrollback_limit),
+            primary: Screen::new(cols.into(), rows.into(), limits),
             alternate: None,
             alternate_active: false,
             parser: Parser::new(),
@@ -148,7 +159,20 @@ impl Terminal {
         let mut parser = std::mem::take(&mut self.parser);
         parser.advance(bytes, |event| self.handle(event, &mut effects));
         self.parser = parser;
+        // Active rows can grow allocations without scrolling (graphemes and
+        // hyperlinks), so reconcile the byte budget after the complete update.
+        self.primary.enforce_limits();
         effects
+    }
+
+    pub fn limits(&self) -> ScrollbackLimits {
+        self.primary.limits
+    }
+
+    /// Update both policies and prune the oldest history immediately.
+    pub fn set_limits(&mut self, limits: ScrollbackLimits) {
+        self.primary.set_limits(limits);
+        self.changed();
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -179,14 +203,14 @@ impl Terminal {
     }
 
     pub fn reset(&mut self) {
-        let limit = self.primary.scrollback_limit;
+        let limits = self.primary.limits;
         let (foreground, background, cursor, palette) = (
             self.foreground,
             self.background,
             self.cursor_color,
             self.palette.clone(),
         );
-        *self = Self::new(self.cols, self.rows, limit);
+        *self = Self::with_limits(self.cols, self.rows, limits);
         self.foreground = foreground;
         self.background = background;
         self.cursor_color = cursor;
@@ -773,10 +797,7 @@ impl Terminal {
                 (0, rows)
             }
             3 => {
-                while let Some(row) = self.screen_mut().history.pop_front() {
-                    self.screen_mut().discard_row(row.id);
-                }
-                self.screen_mut().viewport_offset = 0;
+                self.screen_mut().clear_history();
                 self.changed();
                 return;
             }
@@ -873,7 +894,11 @@ impl Terminal {
         self.screen_mut().cursor.hyperlink = None;
         let switched = self.alternate_active != enabled;
         if enabled && self.alternate.is_none() {
-            self.alternate = Some(Screen::new(self.cols.into(), self.rows.into(), 0));
+            self.alternate = Some(Screen::new(
+                self.cols.into(),
+                self.rows.into(),
+                ScrollbackLimits::NONE,
+            ));
         }
         self.alternate_active = enabled;
         self.screen_mut().charset = charset;

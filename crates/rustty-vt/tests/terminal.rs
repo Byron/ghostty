@@ -1,4 +1,4 @@
-use rustty_vt::{Color, CursorShape, Effect, Selection, Terminal, Underline};
+use rustty_vt::{Color, CursorShape, Effect, ScrollbackLimits, Selection, Terminal, Underline};
 
 fn lines(t: &Terminal) -> Vec<String> {
     t.screen().rows.iter().map(|row| row.text()).collect()
@@ -284,4 +284,78 @@ fn viewport_snapshot_excludes_history_and_hides_scrolled_cursor() {
     );
     assert!(!snapshot.cursor.visible);
     assert_eq!(snapshot.rows[0].id, t.screen().history[0].id);
+}
+
+#[test]
+fn limits_prune_by_bytes_and_lines_and_invalidate_removed_content() {
+    let mut t = Terminal::with_limits(8, 2, ScrollbackLimits::default());
+    t.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    let old_count = t.screen().history.len();
+    let point = t.screen().point(0, 0).unwrap();
+    let tracked = t.screen_mut().track(point);
+    t.screen_mut().selection = Some(Selection {
+        start: point,
+        end: point,
+        rectangular: false,
+    });
+    t.screen_mut().scroll_viewport(100);
+    let budget = t.screen().storage_bytes() - 1;
+    t.set_limits(ScrollbackLimits {
+        bytes: Some(budget),
+        lines: Some(2),
+    });
+    assert!(t.screen().history.len() < old_count);
+    assert!(t.screen().history.len() <= 2);
+    assert!(t.screen().storage_bytes() <= budget);
+    assert_eq!(t.screen().resolve(tracked), None);
+    assert_eq!(t.screen().selection, None);
+    assert!(t.screen().viewport_offset <= t.screen().history.len());
+
+    let visible = lines(&t);
+    t.set_limits(ScrollbackLimits {
+        bytes: Some(0),
+        lines: None,
+    });
+    assert!(t.screen().history.is_empty());
+    assert_eq!(t.screen().history_bytes(), 0);
+    assert_eq!(lines(&t), visible);
+    t.feed(b"\r\nmore\r\noutput");
+    assert!(t.screen().history.is_empty());
+    let limits = t.limits();
+    t.reset();
+    assert_eq!(t.limits(), limits);
+
+    t.set_limits(ScrollbackLimits {
+        bytes: None,
+        lines: Some(1),
+    });
+    t.feed(b"a\r\nb\r\nc\r\nd");
+    assert_eq!(t.screen().history.len(), 1);
+    t.feed(b"\x1b[3J");
+    assert_eq!(t.screen().history_bytes(), 0);
+}
+
+#[test]
+fn byte_budget_accounts_for_hyperlinks_and_reflow_allocations() {
+    let mut plain = Terminal::with_limits(8, 2, ScrollbackLimits::default());
+    plain.feed(b"a\r\nb\r\nc");
+    let mut linked = Terminal::with_limits(8, 2, ScrollbackLimits::default());
+    linked.feed(
+        format!(
+            "\x1b]8;;https://example.org/{}\x07a\x1b]8;;\x07\r\nb\r\nc",
+            "x".repeat(4096)
+        )
+        .as_bytes(),
+    );
+    assert!(linked.screen().history_bytes() > plain.screen().history_bytes() + 4096);
+    let limit = plain.screen().storage_bytes();
+    linked.set_limits(ScrollbackLimits {
+        bytes: Some(limit),
+        lines: None,
+    });
+    assert!(linked.screen().history.is_empty());
+    linked.feed(b"\r\nd\r\ne");
+    linked.resize(4, 2);
+    assert!(linked.screen().storage_bytes() <= limit);
+    invariant(&linked);
 }

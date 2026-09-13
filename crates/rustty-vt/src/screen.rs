@@ -2,6 +2,24 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
+/// Independent logical storage budgets. `None` means unlimited.
+///
+/// Bytes include active and history row storage, including cell, text, and
+/// hyperlink allocations. Active rows are always retained. Graphics use their
+/// own budget. Unlike Ghostty's page allocator, pruning here removes whole rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrollbackLimits {
+    pub bytes: Option<usize>,
+    pub lines: Option<usize>,
+}
+
+impl ScrollbackLimits {
+    pub const NONE: Self = Self {
+        bytes: Some(0),
+        lines: Some(0),
+    };
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Color {
     #[default]
@@ -123,6 +141,16 @@ impl Row {
         }
         result.truncate(result.trim_end_matches(' ').len());
         result
+    }
+
+    fn storage_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.cells.capacity().saturating_mul(size_of::<Cell>()))
+            .saturating_add(self.cells.iter().fold(0usize, |bytes, cell| {
+                bytes
+                    .saturating_add(cell.text.capacity())
+                    .saturating_add(cell.hyperlink.as_ref().map_or(0, String::capacity))
+            }))
     }
 
     pub(crate) fn used(&self) -> usize {
@@ -266,7 +294,8 @@ pub struct Screen {
     pub(crate) saved_cursor: Option<SavedCursor>,
     pub(crate) charset: CharsetState,
     pub(crate) iso_protection: bool,
-    pub(crate) scrollback_limit: usize,
+    pub(crate) limits: ScrollbackLimits,
+    history_bytes: usize,
     pub(crate) next_row: u64,
     #[serde(skip)]
     tracked: HashMap<u64, Option<GridPoint>>,
@@ -275,7 +304,7 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub(crate) fn new(cols: usize, rows: usize, scrollback_limit: usize) -> Self {
+    pub(crate) fn new(cols: usize, rows: usize, limits: ScrollbackLimits) -> Self {
         Self {
             graphics: crate::graphics::Graphics::default(),
             rows: (0..rows)
@@ -289,7 +318,8 @@ impl Screen {
             saved_cursor: None,
             charset: CharsetState::default(),
             iso_protection: false,
-            scrollback_limit,
+            limits,
+            history_bytes: 0,
             next_row: rows as u64,
             tracked: HashMap::new(),
             next_track: 0,
@@ -322,7 +352,8 @@ impl Screen {
             saved_cursor: None,
             charset: self.charset.clone(),
             iso_protection: self.iso_protection,
-            scrollback_limit: 0,
+            limits: ScrollbackLimits::NONE,
+            history_bytes: 0,
             next_row: self.next_row,
             tracked: HashMap::new(),
             next_track: 0,
@@ -433,13 +464,20 @@ impl Screen {
             let previous = if y > 0 {
                 self.rows.get_mut(y - 1)
             } else {
+                // This is the only edit path that can mutate a historical row.
                 self.history.back_mut()
             };
             if let Some(previous) = previous
                 && previous.wrapped
                 && previous.cells[cols - 1].spacer_head
             {
+                let before = previous.storage_bytes();
                 previous.erase(cols - 1, cols, background, false);
+                if y == 0 {
+                    self.history_bytes = self
+                        .history_bytes
+                        .saturating_sub(before.saturating_sub(previous.storage_bytes()));
+                }
             }
         }
         if col > 0 && self.rows[y].cells[col - 1].width == 2 {
@@ -463,16 +501,62 @@ impl Screen {
     }
 
     pub(crate) fn push_history(&mut self, row: Row) {
-        if self.scrollback_limit == 0 {
+        if self.limits.bytes == Some(0) || self.limits.lines == Some(0) {
             self.discard_row(row.id);
             return;
         }
+        self.history_bytes = self.history_bytes.saturating_add(row.storage_bytes());
         self.history.push_back(row);
         if self.viewport_offset > 0 {
             self.viewport_offset += 1;
         }
-        while self.history.len() > self.scrollback_limit {
+        self.enforce_limits();
+    }
+
+    /// Charged bytes in history rows; container spare capacity and graphics are
+    /// excluded. Text and hyperlink allocations are charged at their capacity.
+    pub fn history_bytes(&self) -> usize {
+        self.history_bytes
+    }
+
+    pub fn storage_bytes(&self) -> usize {
+        self.rows.iter().fold(self.history_bytes, |bytes, row| {
+            bytes.saturating_add(row.storage_bytes())
+        })
+    }
+
+    pub(crate) fn set_limits(&mut self, limits: ScrollbackLimits) {
+        self.limits = limits;
+        self.enforce_limits();
+        self.history.shrink_to_fit();
+    }
+
+    pub(crate) fn clear_history(&mut self) {
+        while let Some(row) = self.history.pop_front() {
+            self.discard_row(row.id);
+        }
+        self.history_bytes = 0;
+        self.viewport_offset = 0;
+    }
+
+    pub(crate) fn enforce_limits(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let byte_budget = self.limits.bytes.map(|bytes| {
+            let active = self.rows.iter().fold(0usize, |bytes, row| {
+                bytes.saturating_add(row.storage_bytes())
+            });
+            bytes.saturating_sub(active)
+        });
+        while self
+            .limits
+            .lines
+            .is_some_and(|max| self.history.len() > max)
+            || byte_budget.is_some_and(|max| self.history_bytes > max)
+        {
             let row = self.history.pop_front().unwrap();
+            self.history_bytes = self.history_bytes.saturating_sub(row.storage_bytes());
             self.discard_row(row.id);
         }
         self.viewport_offset = self.viewport_offset.min(self.history.len());
@@ -493,6 +577,7 @@ impl Screen {
             })
         });
         let mut contents: Vec<Row> = self.history.drain(..).chain(self.rows.drain(..)).collect();
+        self.history_bytes = 0;
         let cursor_index = contents
             .iter()
             .position(|r| r.id == old_cursor.row)

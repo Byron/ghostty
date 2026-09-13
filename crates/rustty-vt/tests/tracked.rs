@@ -1,4 +1,4 @@
-use rustty_vt::{Terminal, snapshot};
+use rustty_vt::{Selection, Terminal, snapshot};
 
 #[test]
 fn tracked_cells_belong_to_one_live_screen() {
@@ -79,4 +79,74 @@ fn copying_screen_contents_does_not_copy_external_handles() {
         assert_eq!(terminal.screen().resolve(copied), None);
     }
     assert_eq!(terminal.screen().resolve(original), Some(point));
+}
+
+#[test]
+fn line_edits_keep_tracked_cells_and_selection_at_physical_coordinates() {
+    for alternate in [false, true] {
+        for command in [
+            b"\x1b[H\x1b[L".as_slice(),
+            b"\x1b[H\x1b[M",
+            b"\x1b[T",
+            b"\x1b[2;3r\x1b[S",
+        ] {
+            let mut terminal = Terminal::new(8, 4, 10);
+            if alternate {
+                terminal.feed(b"\x1b[?47h");
+            }
+            terminal.feed(b"aa\r\nbb\r\ncc\r\ndd");
+            let points: Vec<_> = (0..4)
+                .map(|y| terminal.screen().point(y, 1).unwrap())
+                .collect();
+            let pins: Vec<_> = points
+                .iter()
+                .map(|&point| terminal.screen_mut().track(point))
+                .collect();
+            terminal.screen_mut().selection = Some(Selection {
+                start: points[0],
+                end: points[3],
+                rectangular: false,
+            });
+            terminal.feed(command);
+            for (y, pin) in pins.into_iter().enumerate() {
+                assert_eq!(
+                    terminal.screen().resolve(pin),
+                    terminal.screen().point(y, 1)
+                );
+            }
+            let selected = terminal.screen().selection.unwrap();
+            assert_eq!(Some(selected.start), terminal.screen().point(0, 1));
+            assert_eq!(Some(selected.end), terminal.screen().point(3, 1));
+        }
+    }
+}
+
+#[test]
+fn scroll_pins_follow_native_history_insertion_and_no_history_clamping() {
+    for (alternate, partial) in [(false, true), (true, true), (true, false)] {
+        let mut terminal = Terminal::new(8, 4, 10);
+        if alternate {
+            terminal.feed(b"\x1b[?47h");
+        }
+        terminal.feed(b"aa\r\nbb\r\ncc\r\ndd");
+        let first = terminal.screen().point(0, 1).unwrap();
+        let last = terminal.screen().point(3, 1).unwrap();
+        let first = terminal.screen_mut().track(first);
+        let last = terminal.screen_mut().track(last);
+        if partial {
+            terminal.feed(b"\x1b[1;3r");
+        }
+        terminal.feed(b"\x1b[S");
+        let screen = terminal.screen();
+        assert_eq!(screen.resolve(first), screen.point(0, 1));
+        assert_eq!(
+            screen.resolve(last),
+            screen.point(if partial { 3 } else { 2 }, 1)
+        );
+        let last = screen.resolve(last).unwrap();
+        assert_eq!(
+            screen.row_by_id(last.row).unwrap().cells[last.col].text,
+            if alternate { "d" } else { "" }
+        );
+    }
 }

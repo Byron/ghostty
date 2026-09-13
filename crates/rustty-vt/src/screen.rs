@@ -644,6 +644,20 @@ impl Screen {
         }
     }
 
+    /// Move external pins and selection endpoints independently of row contents.
+    /// Line edits retain physical coordinates; history scrolling moves them.
+    pub(crate) fn remap_grid_rows(&mut self, rows: &HashMap<u64, u64>) {
+        for point in self.tracked.0.values_mut().flatten().chain(
+            self.selection
+                .iter_mut()
+                .flat_map(|selection| [&mut selection.start, &mut selection.end]),
+        ) {
+            if let Some(&row) = rows.get(&point.row) {
+                point.row = row;
+            }
+        }
+    }
+
     pub(crate) fn discard_row(&mut self, id: u64) {
         self.graphics.discard_row(id);
         for point in self.tracked.0.values_mut() {

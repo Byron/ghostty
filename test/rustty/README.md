@@ -133,6 +133,13 @@ those values through both encodings, including `redraw=last` and `cl=w`.
 These observations read terminal state directly and remain optional for other
 protocol cases.
 
+`--protocols --case protocol/prompt-redraw` compares primary-screen resize
+cleanup for OSC 133 `redraw=1`, `0` and `last`, including inactive primary
+screens, unmarked input, prompt history, styled/protected cells and snapshot
+continuation. It also checks that alternate screens and unchanged dimensions
+retain their content. Narrowing cases compare prompt metadata on every reflowed
+row; inherited streams cover cleanup before DECCOLM's display erasure.
+
 `--protocols --case protocol/graphics` uses the real Wuffs PNG callback with
 its original bounded allocator and compares stored image IDs, dimensions and
 RGBA pixels on both screens. Native RGB storage is expanded only at the

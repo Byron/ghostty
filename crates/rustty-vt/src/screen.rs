@@ -735,6 +735,61 @@ impl Screen {
         self.viewport_offset = self.viewport_offset.min(self.history.len());
     }
 
+    pub(crate) fn clear_prompt_for_redraw(&mut self, redraw: PromptRedraw) {
+        if self.cursor.semantic == SemanticContent::Output {
+            return;
+        }
+        let cursor = self.history.len() + self.cursor.row;
+        let (start, end) = match redraw {
+            PromptRedraw::None => return,
+            PromptRedraw::Last => (cursor, cursor + 1),
+            PromptRedraw::All => {
+                let mut previous = self
+                    .all_rows()
+                    .rev()
+                    .skip(self.rows.len() - self.cursor.row - 1);
+                let Some((offset, row)) = previous
+                    .by_ref()
+                    .enumerate()
+                    .find(|(_, row)| row.semantic != SemanticContent::Output)
+                else {
+                    return;
+                };
+                let found = cursor - offset;
+                let start = if row.semantic == SemanticContent::Input {
+                    previous
+                        .enumerate()
+                        .find_map(|(offset, row)| match row.semantic {
+                            SemanticContent::Prompt => Some(found - offset - 1),
+                            SemanticContent::Output => Some(found - offset),
+                            SemanticContent::Input => None,
+                        })
+                        // Native prompt iteration keeps its starting continuation
+                        // when the entire preceding history is a continuation.
+                        .unwrap_or(found)
+                } else {
+                    found
+                };
+                (start, self.history.len() + self.rows.len())
+            }
+        };
+        for row in self
+            .history
+            .iter_mut()
+            .chain(&mut self.rows)
+            .skip(start)
+            .take(end - start)
+        {
+            // Native resize temporarily releases the cursor style before
+            // clearing, so these cells have the default background.
+            row.cells.fill(Cell::default());
+            row.dirty = true;
+        }
+        if start < self.history.len() {
+            self.history_bytes = self.history.iter().map(Row::storage_bytes).sum();
+        }
+    }
+
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
         let old_cols = self.columns;
         let columns_changed = cols != old_cols;

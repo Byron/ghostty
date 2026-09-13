@@ -16,6 +16,7 @@ import kitty_clipboard
 import paste_requests
 import graphics_requests
 import semantic_prompts
+import prompt_redraw
 import charsets
 import grid_requests
 import search_pages
@@ -487,6 +488,8 @@ def main():
                 requests.extend((request, covers) for request, covers in graphics_requests.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in semantic_prompts.requests()
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in prompt_redraw.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in charsets.requests()
                                 if not args.case or args.case in request["id"])

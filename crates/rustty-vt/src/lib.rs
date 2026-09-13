@@ -1,5 +1,6 @@
 //! Headless terminal state and protocol handling.
 
+pub mod clipboard;
 pub mod graphics;
 pub mod input;
 pub mod modes;
@@ -15,4 +16,4 @@ pub use screen::{
     Cell, Color, Cursor, CursorShape, GridPoint, HyperlinkId, Row, Screen, ScrollbackLimits,
     Selection, SemanticContent, Style, TrackedPoint, Underline,
 };
-pub use terminal::{Effect, Margins, Terminal, default_palette, parse_color};
+pub use terminal::{Effect, EffectHandler, Margins, Terminal, default_palette, parse_color};

@@ -133,7 +133,7 @@ struct Host {
     palette: bool,
     palette_query: String,
     confirm: Option<Action>,
-    clipboard_request: Option<(Id, String, Option<Vec<u8>>)>,
+    clipboard_request: VecDeque<(Id, vt::Effect)>,
     capture: bool,
     frames: u64,
 }
@@ -142,7 +142,7 @@ impl Host {
         self.search.is_some()
             || self.palette
             || self.confirm.is_some()
-            || self.clipboard_request.is_some()
+            || !self.clipboard_request.is_empty()
     }
     fn repaint(&self) {
         if self.visible && !self.occluded {
@@ -622,7 +622,7 @@ impl App {
             palette: false,
             palette_query: String::new(),
             confirm: None,
-            clipboard_request: None,
+            clipboard_request: VecDeque::new(),
             capture: false,
             frames: 0,
         };
@@ -703,6 +703,7 @@ impl App {
             .iter()
             .any(|window| window.tabs.iter().any(|tab| tab.panes.contains_key(&id)));
         let mut close = false;
+        let mut clipboard = Vec::new();
         let focused = self
             .windows
             .values()
@@ -771,38 +772,9 @@ impl App {
                 SessionEvent::Effect(vt::Effect::Bell) => {
                     pane.unseen |= !focused;
                 }
-                SessionEvent::Effect(vt::Effect::Clipboard { selection, data }) => {
-                    let host = self.windows.values_mut().find(|host| {
-                        self.workspace
-                            .windows
-                            .iter()
-                            .find(|w| w.id == host.id)
-                            .is_some_and(|w| w.tabs.iter().any(|t| t.panes.contains_key(&id)))
-                    });
-                    if let Some(host) = host {
-                        let policy = if data.is_some() {
-                            config.clipboard_write
-                        } else {
-                            config.clipboard_read
-                        };
-                        match policy {
-                            config::ClipboardAccess::Deny => {}
-                            config::ClipboardAccess::Ask => {
-                                host.clipboard_request = Some((id, selection, data));
-                                host.repaint();
-                            }
-                            config::ClipboardAccess::Allow => {
-                                if let Some(data) = data {
-                                    host.egui.set_clipboard_text(
-                                        String::from_utf8_lossy(&data).into_owned(),
-                                    );
-                                } else if let Some(text) = host.egui.clipboard_text() {
-                                    let _ = pane.write(clipboard_reply(&selection, &text));
-                                }
-                            }
-                        }
-                    }
-                }
+                SessionEvent::Effect(
+                    effect @ (vt::Effect::ClipboardRead(_) | vt::Effect::ClipboardWrite(_)),
+                ) => clipboard.push(effect),
                 SessionEvent::Exited {
                     code,
                     signal,
@@ -822,6 +794,9 @@ impl App {
             }
         }
         let cwd = pane.cwd.clone();
+        for request in clipboard {
+            self.queue_clipboard(id, request);
+        }
         if close {
             self.remember();
             self.workspace.close_pane(id);
@@ -863,17 +838,85 @@ impl App {
     }
 }
 
-fn clipboard_reply(selection: &str, text: &str) -> Vec<u8> {
-    use base64::Engine;
-    format!(
-        "\x1b]52;{};{}\x1b\\",
-        selection,
-        base64::engine::general_purpose::STANDARD.encode(text)
-    )
-    .into_bytes()
-}
-
 impl App {
+    fn queue_clipboard(&mut self, pane: Id, request: vt::Effect) {
+        use vt::clipboard::Location;
+        let (location, policy) = match &request {
+            vt::Effect::ClipboardRead(read) => (read.location, self.config().clipboard_read),
+            vt::Effect::ClipboardWrite(write) => (write.location, self.config().clipboard_write),
+            _ => return,
+        };
+        let window = self
+            .workspace
+            .windows
+            .iter()
+            .find(|window| window.tabs.iter().any(|tab| tab.panes.contains_key(&pane)))
+            .map(|window| window.id);
+        let key = self
+            .windows
+            .iter()
+            .find(|(_, host)| Some(host.id) == window)
+            .map(|(key, _)| *key);
+        let Some(key) = key else {
+            if let vt::Effect::ClipboardRead(read) = request {
+                self.write(pane, read.reply(&[]));
+            }
+            return;
+        };
+        let mut host = self.windows.remove(&key).unwrap();
+        if policy == config::ClipboardAccess::Ask
+            && location != Location::Primary
+            && host.clipboard_request.len() < 16
+        {
+            host.clipboard_request.push_back((pane, request));
+            host.repaint();
+        } else {
+            self.finish_clipboard(
+                &mut host,
+                pane,
+                request,
+                policy == config::ClipboardAccess::Allow,
+            );
+        }
+        self.windows.insert(key, host);
+    }
+    fn finish_clipboard(&mut self, host: &mut Host, pane: Id, request: vt::Effect, allow: bool) {
+        use vt::clipboard::{Content, Location, is_text_mime};
+        match request {
+            vt::Effect::ClipboardRead(read) => {
+                let text = if allow {
+                    match read.location {
+                        Location::Standard => host.egui.clipboard_text(),
+                        Location::Selection => self.primary_selection.clone(),
+                        Location::Primary => None, // macOS has no primary selection clipboard.
+                    }
+                } else {
+                    None
+                };
+                let contents = text
+                    .map(|text| Content {
+                        mime: b"text/plain".to_vec(),
+                        data: text.into_bytes(),
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                self.write(pane, read.reply(&contents));
+            }
+            vt::Effect::ClipboardWrite(write) if allow => {
+                let text = write
+                    .contents
+                    .iter()
+                    .find(|content| is_text_mime(&content.mime))
+                    .map(|content| String::from_utf8_lossy(&content.data).into_owned());
+                match write.location {
+                    Location::Standard => host.egui.set_clipboard_text(text.unwrap_or_default()),
+                    Location::Selection => self.primary_selection = text,
+                    Location::Primary => {}
+                }
+            }
+            _ => {}
+        }
+    }
     fn action(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2223,29 +2266,35 @@ impl App {
                         });
                     });
             }
-            if let Some((pane, selection, data)) = host.clipboard_request.clone() {
+            if let Some((pane, request)) = host.clipboard_request.front() {
+                let write = matches!(request, vt::Effect::ClipboardWrite(_));
+                let title = self
+                    .panes
+                    .get(pane)
+                    .map(|pane| pane.title.clone())
+                    .unwrap_or_default();
                 egui::Window::new("Terminal clipboard access")
                     .collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
-                        ui.label(if data.is_some() {
+                        if !title.is_empty() {
+                            ui.label(&title);
+                        }
+                        ui.label(if write {
                             "A terminal program wants to replace the clipboard."
                         } else {
                             "A terminal program wants to read the clipboard."
                         });
                         ui.horizontal(|ui| {
-                            if ui.button("Deny").clicked() {
-                                host.clipboard_request = None;
+                            if ui.button("Deny").clicked()
+                                && let Some((pane, request)) = host.clipboard_request.pop_front()
+                            {
+                                self.finish_clipboard(host, pane, request, false);
                             }
-                            if ui.button("Allow once").clicked() {
-                                if let Some(data) = data {
-                                    host.egui.set_clipboard_text(
-                                        String::from_utf8_lossy(&data).into_owned(),
-                                    );
-                                } else if let Some(text) = host.egui.clipboard_text() {
-                                    self.write(pane, clipboard_reply(&selection, &text));
-                                }
-                                host.clipboard_request = None;
+                            if ui.button("Allow once").clicked()
+                                && let Some((pane, request)) = host.clipboard_request.pop_front()
+                            {
+                                self.finish_clipboard(host, pane, request, true);
                             }
                         });
                     });

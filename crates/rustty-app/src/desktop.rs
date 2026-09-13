@@ -341,6 +341,15 @@ fn resource_dir() -> Option<PathBuf> {
 }
 
 fn font_config(config: &Config, scale: f32) -> FontConfig {
+    let variations = |values: &[config::FontVariation]| {
+        values
+            .iter()
+            .map(|v| rustty_font::FontVariation {
+                tag: v.tag,
+                value: v.value,
+            })
+            .collect()
+    };
     FontConfig {
         families: config.font_family.clone(),
         bold_families: config.font_family_bold.clone(),
@@ -348,6 +357,35 @@ fn font_config(config: &Config, scale: f32) -> FontConfig {
         bold_italic_families: config.font_family_bold_italic.clone(),
         size_points: config.font_size,
         scale_factor: scale,
+        variations: variations(&config.font_variation),
+        bold_variations: variations(&config.font_variation_bold),
+        italic_variations: variations(&config.font_variation_italic),
+        bold_italic_variations: variations(&config.font_variation_bold_italic),
+        style_requests: [
+            &config.font_style,
+            &config.font_style_bold,
+            &config.font_style_italic,
+            &config.font_style_bold_italic,
+        ]
+        .map(|style| match style {
+            config::FontStyleRequest::Default => rustty_font::FontStyleRequest::Default,
+            config::FontStyleRequest::Disabled => rustty_font::FontStyleRequest::Disabled,
+            config::FontStyleRequest::Named(name) => {
+                rustty_font::FontStyleRequest::Named(name.clone())
+            }
+        }),
+        codepoint_map: config
+            .font_codepoint_map
+            .iter()
+            .map(|m| rustty_font::CodepointMap {
+                start: m.start,
+                end: m.end,
+                family: m.family.clone(),
+            })
+            .collect(),
+        synthetic_styles: config.font_synthetic_style,
+        thicken: config.font_thicken,
+        thicken_strength: config.font_thicken_strength,
         features: config
             .font_feature
             .iter()
@@ -364,7 +402,6 @@ fn font_config(config: &Config, scale: f32) -> FontConfig {
                 })
             })
             .collect(),
-        ..Default::default()
     }
 }
 

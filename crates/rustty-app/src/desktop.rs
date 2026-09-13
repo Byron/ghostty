@@ -40,6 +40,7 @@ use winit::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const BLINK: Duration = Duration::from_millis(600);
 const INPUT_BUDGET: usize = 16 * 1024 * 1024;
+const MIN_WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(240.0, 120.0);
 
 #[derive(Debug)]
 enum Event {
@@ -622,11 +623,19 @@ impl App {
         let id = self.workspace.id();
         let tab = self.workspace.id();
         let pane = self.workspace.id();
+        let frame = if quick {
+            self.platform
+                .as_ref()
+                .and_then(|platform| platform.quick_terminal_frame(self.config(), None))
+        } else {
+            None
+        }
+        .unwrap_or([100.0, 100.0, 1000.0, 680.0]);
         self.workspace.windows.push(WindowState {
             id,
             tabs: vec![Tab::new(tab, pane, directory)],
             active_tab: 0,
-            frame: [100.0, 100.0, 1000.0, 680.0],
+            frame,
             quick,
         });
         self.changed();
@@ -717,10 +726,9 @@ impl App {
         let quick = state.quick;
         let mut frame = state.frame;
         if quick
-            && let Some(bounds) = self
-                .platform
-                .as_ref()
-                .and_then(|platform| platform.quick_terminal_frame(self.config()))
+            && let Some(bounds) = self.platform.as_ref().and_then(|platform| {
+                platform.quick_terminal_frame(self.config(), Some([frame[2], frame[3]]))
+            })
         {
             frame = bounds;
         }
@@ -729,9 +737,12 @@ impl App {
             .with_decorations(!quick)
             .with_nonactivating_panel(quick)
             .with_visible(false)
-            .with_inner_size(LogicalSize::new(frame[2].max(320.0), frame[3].max(180.0)))
+            .with_inner_size(LogicalSize::new(
+                frame[2].max(MIN_WINDOW_SIZE.width),
+                frame[3].max(MIN_WINDOW_SIZE.height),
+            ))
             .with_position(LogicalPosition::new(frame[0], frame[1]))
-            .with_min_inner_size(LogicalSize::new(240.0, 120.0))
+            .with_min_inner_size(MIN_WINDOW_SIZE)
             .with_transparent(self.config().background_opacity < 1.0)
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true)

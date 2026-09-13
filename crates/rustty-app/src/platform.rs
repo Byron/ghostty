@@ -263,12 +263,16 @@ impl Platform {
         Ok(())
     }
 
-    /// Initial quick-terminal frame in Winit's global logical, top-left coordinates.
-    pub fn quick_terminal_frame(&self, config: &Config) -> Option<[f64; 4]> {
+    /// Anchor a new or restored quick terminal in Winit's global logical coordinates.
+    pub fn quick_terminal_frame(
+        &self,
+        config: &Config,
+        saved_size: Option<[f64; 2]>,
+    ) -> Option<[f64; 4]> {
         Some(quick_frame(
             self.quick_visible_frame(config.quick_terminal_screen)?,
             config.quick_terminal_position,
-            None,
+            saved_size,
         ))
     }
 
@@ -1449,6 +1453,33 @@ mod tests {
         assert_eq!(
             quick_frame(main, QuickTerminalPosition::Center, Some([640.0, 400.0])),
             [400.0, 230.0, 640.0, 400.0]
+        );
+    }
+
+    #[test]
+    fn quick_terminal_restores_dimensions_when_anchoring_to_the_current_display() {
+        let main = [0.0, 24.0, 1440.0, 812.0];
+        let position = QuickTerminalPosition::Top;
+        let fresh = quick_frame(main, position, None);
+        assert_eq!(fresh, [0.0, 24.0, 1440.0, 406.0]);
+        assert_eq!(
+            quick_frame(main, position, Some([fresh[2], fresh[3]])),
+            fresh
+        );
+
+        // Reopening keeps a custom size, including legal sizes below 320×180.
+        assert_eq!(
+            quick_frame(main, position, Some([520.0, 280.0])),
+            [460.0, 24.0, 520.0, 280.0]
+        );
+        assert_eq!(
+            quick_frame(main, position, Some([280.0, 150.0])),
+            [580.0, 24.0, 280.0, 150.0]
+        );
+        let smaller = [-480.0, -300.0, 480.0, 240.0];
+        assert_eq!(
+            quick_frame(smaller, position, Some([520.0, 280.0])),
+            smaller
         );
     }
 

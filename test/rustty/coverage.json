@@ -19,12 +19,12 @@
     {
       "id": "terminal.reset",
       "status": "partial",
-      "remaining": "Mode and cursor defaults, saved bits, RIS and direct resets are compared; color, graphics and other reset state still need complete coverage."
+      "remaining": "Mode/cursor defaults, saved bits, color persistence, RIS and direct resets are compared; graphics and other reset state still need complete coverage."
     },
     {
       "id": "terminal.observe",
       "status": "partial",
-      "remaining": "Mode current/saved/default state and cursor/mouse transition effects are optionally observed; saved cursor, palette, viewport and complete continuation remain."
+      "remaining": "Mode saved/default state, colors and cursor/mouse transition effects are optionally observed; saved cursor, viewport and complete continuation remain."
     },
     {
       "id": "terminal.cells",
@@ -49,7 +49,7 @@
     {
       "id": "effects.pty",
       "status": "partial",
-      "remaining": "Host query decisions and mode reports are compared; all color replies, disabled PTY writes and complete control contexts remain."
+      "remaining": "Host query decisions, mode reports and xterm/Kitty color replies are compared; disabled PTY writes and complete control contexts remain."
     },
     {
       "id": "effects.title",
@@ -88,8 +88,8 @@
     },
     {
       "id": "terminal.colors",
-      "status": "pending",
-      "remaining": "Palette/default color changes and exact query replies."
+      "status": "partial",
+      "remaining": "Current/default/override state, all palette indices, native X11 names, RGB/intensity parsing and xterm/Kitty reply matrices are compared; intermediate capture/continuation, allocation failures and complete control contexts remain."
     },
     {
       "id": "terminal.selection",

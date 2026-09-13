@@ -140,6 +140,21 @@ saved-state reuse, transitions, reset behavior, cursor defaults and malformed
 parameters. The pinned reference ignores ANSI DECRQM and DECSTR, and truncates
 unknown DECRQM mode tags to 15 bits; these behaviors are retained explicitly.
 
+Color fixtures compare xterm OSC 4/5/10–19 and reset commands, plus Kitty OSC 21.
+`observe_colors` exposes each dynamic color and all 256 palette entries with
+their current, default and explicit override values. Unset colors stay null;
+renderer fallback colors are not substituted for terminal state. A
+`color_defaults` operation replaces the configured foreground/background/cursor
+and palette defaults while preserving terminal overrides. Missing dynamic
+defaults mean unset; a missing palette selects the native builtins. Parser-only
+`colors` requests compare hexadecimal `color_inputs` with the original RGB
+parser, including every name from the original X11 table. Protocol cases cover
+palette indices, query terminators, malformed lists, unsupported targets,
+configuration changes, resets and the native fixed capture/request-count limits.
+The capture cases currently validate the completed command's effects and state;
+intermediate parser storage/continuation and allocation-failure behavior still
+need separate coverage.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;

@@ -1,7 +1,7 @@
 //! Test-only NDJSON adapter for comparisons with the original Zig terminal.
 use rustty_vt::{
     Color, CursorShape, Effect, EffectHandler, Screen, SemanticContent, Style, Terminal, clipboard,
-    modes::Modes, query,
+    color, modes::Modes, query,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -22,6 +22,7 @@ const CAPABILITIES: &[&str] = &[
     "terminal.screens",
     "terminal.cursor",
     "terminal.modes",
+    "terminal.colors",
     "effects.pty",
     "effects.title",
     "effects.pwd",
@@ -57,6 +58,8 @@ struct Request {
     host: HostOptions,
     observe_modes: Vec<ModeTag>,
     observe_mode_effects: bool,
+    observe_colors: bool,
+    color_inputs: Vec<String>,
 }
 
 impl Default for Request {
@@ -76,6 +79,8 @@ impl Default for Request {
             host: HostOptions::default(),
             observe_modes: Vec::new(),
             observe_mode_effects: false,
+            observe_colors: false,
+            color_inputs: Vec::new(),
         }
     }
 }
@@ -112,6 +117,17 @@ struct Operation {
     cursor_shape: String,
     #[serde(default = "default_cursor_blink")]
     cursor_blink: Option<bool>,
+    #[serde(default)]
+    colors: Option<ColorDefaults>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ColorDefaults {
+    foreground: Option<[u8; 3]>,
+    background: Option<[u8; 3]>,
+    cursor: Option<[u8; 3]>,
+    palette: Option<Vec<[u8; 3]>>,
 }
 
 fn default_cursor_shape() -> String {
@@ -543,7 +559,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[]})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -552,6 +568,20 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
         "capabilities" => return Ok(result),
         "parser" => {
             result["parser"] = parser::run(&request.operations)?;
+            return Ok(result);
+        }
+        "colors" => {
+            let colors = request
+                .color_inputs
+                .iter()
+                .map(|input| {
+                    let bytes = unhex(input)?;
+                    Ok(std::str::from_utf8(&bytes)
+                        .ok()
+                        .and_then(rustty_vt::parse_color))
+                })
+                .collect::<Result<Vec<_>, &'static str>>()?;
+            result["parsed_colors"] = json!(colors);
             return Ok(result);
         }
         "unicode" => {
@@ -641,6 +671,22 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     _ => return Err("InvalidCursorShape"),
                 };
                 terminal.set_default_cursor(shape, operation.cursor_blink);
+            }
+            "color_defaults" => {
+                let colors = operation.colors.as_ref().ok_or("MissingColorDefaults")?;
+                let palette = colors
+                    .palette
+                    .clone()
+                    .unwrap_or_else(rustty_vt::default_palette);
+                if palette.len() != 256 {
+                    return Err("InvalidPalette");
+                }
+                terminal.set_default_colors(
+                    colors.foreground,
+                    colors.background,
+                    colors.cursor,
+                    &palette,
+                );
             }
             "host_options" => {
                 host.host = DecodedHost::new(operation.host.as_ref().ok_or("MissingHostOptions")?)?;
@@ -774,13 +820,20 @@ fn observe(terminal: &Terminal, request: &Request) -> Value {
         json!({"cursor_visible":cursor.visible,"cursor_blink":cursor.blink,
             "mouse_mode":terminal.mouse_mode,"mouse_format":terminal.mouse_format})
     });
+    let colors = request.observe_colors.then(|| {
+        let state = |target| json!({"current":terminal.color_current(target),
+            "default":terminal.color_default(target),"override":terminal.color_override(target)});
+        json!({"foreground":state(color::Target::Foreground),
+            "background":state(color::Target::Background),"cursor":state(color::Target::Cursor),
+            "palette":(0..=255).map(|index| state(color::Target::Palette(index))).collect::<Vec<_>>()})
+    });
     json!({"cols":terminal.cols,"rows":terminal.rows,
         "alternate_active":terminal.is_alternate_screen(),
         "primary":screen(terminal.primary_screen()),
         "alternate":terminal.alternate_screen().map(screen),
         "margins":[m.top,m.bottom,m.left,m.right],
         "title":terminal.title,"pwd":terminal.working_directory,
-        "modes":modes,"mode_effects":mode_effects})
+        "modes":modes,"mode_effects":mode_effects,"colors":colors})
 }
 
 fn screen(screen: &Screen) -> Value {

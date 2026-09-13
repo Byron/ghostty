@@ -99,7 +99,7 @@
     {
       "id": "terminal.search",
       "status": "partial",
-      "remaining": "Literal byte matching, ASCII case folding, formatter coordinates, per-page order/overlap/trimming, no-scrollback prefix pruning and restored history are compared without normalizing results. A retained native search-underflow case still fails. Incremental feed/tick, selected matches, viewport results, resource-driven page changes and regex extension coverage remain."
+      "remaining": "Literal byte matching, ASCII case folding, formatter coordinates, per-page order/overlap/trimming, no-scrollback prefix pruning and restored history are compared without normalizing results. The native search-underflow defect is repaired, and all 237 retained page-search comparisons pass. Incremental feed/tick, selected matches, viewport results, resource-driven page changes and regex extension coverage remain."
     },
     {
       "id": "terminal.page-layout",

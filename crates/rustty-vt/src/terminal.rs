@@ -1147,16 +1147,30 @@ impl Terminal {
         for _ in 0..count.min(self.cols as usize) {
             let col = self.screen().cursor.col;
             let next = if backward {
-                (0..col).rev().find(|&i| self.tabstops[i]).unwrap_or(0)
-            } else {
-                (col + 1..self.cols as usize)
+                let left = if self.modes.dec(6) {
+                    self.margins.left
+                } else {
+                    0
+                };
+                if col <= left {
+                    break;
+                }
+                (left..col)
+                    .rev()
                     .find(|&i| self.tabstops[i])
-                    .unwrap_or(self.cols as usize - 1)
+                    .unwrap_or(left)
+            } else {
+                let right = self.margins.right;
+                if col >= right {
+                    break;
+                }
+                (col + 1..=right)
+                    .find(|&i| self.tabstops[i])
+                    .unwrap_or(right)
             };
             self.screen_mut().cursor.col = next;
             self.ensure_row_cells(self.screen().cursor.row, next + 1);
         }
-        self.screen_mut().cursor.pending_wrap = false;
         self.changed();
     }
 
@@ -1552,8 +1566,9 @@ impl Terminal {
                 );
             }
             ([], b'H' | b'f') => self.cursor_position(count, second.max(1).into()),
-            ([], b'I') => self.tab(count, false),
-            ([], b'Z') => self.tab(count, true),
+            ([], b'I' | b'Z') => {
+                self.tab(usize::from(p.first().copied().unwrap_or(1)), byte == b'Z')
+            }
             ([], b'g') => match n {
                 0 => {
                     let col = self.screen().cursor.col;

@@ -10,7 +10,7 @@ pub mod unicode;
 
 pub use input::{Key, KeyAction, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent};
 pub use screen::{
-    Cell, Color, Cursor, CursorShape, GridPoint, Row, Screen, Selection, SemanticContent, Style,
-    TrackedPoint, Underline,
+    Cell, Color, Cursor, CursorShape, GridPoint, Row, Screen, ScrollbackLimits, Selection,
+    SemanticContent, Style, TrackedPoint, Underline,
 };
 pub use terminal::{Effect, Margins, Terminal, default_palette, parse_color};

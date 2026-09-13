@@ -1,7 +1,7 @@
 //! PTY ownership and background IO. No windowing or GPU dependency.
 use crate::config::{Command, Config, CursorStyle, ShellIntegration, TerminalColor};
 use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
-use rustty_vt::{CursorShape, Effect, Screen, Terminal};
+use rustty_vt::{CursorShape, Effect, Screen, ScrollbackLimits, Terminal};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,14 +102,7 @@ impl Session {
             error(e)
         })?;
 
-        // The current storage API expresses its limit as rows. Keep the byte
-        // policy conservative until page compression accounts exact capacities.
-        let row_budget = config.scrollback_limit_lines.unwrap_or_else(|| {
-            config
-                .scrollback_limit_bytes
-                .map_or(100_000, |bytes| bytes / (usize::from(cols) * 16).max(1))
-        });
-        let mut terminal = Terminal::new(cols, rows, row_budget);
+        let mut terminal = Terminal::with_limits(cols, rows, scrollback_limits(config));
         apply_appearance(&mut terminal, config);
         terminal.working_directory = options
             .working_directory
@@ -297,8 +290,17 @@ impl Session {
         self.exited.load(Ordering::Acquire)
     }
     pub fn apply_config(&self, config: &Config) -> io::Result<()> {
-        apply_appearance(&mut *self.terminal()?, config);
+        let mut terminal = self.terminal()?;
+        terminal.set_limits(scrollback_limits(config));
+        apply_appearance(&mut terminal, config);
         Ok(())
+    }
+}
+
+fn scrollback_limits(config: &Config) -> ScrollbackLimits {
+    ScrollbackLimits {
+        bytes: config.scrollback_limit_bytes,
+        lines: config.scrollback_limit_lines,
     }
 }
 
@@ -494,8 +496,11 @@ mod tests {
 
     #[test]
     fn short_lived_child_is_reaped_and_final_output_drained() {
+        let mut config = Config::default();
+        config.scrollback_limit_bytes = None;
+        config.scrollback_limit_lines = Some(4);
         let session = Session::spawn(
-            &Config::default(),
+            &config,
             SessionOptions {
                 command: Some(Command::Direct(vec![
                     "/bin/sh".into(),
@@ -534,6 +539,17 @@ mod tests {
                 .plain_text()
                 .contains("rustty-ready")
         );
+        session
+            .terminal()
+            .unwrap()
+            .feed("\r\nline".repeat(40).as_bytes());
+        assert_eq!(session.terminal().unwrap().screen().history.len(), 4);
+        config.scrollback_limit_lines = Some(1);
+        session.apply_config(&config).unwrap();
+        assert_eq!(session.terminal().unwrap().screen().history.len(), 1);
+        config.scrollback_limit_bytes = Some(0);
+        session.apply_config(&config).unwrap();
+        assert!(session.terminal().unwrap().screen().history.is_empty());
     }
 
     #[test]

@@ -5,6 +5,10 @@ const vt = @import("ghostty-vt");
 const input_adapter = @import("zig-input.zig");
 const parser_adapter = @import("zig-parser.zig");
 const Allocator = std.mem.Allocator;
+// libghostty-vt exposes this type through the callback without re-exporting
+// the implementation module. Use that public signature as the source of truth.
+const DeviceAttributesFn = @typeInfo(@FieldType(vt.TerminalStream.Handler.Effects, "device_attributes")).optional.child;
+const DeviceAttributes = @typeInfo(@typeInfo(DeviceAttributesFn).pointer.child).@"fn".return_type.?;
 
 pub const std_options: std.Options = .{ .log_level = .err };
 
@@ -43,6 +47,8 @@ const Operation = struct {
     clipboard_read_enabled: ?bool = null,
     clipboard_write_enabled: ?bool = null,
     clipboard_write_limit: ?usize = null,
+    host: ?HostOptions = null,
+    cell_size: ?[2]u32 = null,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -56,6 +62,59 @@ const Request = struct {
     clipboard_read_enabled: bool = true,
     clipboard_write_enabled: bool = true,
     clipboard_write_limit: usize = 64 * 1024 * 1024,
+    host: HostOptions = .{},
+};
+const HostScheme = enum { none, light, dark };
+const HostSize = struct {
+    rows: u16 = 24,
+    columns: u16 = 80,
+    cell_width: u32 = 9,
+    cell_height: u32 = 18,
+    available: bool = true,
+};
+const HostAttributes = struct {
+    conformance_level: u16 = 62,
+    features: []const u16 = &.{22},
+    device_type: u16 = 1,
+    firmware_version: u16 = 0,
+    rom_cartridge: u16 = 0,
+    unit_id: u32 = 0,
+};
+const HostOptions = struct {
+    color_scheme: ?HostScheme = null,
+    device_attributes: ?HostAttributes = null,
+    size: ?HostSize = null,
+    enquiry: ?[]const u8 = null,
+    xtversion: ?[]const u8 = null,
+    terminfo_name: ?[]const u8 = null,
+    title_report: bool = false,
+    visible: bool = true,
+};
+const DecodedHost = struct {
+    options: HostOptions,
+    attributes: ?DeviceAttributes,
+    enquiry: ?[]const u8,
+    xtversion: ?[]const u8,
+    terminfo_name: ?[]const u8,
+
+    fn init(alloc: Allocator, options: HostOptions) !DecodedHost {
+        const attributes: ?DeviceAttributes = if (options.device_attributes) |value| attrs: {
+            const features = try alloc.alloc(@FieldType(DeviceAttributes, "primary").Feature, value.features.len);
+            for (value.features, features) |source, *destination| destination.* = @enumFromInt(source);
+            break :attrs .{
+                .primary = .{ .conformance_level = @enumFromInt(value.conformance_level), .features = features },
+                .secondary = .{ .device_type = @enumFromInt(value.device_type), .firmware_version = value.firmware_version, .rom_cartridge = value.rom_cartridge },
+                .tertiary = .{ .unit_id = value.unit_id },
+            };
+        } else null;
+        return .{
+            .options = options,
+            .attributes = attributes,
+            .enquiry = if (options.enquiry) |value| try hexDecode(alloc, value) else null,
+            .xtversion = if (options.xtversion) |value| try hexDecode(alloc, value) else null,
+            .terminfo_name = if (options.terminfo_name) |value| try hexDecode(alloc, value) else null,
+        };
+    }
 };
 const ClipboardStatus = enum { success, denied, unsupported, busy, invalid_data, io_error, none };
 const ClipboardReply = struct {
@@ -167,6 +226,7 @@ const Context = struct {
     clipboard_read_enabled: bool,
     clipboard_write_enabled: bool,
     clipboard_write_limit: usize,
+    host: DecodedHost,
 
     fn append(kind: []const u8, bytes: []const u8) void {
         const self = current.?;
@@ -206,6 +266,32 @@ const Context = struct {
     }
     fn progress(_: *vt.TerminalStream.Handler, value: vt.osc.Command.ProgressReport) void {
         record(.{ .kind = "progress", .progress = .{ .state = @intCast(@intFromEnum(value.state)), .value = value.progress } });
+    }
+    fn colorScheme(_: *vt.TerminalStream.Handler) ?vt.device_status.ColorScheme {
+        append("query_color_scheme", "");
+        return switch (current.?.host.options.color_scheme.?) {
+            .none => null,
+            .light => .light,
+            .dark => .dark,
+        };
+    }
+    fn deviceAttributes(_: *vt.TerminalStream.Handler) DeviceAttributes {
+        append("query_device_attributes", "");
+        return current.?.host.attributes.?;
+    }
+    fn size(_: *vt.TerminalStream.Handler) ?vt.size_report.Size {
+        append("query_size", "");
+        const value = current.?.host.options.size.?;
+        if (!value.available) return null;
+        return .{ .rows = value.rows, .columns = value.columns, .cell_width = value.cell_width, .cell_height = value.cell_height };
+    }
+    fn enquiry(_: *vt.TerminalStream.Handler) []const u8 {
+        append("query_enquiry", "");
+        return current.?.host.enquiry.?;
+    }
+    fn xtversion(_: *vt.TerminalStream.Handler) []const u8 {
+        append("query_xtversion", "");
+        return current.?.host.xtversion.?;
     }
     fn nextClipboardReply() DecodedClipboardReply {
         const self = current.?;
@@ -339,6 +425,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         .clipboard_read_enabled = request.clipboard_read_enabled,
         .clipboard_write_enabled = request.clipboard_write_enabled,
         .clipboard_write_limit = request.clipboard_write_limit,
+        .host = try DecodedHost.init(alloc, request.host),
     };
     current = &ctx;
     defer current = null;
@@ -357,11 +444,18 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             } else stream.nextSlice(bytes);
         } else if (std.mem.eql(u8, op.op, "resize")) {
             if (op.cols == 0 or op.rows == 0 or op.cols > 1024 or op.rows > 1024) return error.InvalidDimensions;
-            try stream.handler.resize(.{ .cols = op.cols, .rows = op.rows });
+            try stream.handler.resize(.{
+                .cols = op.cols,
+                .rows = op.rows,
+                .cell_size_px = if (op.cell_size) |value| .{ .width = value[0], .height = value[1] } else null,
+            });
         } else if (std.mem.eql(u8, op.op, "reset")) {
             stream.nextSlice("\x1bc");
         } else if (std.mem.eql(u8, op.op, "terminal_reset")) {
             t.fullReset();
+        } else if (std.mem.eql(u8, op.op, "host_options")) {
+            ctx.host = try DecodedHost.init(alloc, op.host orelse return error.MissingHostOptions);
+            configureHost(&stream);
         } else if (std.mem.eql(u8, op.op, "clipboard_options")) {
             if (op.clipboard_read_enabled) |value| ctx.clipboard_read_enabled = value;
             if (op.clipboard_write_enabled) |value| ctx.clipboard_write_enabled = value;
@@ -444,6 +538,7 @@ fn terminalStream(alloc: Allocator, terminal: *vt.Terminal) vt.TerminalStream {
     result.handler.effects.desktop_notification = Context.notification;
     result.handler.effects.progress_report = Context.progress;
     configureClipboard(&result);
+    configureHost(&result);
     return result;
 }
 
@@ -452,6 +547,18 @@ fn configureClipboard(stream: *vt.TerminalStream) void {
     stream.handler.effects.clipboard_write = if (ctx.clipboard_write_enabled) Context.clipboardWrite else null;
     stream.handler.effects.clipboard_read = if (ctx.clipboard_read_enabled) Context.clipboardRead else null;
     stream.handler.kitty_clipboard_write_max_bytes = ctx.clipboard_write_limit;
+}
+
+fn configureHost(stream: *vt.TerminalStream) void {
+    const host = &current.?.host;
+    stream.handler.effects.color_scheme = if (host.options.color_scheme != null) Context.colorScheme else null;
+    stream.handler.effects.device_attributes = if (host.attributes != null) Context.deviceAttributes else null;
+    stream.handler.effects.size = if (host.options.size != null) Context.size else null;
+    stream.handler.effects.enquiry = if (host.enquiry != null) Context.enquiry else null;
+    stream.handler.effects.xtversion = if (host.xtversion != null) Context.xtversion else null;
+    stream.handler.title_report = host.options.title_report;
+    stream.handler.terminfo_name = host.terminfo_name;
+    stream.handler.terminal.flags.visible = host.options.visible;
 }
 
 fn observe(alloc: Allocator, t: *vt.Terminal) !Observation {

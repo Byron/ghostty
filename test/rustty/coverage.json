@@ -49,7 +49,7 @@
     {
       "id": "effects.pty",
       "status": "partial",
-      "remaining": "Host-supplied device attributes, color scheme, size and version callbacks remain."
+      "remaining": "Host-supplied query answers and callback order are compared; all mode/color replies, disabled PTY writes and complete control contexts remain."
     },
     {
       "id": "effects.title",
@@ -149,12 +149,12 @@
     {
       "id": "protocol.dcs",
       "status": "partial",
-      "remaining": "Current source terminfo capabilities and DECRQSS styles/margins/cursor replies pass; host-specified terminfo names, all control contexts and resource limits remain."
+      "remaining": "Current source terminfo capabilities, host-specified names and DECRQSS styles/margins/cursor replies pass; all control contexts and resource limits remain."
     },
     {
       "id": "effects.host",
       "status": "partial",
-      "remaining": "OSC 9/777 notification bytes and ConEmu progress callbacks are observed, including malformed fields and RIS removal; Kitty notifications and explicit host query decisions remain."
+      "remaining": "OSC 9/777 notification bytes, ConEmu progress and explicit host query decisions are compared; Kitty notifications, complete capture limits and disabled PTY callback combinations remain."
     },
     {
       "id": "snapshot.cross-decode",

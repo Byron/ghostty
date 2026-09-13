@@ -8,6 +8,18 @@ import parity
 
 
 class HarnessTests(unittest.TestCase):
+    def test_failure_artifacts_can_live_outside_the_checkout(self):
+        request = {"id": "regression", "operations": []}
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "checkout"
+            for artifacts in (root / "evidence", Path(temporary) / "external"):
+                with patch.object(parity, "ROOT", root), patch.object(parity, "ARTIFACTS", artifacts):
+                    reported = parity.save_failure(request, {"ok": True}, None, "oracle exited")
+                actual = root / reported
+                self.assertEqual(request, json.loads((actual / "request.json").read_text()))
+                self.assertEqual("oracle exited\n", (actual / "difference.txt").read_text())
+                self.assertEqual(artifacts.parent != root, reported.is_absolute())
+
     def test_color_and_effect_differences_are_observed(self):
         left = {"cells": [{"text": [65], "color": [1, 2, 3]}], "events": ["bell"]}
         right = {"cells": [{"text": [65], "color": [1, 9, 3]}], "events": ["bell"]}

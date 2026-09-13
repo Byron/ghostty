@@ -339,7 +339,7 @@ def save_failure(request, left, right, reason):
     for name, value in (("request", request), ("zig", left), ("rust", right)):
         (directory / f"{name}.json").write_text(json.dumps(value, indent=2) + "\n")
     (directory / "difference.txt").write_text(reason + "\n")
-    return directory.relative_to(ROOT)
+    return directory.relative_to(ROOT) if directory.is_relative_to(ROOT) else directory
 
 
 def compare(peers, request):

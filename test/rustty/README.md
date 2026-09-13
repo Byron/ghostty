@@ -134,9 +134,13 @@ Literal search formats each retained page separately and follows native active
 and history traversal, including repeated soft-wrap matches and trimmed blank
 page tails. With scrollback disabled, it preserves native prefix pruning by
 match endpoint before reversing results. `search_pages.py` also checks restored
-history whose row IDs differ from physical order. The suite retains a native
-integer underflow on a short search window (`sliding_window.zig`); `--thorough`
-includes that failing case. Run the page suite independently with:
+history whose row IDs differ from physical order. The suite retains the short
+search-window case that exposed a native integer underflow in
+`sliding_window.zig`: subtracting the needle length before adding one failed
+when only the overlap remained. The reference now subtracts the overlap length
+directly, with forward/reverse tests proving the retained byte still joins the
+next page's match. All 237 page-search comparisons pass without normalization.
+Run the page suite independently with:
 
 ```sh
 zig build vt-oracle -Demit-lib-vt=true -Demit-macos-app=false -Doptimize=ReleaseSafe

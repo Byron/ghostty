@@ -441,5 +441,62 @@
       "stream-cmin/id_000251,time_0,execs_0,orig_id_000643,src_000000,time_3824,execs_21884,op_havoc,rep_4",
       "stream-cmin/id_000221,time_0,execs_0,orig_id_000594,src_000000,time_3206,execs_18299,op_havoc,rep_2"
     ]
+  },
+  {
+    "request": {
+      "id": "corpus/csi-extra-ed-parameters",
+      "cols": 4,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "441b5b313b334a"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cells"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000429,time_0,execs_0,orig_id_000884,src_000000,time_7937,execs_45948,op_havoc,rep_7,+cov"
+    ]
+  },
+  {
+    "request": {
+      "id": "corpus/csi-extra-cnl-parameters",
+      "cols": 4,
+      "rows": 3,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b3b3345"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cursor"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000219,time_0,execs_0,orig_id_000591,src_000000,time_3168,execs_18145,op_havoc,rep_8,+cov"
+    ]
+  },
+  {
+    "request": {
+      "id": "corpus/csi-extra-vpa-parameters",
+      "cols": 4,
+      "rows": 6,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b343b3064"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cursor"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000475,time_0,execs_0,orig_id_000937,src_000000,time_9272,execs_53815,op_havoc,rep_8"
+    ]
   }
 ]

@@ -3,6 +3,9 @@ use rustty_vt::search::ViewportSearch;
 use rustty_vt::selection::{
     Adjustment, DEFAULT_LINE_WHITESPACE, DEFAULT_WORD_BOUNDARIES, SelectLine,
 };
+use rustty_vt::selection_gesture::{
+    AutoscrollTick, Behavior, DEFAULT_BEHAVIORS, Drag, Geometry, Press, SelectionGesture,
+};
 use rustty_vt::{GridPoint, Screen, ScrollbackLimits, Selection, Terminal, TrackedPoint};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -45,6 +48,32 @@ pub struct Operation {
     semantic_prompt_boundary: Option<bool>,
     adjustment: Option<Adjustment>,
     format: Option<rustty_vt::formatter::Options>,
+    gesture: Option<GestureOptions>,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GestureOptions {
+    time: Option<i64>,
+    xpos: f64,
+    ypos: f64,
+    max_distance: f64,
+    repeat_interval: u64,
+    behaviors: [Behavior; 3],
+    geometry: Option<Geometry>,
+}
+impl Default for GestureOptions {
+    fn default() -> Self {
+        Self {
+            time: None,
+            xpos: 0.0,
+            ypos: 0.0,
+            max_distance: 10.0,
+            repeat_interval: 500_000_000,
+            behaviors: DEFAULT_BEHAVIORS,
+            geometry: None,
+        }
+    }
 }
 
 struct Handle {
@@ -57,11 +86,13 @@ struct Handle {
 pub struct Context {
     handles: Vec<Handle>,
     search: ViewportSearch,
+    gesture: SelectionGesture,
+    gesture_used: bool,
 }
 
 impl Context {
     pub fn has_handles(&self) -> bool {
-        !self.handles.is_empty() || !self.search.needle().is_empty()
+        !self.handles.is_empty() || !self.search.needle().is_empty() || self.gesture.has_anchor()
     }
 
     pub fn run(&mut self, terminal: &mut Terminal, op: &Operation) -> Result<Value, &'static str> {
@@ -157,6 +188,85 @@ impl Context {
                 if selected.is_none() && status == "ok" {
                     status = "no_value";
                 }
+            }
+            action if action.starts_with("gesture_") => {
+                self.gesture_used = true;
+                let defaults = GestureOptions::default();
+                let options = op.gesture.as_ref().unwrap_or(&defaults);
+                let boundaries = codepoints(op.boundary_codepoints.as_deref())?;
+                let boundaries = boundaries.as_deref().unwrap_or(DEFAULT_WORD_BOUNDARIES);
+                let geometry = options.geometry.unwrap_or(Geometry {
+                    columns: u32::from(columns),
+                    cell_width: 10,
+                    padding_left: 5,
+                    screen_height: 100,
+                });
+                let point = point(terminal.screen(), &op.point, columns)?;
+                let selected = match action {
+                    "gesture_press" => {
+                        if let Some(point) = point {
+                            self.gesture.press(
+                                terminal,
+                                Press {
+                                    point,
+                                    time: options.time.map(i128::from),
+                                    xpos: options.xpos,
+                                    ypos: options.ypos,
+                                    max_distance: options.max_distance,
+                                    repeat_interval: options.repeat_interval,
+                                    word_boundaries: boundaries,
+                                    behaviors: options.behaviors,
+                                },
+                            )
+                        } else {
+                            status = "invalid";
+                            None
+                        }
+                    }
+                    "gesture_drag" => {
+                        if let Some(point) = point {
+                            self.gesture.drag(
+                                terminal,
+                                Drag {
+                                    point,
+                                    xpos: options.xpos,
+                                    ypos: options.ypos,
+                                    rectangle: op.rectangle,
+                                    word_boundaries: boundaries,
+                                    geometry,
+                                },
+                            )
+                        } else {
+                            status = "invalid";
+                            None
+                        }
+                    }
+                    "gesture_release" => {
+                        self.gesture.release(terminal, point);
+                        None
+                    }
+                    "gesture_reset" => {
+                        self.gesture.reset(terminal);
+                        None
+                    }
+                    "gesture_deep_press" => self.gesture.deep_press(terminal, boundaries),
+                    "gesture_autoscroll" => self.gesture.autoscroll_tick(
+                        terminal,
+                        AutoscrollTick {
+                            viewport: [u32::from(op.point.x), op.point.y],
+                            xpos: options.xpos,
+                            ypos: options.ypos,
+                            rectangle: op.rectangle,
+                            word_boundaries: boundaries,
+                            geometry,
+                        },
+                    ),
+                    _ => return Err("UnsupportedGridAction"),
+                };
+                selection_result = selected.map(|selection| json!({
+                    "start": location(terminal.screen(), selection.start), "end": location(terminal.screen(), selection.end),
+                    "rectangle": selection.rectangular,
+                }));
             }
             "track" => {
                 if self.handles.iter().any(|handle| handle.id == op.id) {
@@ -256,7 +366,14 @@ impl Context {
             "formatted": formatted,
             "active_screen": if terminal.is_alternate_screen() { "alternate" } else { "primary" },
             "viewport_top": [0, screen.history.len().saturating_sub(screen.viewport_offset)],
-            "selection": selection, "selection_result": selection_result, "tracked": handles}),
+            "selection": selection, "selection_result": selection_result, "tracked": handles,
+            "gesture": self.gesture_used.then(|| json!({
+                "click_count": self.gesture.click_count(), "behavior": self.gesture.behavior(),
+                "dragged": self.gesture.dragged(), "autoscroll": self.gesture.autoscroll(),
+                "anchor_retained": self.gesture.has_anchor(),
+                "anchor_valid": self.gesture.anchor(terminal).is_some(),
+                "anchor": self.gesture.anchor(terminal).map(|point| location(screen, point)),
+            }))}),
         )
     }
 }

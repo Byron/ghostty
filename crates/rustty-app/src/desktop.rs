@@ -827,7 +827,7 @@ impl App {
             if visible {
                 platform.show_quick(&host.window, self.config())
             } else {
-                platform.hide_quick(&host.window, restore_focus)
+                platform.hide_quick(&host.window, restore_focus, self.config())
             }
         } else {
             Err("macOS window services are unavailable".into())
@@ -835,11 +835,33 @@ impl App {
         match result {
             Ok(()) => {
                 host.visible = visible;
+                self.remember_quick_frame(host);
                 host.repaint();
             }
             Err(error) => self.errors.push(error),
         }
     }
+
+    fn remember_quick_frame(&mut self, host: &Host) -> bool {
+        let Some(index) = self
+            .index(host.id)
+            .filter(|&i| self.workspace.windows[i].quick)
+        else {
+            return false;
+        };
+        if let Some(platform) = &self.platform {
+            match platform.quick_terminal_saved_frame(&host.window) {
+                Ok(frame) if self.workspace.windows[index].frame != frame => {
+                    self.workspace.windows[index].frame = frame;
+                    self.changed();
+                }
+                Ok(_) => {}
+                Err(error) => self.errors.push(error),
+            }
+        }
+        true
+    }
+
     fn save(&mut self) {
         self.save_at = None;
         if self.config().window_save_state != config::WindowSaveState::Never
@@ -1940,6 +1962,9 @@ impl App {
             .collect::<Vec<_>>();
         for id in removed {
             if let Some(host) = self.windows.remove(&id) {
+                if let Some(platform) = &self.platform {
+                    platform.forget_window(&host.window);
+                }
                 for (pane, request) in host.clipboard_request {
                     self.finish_clipboard(pane, request, false, false);
                 }
@@ -3499,7 +3524,9 @@ impl ApplicationHandler<Event> for App {
                 {
                     self.painter.on_window_resized(host.viewport, width, height);
                 }
-                if let Some(index) = self.index(host.id) {
+                if !self.remember_quick_frame(&host)
+                    && let Some(index) = self.index(host.id)
+                {
                     let size = size.to_logical::<f64>(host.window.scale_factor());
                     self.workspace.windows[index].frame[2] = size.width.max(1.0);
                     self.workspace.windows[index].frame[3] = size.height.max(1.0);
@@ -3508,7 +3535,9 @@ impl ApplicationHandler<Event> for App {
                 host.repaint();
             }
             WindowEvent::Moved(position) => {
-                if let Some(index) = self.index(host.id) {
+                if !self.remember_quick_frame(&host)
+                    && let Some(index) = self.index(host.id)
+                {
                     let pos = position.to_logical::<f64>(host.window.scale_factor());
                     self.workspace.windows[index].frame[0] = pos.x;
                     self.workspace.windows[index].frame[1] = pos.y;
@@ -3527,6 +3556,7 @@ impl ApplicationHandler<Event> for App {
                 host.repaint();
             }
             WindowEvent::Focused(focused) => {
+                let was_focused = host.focused;
                 host.focused = focused;
                 if focused {
                     self.active = Some(host.id);
@@ -3558,12 +3588,17 @@ impl ApplicationHandler<Event> for App {
                         .index(host.id)
                         .is_some_and(|i| self.workspace.windows[i].quick)
                     {
-                        if let Some(platform) = &self.platform
-                            && let Err(error) = platform.quick_resigned_focus(&host.window)
-                        {
-                            self.errors.push(error);
-                        }
-                        if self.config().quick_terminal_autohide && !host.ui_input() {
+                        let lost = self.platform.as_ref().map_or(Ok(was_focused), |platform| {
+                            platform.quick_resigned_focus(&host.window, was_focused)
+                        });
+                        let lost = match lost {
+                            Ok(lost) => lost,
+                            Err(error) => {
+                                self.errors.push(error);
+                                false
+                            }
+                        };
+                        if lost && self.config().quick_terminal_autohide && !host.ui_input() {
                             self.quick_visible(&mut host, false, false);
                         }
                     }

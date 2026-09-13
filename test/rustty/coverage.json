@@ -123,8 +123,8 @@
     },
     {
       "id": "clipboard",
-      "status": "pending",
-      "remaining": "OSC 52/5522 reads, writes, host decisions, grants and paste events."
+      "status": "partial",
+      "remaining": "OSC 52 reads/writes, binary data, MIME selection, terminators, malformed input and synchronous host decisions are compared; absent callbacks, OSC 1337/5522, grants, limits and paste events remain."
     },
     {
       "id": "drag-and-drop",

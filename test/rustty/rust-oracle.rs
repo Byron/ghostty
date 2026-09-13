@@ -1,5 +1,7 @@
 //! Test-only NDJSON adapter for comparisons with the original Zig terminal.
-use rustty_vt::{Color, Effect, Screen, SemanticContent, Style, Terminal};
+use rustty_vt::{
+    Color, Effect, EffectHandler, Screen, SemanticContent, Style, Terminal, clipboard,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Read, Write};
@@ -23,6 +25,7 @@ const CAPABILITIES: &[&str] = &[
     "effects.pwd",
     "effects.bell",
     "effects.host",
+    "clipboard",
     "unicode.width",
     "input.key",
     "input.mouse",
@@ -45,6 +48,7 @@ struct Request {
     scalar: bool,
     operations: Vec<Operation>,
     codepoints: Vec<u32>,
+    clipboard_replies: Vec<ClipboardReply>,
 }
 
 impl Default for Request {
@@ -57,6 +61,7 @@ impl Default for Request {
             scalar: false,
             operations: Vec::new(),
             codepoints: Vec::new(),
+            clipboard_replies: Vec::new(),
         }
     }
 }
@@ -73,6 +78,160 @@ struct Operation {
     rows: u16,
     #[serde(default)]
     input: Option<input::Event>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClipboardStatus {
+    #[default]
+    Success,
+    Denied,
+    Unsupported,
+    Busy,
+    InvalidData,
+    IoError,
+    None,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ClipboardReply {
+    status: ClipboardStatus,
+    contents: Vec<ClipboardContent>,
+    available: Vec<String>,
+    remember: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClipboardContent {
+    mime: String,
+    data: String,
+}
+
+#[derive(Default)]
+struct HostReply {
+    status: ClipboardStatus,
+    contents: Vec<clipboard::Content>,
+}
+
+#[derive(Default)]
+struct Host {
+    events: Vec<Value>,
+    replies: std::collections::VecDeque<HostReply>,
+    error: Option<&'static str>,
+}
+
+impl Host {
+    fn new(replies: &[ClipboardReply]) -> Result<Self, &'static str> {
+        let mut host = Self::default();
+        for reply in replies {
+            let contents = reply
+                .contents
+                .iter()
+                .map(|content| {
+                    Ok(clipboard::Content {
+                        mime: unhex(&content.mime)?,
+                        data: unhex(&content.data)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, &'static str>>()?;
+            // OSC 52 has no available-types list or session grants. Validate
+            // the shared fixture fields, but leave their handling to the core.
+            for mime in &reply.available {
+                unhex(mime)?;
+            }
+            let _ = reply.remember;
+            host.replies.push_back(HostReply {
+                status: reply.status,
+                contents,
+            });
+        }
+        Ok(host)
+    }
+
+    fn record(&mut self, effect: Effect) -> Result<(), &'static str> {
+        let (kind, data) = match effect {
+            Effect::Write(bytes) => ("write", hex(&bytes)),
+            Effect::Title(text) => ("title", hex(text.as_bytes())),
+            Effect::WorkingDirectory(text) => ("pwd", hex(text.as_bytes())),
+            Effect::Bell => ("bell", String::new()),
+            Effect::Notification { title, body } => {
+                let mut value = event("notification", String::new());
+                value["notification"] = json!({"title":hex(&title),"body":hex(&body)});
+                self.events.push(value);
+                return Ok(());
+            }
+            Effect::Progress { state, value } => {
+                let mut observed = event("progress", String::new());
+                observed["progress"] = json!({"state":state,"value":value});
+                self.events.push(observed);
+                return Ok(());
+            }
+            // Unknown-sequence diagnostics are not an external terminal effect.
+            Effect::UnknownSequence(_) => return Ok(()),
+            _ => return Err("UnsupportedEffect"),
+        };
+        if kind == "write"
+            && let Some(last) = self.events.last_mut()
+            && last["kind"] == "write"
+        {
+            let combined = format!("{}{}", last["data"].as_str().unwrap(), data);
+            last["data"] = json!(combined);
+        } else {
+            self.events.push(event(kind, data));
+        }
+        Ok(())
+    }
+}
+
+impl EffectHandler for Host {
+    fn effect(&mut self, effect: Effect) {
+        if let Err(error) = self.record(effect) {
+            self.error = Some(error);
+        }
+    }
+
+    fn clipboard_read(&mut self, request: &clipboard::Read) -> Vec<clipboard::Content> {
+        let mut observed = clipboard_event("clipboard_read", request.location);
+        observed["clipboard"]["mimes"] = json!([hex(b"text/plain")]);
+        self.events.push(observed);
+        let reply = self.replies.pop_front().unwrap_or_default();
+        match reply.status {
+            ClipboardStatus::Success => reply.contents,
+            ClipboardStatus::InvalidData => {
+                self.error = Some("UnsupportedClipboardReadStatus");
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn clipboard_write(&mut self, request: &clipboard::Write) {
+        let mut observed = clipboard_event("clipboard_write", request.location);
+        observed["clipboard"]["contents"] = json!(
+            request
+                .contents
+                .iter()
+                .map(|content| { json!({"mime":hex(&content.mime),"data":hex(&content.data)}) })
+                .collect::<Vec<_>>()
+        );
+        self.events.push(observed);
+        // OSC 52 does not acknowledge writes; every host decision is silent.
+        self.replies.pop_front();
+    }
+}
+
+fn clipboard_event(kind: &str, location: clipboard::Location) -> Value {
+    let mut observed = event(kind, String::new());
+    let location = match location {
+        clipboard::Location::Standard => "standard",
+        clipboard::Location::Selection => "selection",
+        clipboard::Location::Primary => "primary",
+    };
+    observed["clipboard"] = json!({"location":location,"contents":[],"mimes":[],
+        "list":false,"name":"","granted":false,"can_remember":false});
+    observed
 }
 
 fn main() -> io::Result<()> {
@@ -138,49 +297,43 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
         terminal.set_pixel_size(u32::from(request.cols) * 8, u32::from(request.rows) * 16);
     }
     let mut observations = Vec::new();
-    let mut events: Vec<Value> = Vec::new();
+    let mut host = Host::new(&request.clipboard_replies)?;
     let mut snapshots = Vec::new();
     let mut snapshot_progress = Vec::new();
     let mut snapshot_decoder = None;
     let snapshot_offset = std::rc::Rc::new(std::cell::Cell::new(0));
     for operation in &request.operations {
-        let effects = match operation.op.as_str() {
+        match operation.op.as_str() {
             "write" => {
                 let bytes = unhex(&operation.data)?;
                 if request.scalar {
-                    bytes
-                        .iter()
-                        .flat_map(|byte| terminal.feed(std::slice::from_ref(byte)))
-                        .collect()
+                    for byte in &bytes {
+                        terminal.feed_with_handler(std::slice::from_ref(byte), &mut host);
+                    }
                 } else {
-                    terminal.feed(&bytes)
+                    terminal.feed_with_handler(&bytes, &mut host);
                 }
             }
             "resize" => {
                 dimensions(operation.cols, operation.rows)?;
                 terminal.resize(operation.cols, operation.rows);
-                Vec::new()
             }
-            "reset" => terminal.feed(b"\x1bc"),
+            "reset" => terminal.feed_with_handler(b"\x1bc", &mut host),
             "observe" => {
                 observations.push(observe(&terminal));
-                Vec::new()
             }
             "input" => {
                 let bytes =
                     input::encode(&terminal, operation.input.as_ref().ok_or("MissingInput")?)?;
-                events.push(event("input", hex(&bytes)));
-                Vec::new()
+                host.events.push(event("input", hex(&bytes)));
             }
             "checkpoint" => {
                 observations.clear();
-                events.clear();
-                Vec::new()
+                host.events.clear();
             }
             "snapshot" => {
                 snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
                     .map_err(|_| "SnapshotEncodeFailed")?));
-                Vec::new()
             }
             "restore" => {
                 terminal = rustty_vt::snapshot::decode(
@@ -189,7 +342,6 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 )
                 .map_err(|_| "InvalidSnapshot")?;
                 snapshot_decoder = None;
-                Vec::new()
             }
             "restore_ready" => {
                 snapshot_offset.set(0);
@@ -204,7 +356,6 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 snapshot_progress.push(json!({"stage":"ready", "offset":snapshot_offset.get(),
                     "history_rows":decoder.history_rows(), "screen":null, "rows":0, "remaining":0}));
                 snapshot_decoder = Some(decoder);
-                Vec::new()
             }
             "restore_next" => {
                 let progress = snapshot_decoder
@@ -218,56 +369,25 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     None => json!({"stage":"finish", "offset":snapshot_offset.get(),
                         "history_rows":[0,0], "screen":null, "rows":0, "remaining":0}),
                 });
-                Vec::new()
             }
             _ => return Err("UnsupportedOperation"),
         };
-        for effect in effects {
-            let (kind, data) = match effect {
-                Effect::Write(bytes) => ("write", hex(&bytes)),
-                Effect::Title(text) => ("title", hex(text.as_bytes())),
-                Effect::WorkingDirectory(text) => ("pwd", hex(text.as_bytes())),
-                Effect::Bell => ("bell", String::new()),
-                Effect::Notification { title, body } => {
-                    let mut value = event("notification", String::new());
-                    value["notification"] =
-                        json!({"title":hex(title.as_ref()),"body":hex(body.as_ref())});
-                    events.push(value);
-                    continue;
-                }
-                Effect::Progress { state, value } => {
-                    let mut observed = event("progress", String::new());
-                    observed["progress"] = json!({"state":state,"value":value});
-                    events.push(observed);
-                    continue;
-                }
-                // Unknown-sequence diagnostics are not an external terminal effect.
-                Effect::UnknownSequence(_) => continue,
-                _ => return Err("UnsupportedEffect"),
-            };
-            if kind == "write"
-                && let Some(last) = events.last_mut()
-                && last["kind"] == "write"
-            {
-                let combined = format!("{}{}", last["data"].as_str().unwrap(), data);
-                last["data"] = json!(combined);
-                continue;
-            }
-            events.push(event(kind, data));
+        if let Some(error) = host.error {
+            return Err(error);
         }
     }
     if request.kind == "terminal" {
         observations.push(observe(&terminal));
     }
     result["observations"] = json!(observations);
-    result["events"] = json!(events);
+    result["events"] = json!(host.events);
     result["snapshots"] = json!(snapshots);
     result["snapshot_progress"] = json!(snapshot_progress);
     Ok(result)
 }
 
 fn event(kind: &str, data: String) -> Value {
-    json!({"kind":kind,"data":data,"notification":null,"progress":null})
+    json!({"kind":kind,"data":data,"notification":null,"progress":null,"clipboard":null})
 }
 
 struct SnapshotReader {

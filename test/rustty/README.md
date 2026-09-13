@@ -89,6 +89,17 @@ ConEmu progress cases cover terminators, optional percentages, malformed fields
 and notification fallbacks. Enabling the real progress callback also checks
 the progress removal effect emitted by RIS.
 
+The protocol suite also compares OSC 52 clipboard callbacks and the resulting
+PTY replies. Each request may provide `clipboard_replies`, consumed in callback
+order, with `status`, `contents` (hexadecimal `mime`/`data` pairs), `available`
+(hexadecimal MIME names), and `remember`. An exhausted reply list succeeds with
+empty contents. The Zig adapter calls the original synchronous reply API;
+the Rust adapter supplies content through `EffectHandler` and observes the
+core-generated reply bytes. Failure statuses and no reply become empty contents
+for OSC 52, which has no write acknowledgement or session grants. Cases compare
+binary data, text MIME preference, selectors, base64 validation, terminators,
+host decisions and ordering with other effects. No system clipboard is accessed.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;

@@ -86,8 +86,8 @@ minimized inherited failures with their original corpus source identifiers.
 `--grid` compares direct selection, literal search and tracked-reference APIs.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,
 `clear_selection`, `select_word`, `select_word_between`, `select_line`,
-`select_all`, `select_output`, `adjust_selection`, `track`, `untrack`, `viewport`, `limits`, `search`
-and `observe`.
+`select_all`, `select_output`, `adjust_selection`, `track`, `untrack`, `viewport`, `limits`, `search`,
+`search_needle`, `search_feed`, `search_viewport` and `observe`.
 Points name `active`, `viewport`, `screen` or `history` coordinates. Observations
 translate each implementation's own handles to those coordinates and include
 cell codepoints, selected text and viewport position. Raw row IDs are not shared.
@@ -151,8 +151,23 @@ python3 test/rustty/parity.py --no-build --fixtures target/search-pages.json --m
 These direct search cases use `kind=input` to avoid serializing hundreds of
 thousands of unrelated cells; their search endpoints and result order remain
 unmodified. A reference-process crash is reported as a failure and ends that
-run. Incremental search and complete resource-driven page changes remain
-uncovered, so the search coverage entry remains partial.
+run. Incremental full-history search and complete resource-driven page changes
+remain uncovered, so the search coverage entry remains partial.
+
+`--grid --case grid/search/viewport/` checks the persistent `ViewportSearch`
+cache against native `TerminalSearch.feed` and `viewportMatches`. Set a byte
+needle with `search_needle`, refresh with `search_feed` (`active_dirty` defaults
+to true), and read with `search_viewport`. Reads before the first feed are empty;
+repeated reads preserve results; setting an ASCII-case-equivalent needle keeps
+the original needle bytes and cache. Empty needles clear the search.
+`viewport_search.py` covers viewport movement within and across pages, matches
+outside visible rows on covering pages, multi-page soft-wrap overlap, Unicode
+byte endpoints, resets, both screens, resized/restored pages, and full versus
+partial-width row movement with dirty tracking disabled. Layout changes require
+a feed before resolving cached endpoints against a live screen. A live search
+must be cleared before replacing the oracle terminal with a snapshot, as with
+tracked handles. This slice does not implement full-history tick orchestration
+or selected-match navigation.
 
 `--page-layout` compares native page/resource offsets, table and bitmap
 capacities, column adjustment, and pooled versus exact allocation charge.

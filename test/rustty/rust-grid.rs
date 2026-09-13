@@ -1,4 +1,5 @@
 //! Direct selection/search/tracked-reference APIs, independent of snapshots.
+use rustty_vt::search::ViewportSearch;
 use rustty_vt::selection::{
     Adjustment, DEFAULT_LINE_WHITESPACE, DEFAULT_WORD_BOUNDARIES, SelectLine,
 };
@@ -34,6 +35,7 @@ pub struct Operation {
     end: Point,
     rectangle: bool,
     needle: String,
+    active_dirty: Option<bool>,
     delta: i32,
     lines: Option<usize>,
     bytes: Option<usize>,
@@ -53,16 +55,18 @@ struct Handle {
 #[derive(Default)]
 pub struct Context {
     handles: Vec<Handle>,
+    search: ViewportSearch,
 }
 
 impl Context {
     pub fn has_handles(&self) -> bool {
-        !self.handles.is_empty()
+        !self.handles.is_empty() || !self.search.needle().is_empty()
     }
 
     pub fn run(&mut self, terminal: &mut Terminal, op: &Operation) -> Result<Value, &'static str> {
         let mut status = "ok";
         let mut matches = None;
+        let mut search_needle = None;
         let mut selection_result = None;
         let columns = terminal.cols;
         match op.action.as_str() {
@@ -192,6 +196,26 @@ impl Context {
                         .collect::<Vec<_>>(),
                 );
             }
+            "search_needle" => {
+                self.search.set_needle(&super::unhex(&op.needle)?);
+                search_needle = Some(super::hex(self.search.needle()));
+            }
+            "search_feed" => {
+                self.search
+                    .feed(terminal.screen(), op.active_dirty.unwrap_or(true));
+            }
+            "search_viewport" => {
+                matches = Some(
+                    self.search
+                        .matches()
+                        .iter()
+                        .map(|value| {
+                            json!({"start": location(terminal.screen(), value.start),
+                        "end": location(terminal.screen(), value.end)})
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
             _ => return Err("UnsupportedGridAction"),
         }
         let screen = terminal.screen();
@@ -211,7 +235,7 @@ impl Context {
             json!({"id": handle.id, "screen": if handle.alternate { "alternate" } else { "primary" }, "value": value})
         }).collect::<Vec<_>>();
         Ok(
-            json!({"action": op.action, "status": status, "matches": matches,
+            json!({"action": op.action, "status": status, "matches": matches, "search_needle": search_needle,
             "active_screen": if terminal.is_alternate_screen() { "alternate" } else { "primary" },
             "viewport_top": [0, screen.history.len().saturating_sub(screen.viewport_offset)],
             "selection": selection, "selection_result": selection_result, "tracked": handles}),

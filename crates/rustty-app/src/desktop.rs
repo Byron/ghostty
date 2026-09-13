@@ -9,7 +9,7 @@ use rustty::{
 use rustty_app::{
     input,
     platform::{Platform, PlatformEvent},
-    workspace::{Id, Rect, Tab, WindowState, Workspace},
+    workspace::{Axis, Id, Rect, Tab, WindowState, Workspace},
 };
 use rustty_font::{FontConfig, FontFeature};
 use rustty_render::{Frame, RenderOptions};
@@ -30,7 +30,7 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     platform::macos::WindowAttributesExtMacOS,
-    window::{Fullscreen, Window, WindowId},
+    window::{CursorIcon, Fullscreen, Window, WindowId},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -112,6 +112,8 @@ struct Host {
     egui: egui_winit::State,
     fonts: rustty_render::Renderer,
     rects: BTreeMap<Id, egui::Rect>,
+    content: Rect,
+    divider_drag: Option<(Id, Axis, Rect)>,
     modifiers: ModifiersState,
     sequence: Vec<usize>,
     sequence_len: usize,
@@ -598,6 +600,8 @@ impl App {
             egui,
             fonts,
             rects: BTreeMap::new(),
+            content: Rect::UNIT,
+            divider_drag: None,
             modifiers: ModifiersState::empty(),
             sequence: Vec::new(),
             sequence_len: 0,
@@ -947,9 +951,14 @@ impl App {
             }
             Action::ResizeSplit { direction, amount } => {
                 self.remember();
-                if let Some(tab) = self.tab_mut(host.id) {
-                    tab.root
-                        .resize(tab.focused, direction, f32::from(amount) / 100.0);
+                if let Some(tab) = self.tab_mut(host.id)
+                    && tab
+                        .root
+                        .resize(tab.focused, direction, f32::from(amount), host.content)
+                {
+                    tab.zoom = None;
+                    tab.quadrant_zoom = None;
+                    host.peek = None;
                 }
             }
             Action::EqualizeSplits => {
@@ -1602,12 +1611,15 @@ impl App {
                 .frame(egui::Frame::NONE)
                 .show(root_ui, |ui| {
                     let content = ui.max_rect();
-                    let layout = active.visible_tree(host.peek.is_some()).layout(Rect {
+                    host.content = Rect {
                         x: content.left(),
                         y: content.top(),
                         width: content.width(),
                         height: content.height(),
-                    });
+                    };
+                    let layout = active
+                        .visible_tree(host.peek.is_some())
+                        .layout(host.content);
                     host.rects = layout
                         .iter()
                         .map(|(id, r)| {
@@ -2055,6 +2067,47 @@ impl App {
         Ok(())
     }
     fn mouse(&mut self, host: &mut Host, action: vt::MouseAction, button: Option<vt::MouseButton>) {
+        if let Some((id, axis, bounds)) = host.divider_drag {
+            if action == vt::MouseAction::Release {
+                host.divider_drag = None;
+            } else if action == vt::MouseAction::Move {
+                let ratio = match axis {
+                    Axis::Horizontal => (host.mouse.x - bounds.x) / bounds.width,
+                    Axis::Vertical => (host.mouse.y - bounds.y) / bounds.height,
+                };
+                if let Some(tab) = self.tab_mut(host.id) {
+                    tab.root.set_ratio(id, ratio);
+                }
+                self.changed();
+            }
+            host.repaint();
+            return;
+        }
+        if self
+            .context
+            .layer_id_at(host.mouse)
+            .is_some_and(|layer| layer.order != egui::Order::Background)
+        {
+            return;
+        }
+        if !host.ui_input() && host.peek.is_none() {
+            let divider = self.tab(host.id).and_then(|tab| {
+                tab.visible_tree(false)
+                    .divider_at(host.content, [host.mouse.x, host.mouse.y], 3.0)
+            });
+            host.window.set_cursor(match divider {
+                Some((_, Axis::Horizontal, _)) => CursorIcon::ColResize,
+                Some((_, Axis::Vertical, _)) => CursorIcon::RowResize,
+                None => CursorIcon::Default,
+            });
+            if let Some(divider) = divider {
+                if action == vt::MouseAction::Press && button == Some(vt::MouseButton::Left) {
+                    self.remember();
+                    host.divider_drag = Some(divider);
+                }
+                return;
+            }
+        }
         let hit = host
             .rects
             .iter()
@@ -2349,6 +2402,7 @@ impl ApplicationHandler<Event> for App {
                 } else {
                     host.peek = None;
                     host.modifiers = ModifiersState::empty();
+                    host.divider_drag = None;
                     host.composing = false;
                     host.preedit.clear();
                     host.sequence.clear();

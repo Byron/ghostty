@@ -206,6 +206,7 @@ impl Renderer {
             }
             let cursor = screen.cursor.visible
                 && options.cursor_visible
+                && (!options.focused || !screen.cursor.blink || options.blink_visible)
                 && !(options.focused
                     && options.preedit.as_ref().is_some_and(|p| !p.text.is_empty()))
                 && screen.viewport_offset == 0
@@ -691,6 +692,38 @@ fn decorations(
 mod tests {
     use super::*;
     use rustty_vt::{GridPoint, Selection, Terminal};
+
+    #[test]
+    fn focused_cursor_blinks_without_blinking_the_unfocused_outline() {
+        let mut terminal = Terminal::new(10, 2, 0);
+        terminal.feed(b"cursor\r");
+        terminal.screen_mut().cursor.blink = true;
+        let mut renderer = Renderer::new(FontConfig::default()).unwrap();
+        for shape in [
+            CursorShape::Block,
+            CursorShape::Bar,
+            CursorShape::Underline,
+            CursorShape::HollowBlock,
+        ] {
+            terminal.screen_mut().cursor.shape = shape;
+            let mut options = RenderOptions::default();
+            let shown = renderer.prepare(terminal.screen(), &options).unwrap();
+            options.blink_visible = false;
+            let hidden = renderer.prepare(terminal.screen(), &options).unwrap();
+            options.cursor_visible = false;
+            let without = renderer.prepare(terminal.screen(), &options).unwrap();
+            assert_eq!(hidden.quads, without.quads, "hidden phase for {shape:?}");
+            assert_ne!(shown.quads, hidden.quads);
+            options.cursor_visible = true;
+            options.focused = false;
+            let outline = renderer.prepare(terminal.screen(), &options).unwrap();
+            options.blink_visible = true;
+            assert_eq!(
+                outline.quads,
+                renderer.prepare(terminal.screen(), &options).unwrap().quads
+            );
+        }
+    }
 
     #[test]
     fn unchanged_runs_reuse_shaping_without_caching_color_or_cell_positions() {

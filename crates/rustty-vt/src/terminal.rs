@@ -1467,6 +1467,34 @@ impl Terminal {
         if sep != 0 && byte != b'm' {
             return;
         }
+        // Validate before dispatch: excess parameters invalidate the whole
+        // command, rather than applying just the first value(s).
+        match (i, byte, p.len()) {
+            (
+                [],
+                b'@'
+                | b'A'..=b'G'
+                | b'I'..=b'M'
+                | b'P'
+                | b'S'
+                | b'T'
+                | b'W'
+                | b'X'
+                | b'Z'
+                | b'`'
+                | b'a'
+                | b'b'
+                | b'd'
+                | b'e',
+                2..,
+            )
+            | ([], b'H' | b'f' | b'r' | b's', 3..)
+            | ([], b'g', 0 | 2..)
+            | ([b'?'], b'J' | b'K', 2..)
+            | ([b'"'], b'q', 2..)
+            | ([b'>'], b'm', 3..) => return,
+            _ => {}
+        }
         let n = p.first().copied().unwrap_or(0);
         let count = usize::from(n.max(1));
         let second = p.get(1).copied().unwrap_or(0);

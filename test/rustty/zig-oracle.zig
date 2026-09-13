@@ -4,6 +4,7 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const input_adapter = @import("zig-input.zig");
 const parser_adapter = @import("zig-parser.zig");
+const paste_adapter = @import("zig-paste.zig");
 const Allocator = std.mem.Allocator;
 // libghostty-vt exposes this type through the callback without re-exporting
 // the implementation module. Use that public signature as the source of truth.
@@ -46,6 +47,7 @@ const Operation = struct {
     cols: u16 = 0,
     rows: u16 = 0,
     input: ?input_adapter.Event = null,
+    paste: ?paste_adapter.Options = null,
     clipboard_read_enabled: ?bool = null,
     clipboard_write_enabled: ?bool = null,
     clipboard_write_limit: ?usize = null,
@@ -570,6 +572,8 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             try observations.append(alloc, try observe(alloc, &t, request));
         } else if (std.mem.eql(u8, op.op, "input")) {
             Context.append("input", try input_adapter.encode(alloc, &t, op.input orelse return error.MissingInput));
+        } else if (std.mem.eql(u8, op.op, "paste")) {
+            try paste_adapter.run(alloc, &stream.handler, op.paste orelse return error.MissingPaste, Context.append);
         } else if (std.mem.eql(u8, op.op, "checkpoint")) {
             observations.clearRetainingCapacity();
             ctx.events.clearRetainingCapacity();

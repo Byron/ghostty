@@ -109,7 +109,7 @@ pub struct Terminal {
     /// Maximum total decoded bytes in a Kitty clipboard write transaction.
     /// A transfer retains the value that was configured when it began.
     pub clipboard_write_limit: usize,
-    clipboard: clipboard::kitty::State,
+    pub(crate) clipboard: clipboard::kitty::State,
     pub title: String,
     pub working_directory: String,
     pub generation: u64,

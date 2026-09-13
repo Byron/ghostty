@@ -53,6 +53,13 @@ result even when it is empty; a dropped key cannot disappear from the event
 list. Mouse coordinates use 8-by-16-pixel cells. `--artifacts`, `--zig-bin` and
 `--rust-bin` select isolated output and adapter paths for concurrent work.
 
+`--protocols --case protocol/paste` exercises the state-aware paste entry point:
+text versus clipboard sources, bracketed and Kitty modes, MIME selection and
+listing limits, lazy reader failures, deterministic secure-entropy callbacks,
+and one-time read grants. Read and entropy calls are observed alongside output
+and results; event pastes must not load clipboard data. Production hosts supply
+OS randomness. The deterministic entropy source exists only in the test adapters.
+
 `--parser` compares raw UTF-8/ANSI events, parser state and all inherited
 `parser-initial` and `parser-cmin` fixtures. Unlike stream fixtures, parser
 fixtures contain no delivery-selector byte. The Zig adapter uses the original

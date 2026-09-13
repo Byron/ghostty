@@ -11,6 +11,8 @@ use std::io::{self, BufRead, Read, Write};
 mod input;
 #[path = "rust-parser.rs"]
 mod parser;
+#[path = "rust-paste.rs"]
+mod paste;
 
 const CAPABILITIES: &[&str] = &[
     "terminal.write",
@@ -97,6 +99,8 @@ struct Operation {
     rows: u16,
     #[serde(default)]
     input: Option<input::Event>,
+    #[serde(default)]
+    paste: Option<paste::Options>,
     #[serde(default)]
     clipboard_read_enabled: Option<bool>,
     #[serde(default)]
@@ -714,6 +718,11 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     input::encode(&terminal, operation.input.as_ref().ok_or("MissingInput")?)?;
                 host.events.push(event("input", hex(&bytes)));
             }
+            "paste" => paste::run(
+                &mut terminal,
+                &mut host,
+                operation.paste.as_ref().ok_or("MissingPaste")?,
+            )?,
             "checkpoint" => {
                 observations.clear();
                 host.events.clear();

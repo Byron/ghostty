@@ -124,7 +124,7 @@
     {
       "id": "clipboard",
       "status": "partial",
-      "remaining": "OSC 52/5522 metadata, binary reads/writes, MIME filtering, streamed base64, aliases, statuses, callback absence, configured limits and session grants are compared; OSC 1337, one-time paste grants, allocation failures and complete capture/size limits remain."
+      "remaining": "OSC 52/5522 metadata, binary reads/writes, MIME filtering, streamed base64, aliases, statuses, callback absence, configured limits, session grants and one-time paste grants are compared; OSC 1337, allocation failures and complete capture/size limits remain."
     },
     {
       "id": "drag-and-drop",
@@ -144,7 +144,7 @@
     {
       "id": "input.focus-paste",
       "status": "partial",
-      "remaining": "Focus, binary paste encodings and mode-aware/conservative safety checks pass; Kitty paste event/clipboard integration and complete control contexts remain."
+      "remaining": "Focus, binary paste encodings, safety checks, mode precedence, Kitty paste events, one-time grants, lazy readers and entropy/read errors are compared; disabled output callbacks, allocation failures and complete control contexts remain."
     },
     {
       "id": "protocol.dcs",

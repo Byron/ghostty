@@ -1,11 +1,14 @@
 //! GHOSTSNP version 1 terminal persistence.
 //!
 //! The encoder streams active rows before history. Decode budgets bound record
-//! sizes and the total cells restored; PAGE allocation hints are advisory and
-//! do not control native allocation. Version 1 excludes graphics and selection.
+//! sizes and the total cells restored. Native PAGE capacities bound grapheme
+//! suffix storage; style and hyperlink capacity accounting remains incomplete.
+//! Version 1 excludes graphics and selection.
 //! Physical PAGE widths are preserved on restore and during in-bounds edits.
 //! Column resizes reflow them; edits beyond a narrow row extend it safely.
 use crate::modes::Modes;
+use crate::page_layout::PageCapacity;
+use crate::page_resources::BitmapAllocator;
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
     Cell, Color, Cursor, CursorShape, HyperlinkId, Margins, Row, Screen, ScrollbackLimits,
@@ -1078,7 +1081,14 @@ impl<R: Read> Decoder<R> {
         let rows = usize::from(r.u16()?);
         let style_count = r.u16()?;
         let link_count = r.u16()?;
-        r.take(12)?;
+        let capacity = PageCapacity {
+            cols: cols as u16,
+            rows: rows as u16,
+            styles: r.u16()?,
+            hyperlink_bytes: r.u16()?,
+            grapheme_bytes: r.u32()?,
+            string_bytes: r.u32()?,
+        };
         self.cells = self
             .cells
             .checked_add(
@@ -1089,6 +1099,9 @@ impl<R: Read> Decoder<R> {
         if cols == 0 || rows == 0 || self.cells > self.options.max_cells {
             return Err(invalid("invalid or excessive snapshot page dimensions"));
         }
+        let layout = capacity
+            .layout()
+            .map_err(|_| invalid("invalid snapshot page capacity"))?;
         let mut styles = HashMap::new();
         for _ in 0..style_count {
             let id = r.u16()?;
@@ -1175,6 +1188,7 @@ impl<R: Read> Decoder<R> {
             result.push(row);
         }
         let entries = r.u32()?;
+        let mut graphemes = BitmapAllocator::<16>::new(layout.grapheme_alloc_layout);
         let mut assigned = std::collections::HashSet::new();
         for _ in 0..entries {
             let row = usize::from(r.u16()?);
@@ -1189,13 +1203,45 @@ impl<R: Read> Decoder<R> {
                 && !cell.text.is_empty()
                 && !assigned.contains(&(row, col))
             {
+                let base_len = cell.text.len();
+                let mut suffix_len = 0;
+                let mut allocation = None;
                 for bytes in bytes.as_chunks::<4>().0.iter() {
                     if let Some(cp) = char::from_u32(u32::from_le_bytes(*bytes))
                         && cp != '\0'
+                        && suffix_len < 64
                     {
+                        // Appending grows in four-codepoint chunks. Reserve
+                        // the replacement before freeing its old run so native
+                        // fragmentation and mid-cluster failures are preserved.
+                        if suffix_len % 4 == 0 {
+                            let next = graphemes.alloc((suffix_len + 1) * 4);
+                            if next.is_none()
+                                || (suffix_len == 0
+                                    && assigned.len()
+                                        >= layout.grapheme_map_layout.capacity as usize)
+                            {
+                                if let Some(offset) = next {
+                                    graphemes.free(offset, (suffix_len + 1) * 4);
+                                }
+                                if let Some(offset) = allocation {
+                                    graphemes.free(offset, suffix_len * 4);
+                                }
+                                cell.text.truncate(base_len);
+                                suffix_len = 0;
+                                break;
+                            }
+                            if let Some(offset) = allocation {
+                                graphemes.free(offset, suffix_len * 4);
+                            }
+                            allocation = next;
+                        }
                         cell.text.push(cp);
-                        assigned.insert((row, col));
+                        suffix_len += 1;
                     }
+                }
+                if suffix_len > 0 {
+                    assigned.insert((row, col));
                 }
             }
         }

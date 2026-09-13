@@ -18,6 +18,42 @@ fn hex(text: &str) -> Vec<u8> {
         .collect()
 }
 
+#[test]
+fn snapshot_grapheme_capacity_drops_whole_clusters_and_limits_suffix_length() {
+    for (capacity, counts, expected) in [
+        (0u32, [1u16; 4], [1usize; 4]),
+        (16, [1; 4], [2, 1, 1, 1]),
+        (512, [64, 64, 8, 61], [65, 65, 9, 1]),
+        (8192, [65, 128, 0, 1], [65, 65, 1, 2]),
+    ] {
+        let mut parts = records(&encode_to_vec(&Terminal::new(4, 1, 0)).unwrap());
+        let page = &mut parts.iter_mut().find(|(tag, _)| *tag == 3).unwrap().1;
+        page.clear();
+        for value in [4u16, 1, 0, 0, 0, 0] {
+            page.extend_from_slice(&value.to_le_bytes());
+        }
+        page.extend_from_slice(&capacity.to_le_bytes());
+        page.extend_from_slice(&0u32.to_le_bytes());
+        page.extend_from_slice(&[0, 4, 0, b'A', b'B', b'C', b'D']);
+        page.extend_from_slice(&4u32.to_le_bytes());
+        for (col, count) in counts.into_iter().enumerate() {
+            for value in [0, col as u16, count] {
+                page.extend_from_slice(&value.to_le_bytes());
+            }
+            for _ in 0..count {
+                page.extend_from_slice(&0x301u32.to_le_bytes());
+            }
+        }
+        let terminal = decode(frame(&parts).as_slice(), DecodeOptions::default()).unwrap();
+        let actual = terminal.screen().rows[0]
+            .cells
+            .iter()
+            .map(|cell| cell.text.chars().count())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "capacity={capacity}");
+    }
+}
+
 fn records(bytes: &[u8]) -> Vec<(u16, Vec<u8>)> {
     let mut data = &bytes[10..];
     let mut records = Vec::new();

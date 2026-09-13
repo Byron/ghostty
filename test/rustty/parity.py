@@ -16,6 +16,7 @@ import kitty_clipboard
 import host_queries
 import mode_defaults
 import color_protocols
+import osc_strings
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -433,6 +434,8 @@ def main():
                 requests.extend((request, covers) for request, covers in mode_defaults.requests(ROOT)
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in color_protocols.requests(ROOT)
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in osc_strings.requests()
                                 if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())

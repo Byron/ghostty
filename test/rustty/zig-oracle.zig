@@ -508,6 +508,10 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             stream.nextSlice("\x1bc");
         } else if (std.mem.eql(u8, op.op, "terminal_reset")) {
             t.fullReset();
+        } else if (std.mem.eql(u8, op.op, "title_set")) {
+            try t.setTitle(try hexDecode(alloc, op.data));
+        } else if (std.mem.eql(u8, op.op, "pwd_set")) {
+            try t.setPwd(try hexDecode(alloc, op.data));
         } else if (std.mem.eql(u8, op.op, "mode_set") or
             std.mem.eql(u8, op.op, "mode_default") or
             std.mem.eql(u8, op.op, "mode_raw_default") or
@@ -681,8 +685,8 @@ fn observe(alloc: Allocator, t: *vt.Terminal, request: Request) !Observation {
         .primary = try observeScreen(alloc, t.screens.all.get(.primary).?),
         .alternate = if (t.screens.all.get(.alternate)) |screen| try observeScreen(alloc, screen) else null,
         .margins = .{ t.scrolling_region.top, t.scrolling_region.bottom, t.scrolling_region.left, t.scrolling_region.right },
-        .title = try alloc.dupe(u8, t.getTitle() orelse ""),
-        .pwd = try alloc.dupe(u8, t.getPwd() orelse ""),
+        .title = try hexEncode(alloc, t.getTitle() orelse ""),
+        .pwd = try hexEncode(alloc, t.getPwd() orelse ""),
         .modes = modes,
         .mode_effects = if (request.observe_mode_effects) .{
             .cursor_visible = t.modes.get(.cursor_visible),

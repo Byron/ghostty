@@ -1806,13 +1806,16 @@ impl Terminal {
                     self.carriage_return();
                 }
             }
-            ([], b'S') => {
-                // SU defaults to one only when the parameter is omitted.
+            ([], b'S' | b'T') => {
+                // Scrolling defaults to one only when the parameter is omitted.
                 if p.is_empty() || n != 0 {
-                    self.scroll_up(count, true);
+                    if byte == b'S' {
+                        self.scroll_up(count, true);
+                    } else {
+                        self.scroll_down(count);
+                    }
                 }
             }
-            ([], b'T') => self.scroll_down(count),
             ([], b'b') => {
                 if let Some(cp) = self.previous_char {
                     for _ in 0..count {

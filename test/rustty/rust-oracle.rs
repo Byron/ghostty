@@ -351,8 +351,8 @@ impl Host {
     fn record(&mut self, effect: Effect) -> Result<(), &'static str> {
         let (kind, data) = match effect {
             Effect::Write(bytes) => ("write", hex(&bytes)),
-            Effect::Title(text) => ("title", hex(text.as_bytes())),
-            Effect::WorkingDirectory(text) => ("pwd", hex(text.as_bytes())),
+            Effect::Title(bytes) => ("title", hex(&bytes)),
+            Effect::WorkingDirectory(bytes) => ("pwd", hex(&bytes)),
             Effect::Bell => ("bell", String::new()),
             Effect::Notification { title, body } => {
                 let mut value = event("notification", String::new());
@@ -634,6 +634,8 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             }
             "reset" => terminal.feed_with_handler(b"\x1bc", &mut host),
             "terminal_reset" => terminal.reset(),
+            "title_set" => terminal.set_title(&unhex(&operation.data)?),
+            "pwd_set" => terminal.set_working_directory(&unhex(&operation.data)?),
             "mode_set" => mode_results.push(terminal.modes.set(
                 operation.private,
                 operation.number,
@@ -832,7 +834,7 @@ fn observe(terminal: &Terminal, request: &Request) -> Value {
         "primary":screen(terminal.primary_screen()),
         "alternate":terminal.alternate_screen().map(screen),
         "margins":[m.top,m.bottom,m.left,m.right],
-        "title":terminal.title,"pwd":terminal.working_directory,
+        "title":hex(terminal.title_bytes()),"pwd":hex(terminal.working_directory_bytes()),
         "modes":modes,"mode_effects":mode_effects,"colors":colors})
 }
 

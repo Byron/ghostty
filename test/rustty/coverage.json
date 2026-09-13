@@ -54,12 +54,12 @@
     {
       "id": "effects.title",
       "status": "partial",
-      "remaining": "Title callback is observed; complete OSC cases remain."
+      "remaining": "Raw bytes, UTF-8 validation before truncation, fixed capture/prefix behavior, direct setters and snapshot restoration are compared; disabled callbacks, allocation failures and complete control contexts remain."
     },
     {
       "id": "effects.pwd",
       "status": "partial",
-      "remaining": "PWD callback is observed; complete URI handling cases remain."
+      "remaining": "Opaque raw bytes, OSC7/ConEmu/iTerm2 aliases, fixed capture/prefix behavior, uncapped setters and snapshots are compared; disabled callbacks, allocation failures and complete control contexts remain."
     },
     {
       "id": "effects.bell",
@@ -78,8 +78,8 @@
     },
     {
       "id": "parser.events",
-      "status": "pending",
-      "remaining": "Validated OSC semantics, command-specific limits and malformed command behavior still require terminal/protocol comparisons."
+      "status": "partial",
+      "remaining": "Validated title/PWD, color, notification and clipboard semantics plus fixed capture/prefix cases are compared; remaining OSC commands, streaming capture allocation and complete malformed contexts remain."
     },
     {
       "id": "terminal.modes",
@@ -154,7 +154,7 @@
     {
       "id": "effects.host",
       "status": "partial",
-      "remaining": "OSC 9/777 notification bytes, ConEmu progress and explicit host query decisions are compared; Kitty notifications, complete capture limits and disabled PTY callback combinations remain."
+      "remaining": "OSC9/777 notification bytes, ConEmu classification/progress/fresh prompts, fixed captures and explicit host query decisions are compared; Kitty notifications and disabled callback combinations remain."
     },
     {
       "id": "snapshot.cross-decode",

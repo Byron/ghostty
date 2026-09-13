@@ -3,7 +3,7 @@
 This directory compares the Rust implementation with the current Ghostty Zig
 terminal in separate processes. Rustty's application and libraries never link
 the Zig oracle. Both adapters accept one JSON request per line and return one
-JSON response per line. Terminal input and outgoing bytes are hexadecimal;
+JSON response per line. Terminal input, outgoing bytes, title and PWD are hexadecimal;
 cell text is an array of Unicode scalar values. Adjacent PTY write callbacks
 are coalesced because callback batching is not part of the terminal protocol.
 Colors, styles, both screens, scrollback, cell widths and cursor state are
@@ -154,6 +154,18 @@ configuration changes, resets and the native fixed capture/request-count limits.
 The capture cases currently validate the completed command's effects and state;
 intermediate parser storage/continuation and allocation-failure behavior still
 need separate coverage.
+
+OSC string fixtures compare byte-preserving title/PWD state, typed callbacks,
+ConEmu/iTerm2 PWD aliases, command prefixes, control bytes and capture boundaries.
+The native stream validates a title's UTF-8 before truncating it to the first
+1024 bytes, which can leave a partial UTF-8 scalar in storage. PWD payloads remain
+opaque bytes. The reference's title/PWD parsers reserve a NUL byte in a
+2048-byte capture; completed commands longer than 2047 bytes are discarded.
+ConEmu cases distinguish recognized extensions, notifications and fresh prompts,
+including commands that can use all 2048 bytes without a NUL. The direct `title_set` and `pwd_set` operations
+call uncapped terminal setters and emit no callbacks. Raw values and pending
+captures are also exercised through both snapshot encodings and decoders.
+These cases compare snapshot continuation behavior, not peak parser allocation.
 
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes

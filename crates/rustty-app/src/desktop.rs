@@ -177,6 +177,7 @@ struct Host {
     search_index: usize,
     focus_text_input: bool,
     popup_open: bool,
+    messages_open: bool,
     palette: bool,
     palette_query: String,
     confirm: Option<Confirmation>,
@@ -189,6 +190,7 @@ impl Host {
         self.search.is_some()
             || self.palette
             || self.popup_open
+            || self.messages_open
             || self.confirm.is_some()
             || !self.clipboard_request.is_empty()
     }
@@ -812,6 +814,7 @@ impl App {
             search_index: 0,
             focus_text_input: false,
             popup_open: false,
+            messages_open: false,
             palette: false,
             palette_query: String::new(),
             confirm: None,
@@ -2169,6 +2172,7 @@ fn reveal(screen: &mut vt::Screen, point: vt::GridPoint) {
 
 impl App {
     fn draw(&mut self, event_loop: &ActiveEventLoop, host: &mut Host) -> Result<()> {
+        host.messages_open = !self.errors.is_empty();
         if !host.visible || host.occluded {
             return Ok(());
         }
@@ -2386,6 +2390,9 @@ impl App {
             // Cache this viewport's popup state for native events between frames.
             host.popup_open = egui::Popup::is_any_open(ctx);
             if host.ui_input() {
+                host.mouse_button = None;
+                host.selection_drag = None;
+                host.divider_drag = None;
                 host.composing = false;
                 host.preedit.clear();
                 host.preedit_selection = None;
@@ -2971,22 +2978,8 @@ impl App {
                         });
                     });
             }
-            if !self.errors.is_empty() {
-                egui::Window::new("Rustty messages")
-                    .default_size([600.0, 240.0])
-                    .show(ctx, |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(300.0)
-                            .show(ui, |ui| {
-                                for error in &self.errors {
-                                    ui.label(error);
-                                }
-                            });
-                        if ui.button("Dismiss").clicked() {
-                            self.errors.clear();
-                        }
-                    });
-            }
+            let _ = show_messages(ctx, &mut self.errors);
+            host.messages_open = !self.errors.is_empty();
         });
         if presentation_changed {
             self.changed();
@@ -3476,6 +3469,7 @@ impl ApplicationHandler<Event> for App {
         let Some(mut host) = self.windows.remove(&window) else {
             return;
         };
+        host.messages_open = !self.errors.is_empty();
         if let Some(smoke) = &mut self.smoke {
             let input = match &event {
                 WindowEvent::CursorMoved { position, .. } => {
@@ -4050,6 +4044,37 @@ fn directory_from_osc(value: &str) -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+fn show_messages(ctx: &egui::Context, errors: &mut Vec<String>) -> Option<egui::Response> {
+    if errors.is_empty() {
+        return None;
+    }
+    let mut open = true;
+    let dismiss = egui::Window::new("Rustty messages")
+        .open(&mut open)
+        .collapsible(false)
+        .default_size([600.0, 240.0])
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    for error in errors.iter() {
+                        ui.label(error);
+                    }
+                });
+            ui.button("Dismiss")
+        })
+        .and_then(|window| window.inner);
+    if !open
+        || dismiss.as_ref().is_some_and(egui::Response::clicked)
+        || ctx.input(|input| input.key_pressed(egui::Key::Escape))
+    {
+        errors.clear();
+        // The current frame still contains the window's shapes.
+        ctx.request_repaint();
+    }
+    dismiss
+}
+
 fn repaint_is_current(requested_pass: u64, current_pass: u64) -> bool {
     // Match egui's native runner: one completed pass still needs its requested
     // follow-up, but later passes have already superseded the request.
@@ -4117,6 +4142,80 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_close_by_click_or_escape_without_terminal_focus() {
+        fn frame(
+            context: &egui::Context,
+            errors: &mut Vec<String>,
+            events: Vec<egui::Event>,
+        ) -> Option<egui::Rect> {
+            let ui_input = !errors.is_empty();
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(800.0, 600.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            input::filter_egui_events(&mut raw, ui_input);
+            let mut dismiss = None;
+            let mut output = context.run_ui(raw, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    let terminal = ui.interact(
+                        ui.max_rect(),
+                        egui::Id::new("terminal"),
+                        Sense::click_and_drag(),
+                    );
+                    input::terminal_input(&terminal, None, ui_input);
+                });
+                dismiss = show_messages(context, errors).map(|button| button.rect);
+            });
+            output.textures_delta.clear();
+            dismiss
+        }
+
+        for click in [true, false] {
+            let context = egui::Context::default();
+            let mut errors = vec!["The text editor could not open settings".to_owned()];
+            frame(&context, &mut errors, vec![]);
+            let button = frame(&context, &mut errors, vec![]).unwrap();
+            if click {
+                let point = button.center();
+                for pressed in [true, false] {
+                    frame(
+                        &context,
+                        &mut errors,
+                        vec![
+                            egui::Event::PointerMoved(point),
+                            egui::Event::PointerButton {
+                                pos: point,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::default(),
+                            },
+                        ],
+                    );
+                }
+            } else {
+                frame(
+                    &context,
+                    &mut errors,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::default(),
+                    }],
+                );
+            }
+            assert!(errors.is_empty(), "dismiss by click={click}");
+            assert!(frame(&context, &mut errors, vec![]).is_none());
+        }
+    }
 
     #[test]
     fn appearance_selects_dual_themes_and_reload_preserves_cli_overrides() {

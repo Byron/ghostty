@@ -114,6 +114,7 @@ struct Host {
     sequence_len: usize,
     composing: bool,
     preedit: String,
+    preedit_selection: Option<(usize, usize)>,
     peek: Option<Peek>,
     navigation_warning: Option<(Id, Instant)>,
     mouse: Pos2,
@@ -603,6 +604,7 @@ impl App {
             sequence_len: 0,
             composing: false,
             preedit: String::new(),
+            preedit_selection: None,
             peek: None,
             navigation_warning: None,
             mouse: Pos2::ZERO,
@@ -1769,12 +1771,20 @@ impl App {
                                     .try_into()
                                     .unwrap_or([[0; 3]; 256]),
                                 focused: is_focused,
-                                cursor_visible: !host.composing,
+                                cursor_visible: id != focused || !host.composing,
                                 blink_visible: blink_on || !is_focused,
                                 background_opacity: config.background_opacity,
+                                preedit: (is_focused && !host.preedit.is_empty()).then(|| {
+                                    rustty_render::Preedit {
+                                        text: host.preedit.clone(),
+                                        selection: host.preedit_selection,
+                                    }
+                                }),
                             };
+                            let mut ime_cursor = None;
                             match host.fonts.prepare(&snapshot.screen, &options) {
                                 Ok(frame) => {
+                                    ime_cursor = frame.ime_cursor;
                                     if composed
                                         .append_clipped(
                                             &frame,
@@ -1826,22 +1836,18 @@ impl App {
                             accessible.push((id, rect, text));
                             if id == focused {
                                 let cursor = &snapshot.screen.cursor;
-                                let pos = Pos2::new(
-                                    rect.left()
-                                        + (padding[0]
-                                            + cursor.col as f32 * metrics.cell_width as f32)
-                                            / scale,
-                                    rect.top()
-                                        + (padding[1]
-                                            + cursor.row as f32 * metrics.cell_height as f32)
-                                            / scale,
-                                );
+                                let [x, y, width, height] = ime_cursor.unwrap_or([
+                                    padding[0] + cursor.col as f32 * metrics.cell_width as f32,
+                                    padding[1] + cursor.row as f32 * metrics.cell_height as f32,
+                                    metrics.cell_width as f32,
+                                    metrics.cell_height as f32,
+                                ]);
                                 host.window.set_ime_cursor_area(
-                                    LogicalPosition::new(pos.x, pos.y),
-                                    LogicalSize::new(
-                                        metrics.cell_width as f32 / scale,
-                                        metrics.cell_height as f32 / scale,
+                                    LogicalPosition::new(
+                                        rect.left() + x / scale,
+                                        rect.top() + y / scale,
                                     ),
+                                    LogicalSize::new(width / scale, height / scale),
                                 );
                             }
                         }
@@ -1956,15 +1962,6 @@ impl App {
                                 );
                                 ui.painter().galley(label_pos, galley, Color32::WHITE);
                             }
-                        }
-                        if id == focused && !host.preedit.is_empty() {
-                            ui.painter().text(
-                                rect.left_bottom() - Vec2::new(-8.0, 8.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                &host.preedit,
-                                egui::FontId::monospace(config.font_size),
-                                rgb(config.foreground),
-                            );
                         }
                     }
                     if let Some(peek) = host.peek {
@@ -2525,6 +2522,7 @@ impl ApplicationHandler<Event> for App {
                     host.divider_drag = None;
                     host.composing = false;
                     host.preedit.clear();
+                    host.preedit_selection = None;
                     host.sequence.clear();
                     host.sequence_len = 0;
                     if let Some(pane) = self.focused(host.id).and_then(|id| self.panes.get_mut(&id))
@@ -2611,13 +2609,15 @@ impl ApplicationHandler<Event> for App {
             } => self.keyboard(event_loop, &mut host, &event),
             WindowEvent::Ime(ime) if !host.ui_input() => {
                 match ime {
-                    Ime::Preedit(text, _) => {
+                    Ime::Preedit(text, selection) => {
                         host.composing = !text.is_empty();
                         host.preedit = text;
+                        host.preedit_selection = selection;
                     }
                     Ime::Commit(text) => {
                         host.composing = false;
                         host.preedit.clear();
+                        host.preedit_selection = None;
                         if let Some(pane) = self.focused(host.id) {
                             self.write(pane, text.into_bytes());
                         }
@@ -2625,6 +2625,7 @@ impl ApplicationHandler<Event> for App {
                     Ime::Disabled => {
                         host.composing = false;
                         host.preedit.clear();
+                        host.preedit_selection = None;
                     }
                     Ime::Enabled => {}
                 }

@@ -104,7 +104,7 @@
     {
       "id": "terminal.tracked",
       "status": "partial",
-      "remaining": "Live coordinates/codepoints are compared through reflow, erasure, resets, handle reuse and screen switches. Owner isolation, reset lifetime and inactive release pass; line shifts, rebinding, exact pruning and snapshot restoration remain."
+      "remaining": "Live coordinates/codepoints are compared through reflow, erasure, resets, handle reuse and screen switches. Owner isolation, reset lifetime, inactive release, line shifts and alternate/history pin motion pass; rebinding, exact pruning and snapshot restoration remain."
     },
     {
       "id": "graphics.kitty",

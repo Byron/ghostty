@@ -1134,19 +1134,64 @@ impl Terminal {
         let cols = self.cols as usize;
         let bg = self.screen().cursor.style.background;
         let full = m.left == 0 && m.right == cols - 1;
-        if !history || m.top != 0 || !full {
+        let alternate = self.alternate_active;
+        let shift_history =
+            history && m.top == 0 && full && (!alternate || m.bottom + 1 == usize::from(self.rows));
+        if !shift_history {
             self.prepare_row_shift();
         }
         for _ in 0..count {
             if full {
-                let row = self.screen_mut().rows.remove(m.top);
-                if history && m.top == 0 {
-                    self.screen_mut().push_history(row);
+                let screen = self.screen_mut();
+                let blank = screen.blank_row(cols, bg);
+                let pins = if !shift_history {
+                    // IL/DL-style movement copies contents between physical
+                    // rows without moving their tracked coordinates.
+                    (m.top..=m.bottom)
+                        .map(|y| {
+                            (
+                                screen.rows[y].id,
+                                if y == m.bottom {
+                                    blank.id
+                                } else {
+                                    screen.rows[y + 1].id
+                                },
+                            )
+                        })
+                        .collect()
+                } else if alternate {
+                    // The no-scrollback fast path clamps pins scrolled off
+                    // the top to the first surviving row.
+                    [(
+                        screen.rows[0].id,
+                        screen.rows.get(1).map_or(blank.id, |row| row.id),
+                    )]
+                    .into_iter()
+                    .collect()
                 } else {
-                    self.screen_mut().discard_row(row.id);
+                    // Native history insertion shifts the whole page list.
+                    // Restoring content below the margin leaves pins in place.
+                    (m.bottom + 1..screen.rows.len())
+                        .map(|y| {
+                            (
+                                screen.rows[y].id,
+                                if y == m.bottom + 1 {
+                                    blank.id
+                                } else {
+                                    screen.rows[y - 1].id
+                                },
+                            )
+                        })
+                        .collect()
+                };
+                screen.remap_grid_rows(&pins);
+                let row = screen.rows.remove(m.top);
+                if shift_history {
+                    screen.push_history(row);
+                } else {
+                    screen.discard_row(row.id);
                 }
-                let blank = self.screen_mut().blank_row(cols, bg);
-                self.screen_mut().rows.insert(m.bottom, blank);
+                screen.rows.insert(m.bottom, blank);
             } else {
                 for y in m.top..m.bottom {
                     self.copy_row_region(y + 1, y, m.left, m.right + 1, bg);
@@ -1166,10 +1211,24 @@ impl Terminal {
         self.prepare_row_shift();
         for _ in 0..count {
             if m.left == 0 && m.right == cols - 1 {
-                let row = self.screen_mut().rows.remove(m.bottom);
-                self.screen_mut().discard_row(row.id);
-                let blank = self.screen_mut().blank_row(cols, bg);
-                self.screen_mut().rows.insert(m.top, blank);
+                let screen = self.screen_mut();
+                let blank = screen.blank_row(cols, bg);
+                let pins = (m.top..=m.bottom)
+                    .map(|y| {
+                        (
+                            screen.rows[y].id,
+                            if y == m.top {
+                                blank.id
+                            } else {
+                                screen.rows[y - 1].id
+                            },
+                        )
+                    })
+                    .collect();
+                screen.remap_grid_rows(&pins);
+                let row = screen.rows.remove(m.bottom);
+                screen.discard_row(row.id);
+                screen.rows.insert(m.top, blank);
             } else {
                 for y in (m.top + 1..=m.bottom).rev() {
                     self.copy_row_region(y - 1, y, m.left, m.right + 1, bg);

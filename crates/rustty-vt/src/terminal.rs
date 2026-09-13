@@ -1,3 +1,4 @@
+use crate::clipboard;
 use crate::modes::Modes;
 use crate::screen::*;
 use crate::unicode::{self, properties};
@@ -11,23 +12,26 @@ pub enum Effect {
     Title(String),
     WorkingDirectory(String),
     Bell,
-    Clipboard {
-        selection: String,
-        data: Option<Vec<u8>>,
-    },
-    Notification {
-        title: Vec<u8>,
-        body: Vec<u8>,
-    },
+    ClipboardRead(clipboard::Read),
+    ClipboardWrite(clipboard::Write),
+    Notification { title: Vec<u8>, body: Vec<u8> },
     CommandStart,
-    CommandEnd {
-        exit_code: Option<i32>,
-    },
-    Progress {
-        state: u8,
-        value: Option<u8>,
-    },
+    CommandEnd { exit_code: Option<i32> },
+    Progress { state: u8, value: Option<u8> },
     UnknownSequence(String),
+}
+
+/// Synchronous host callbacks used by `Terminal::feed_with_handler`.
+/// Clipboard callbacks are separate from `effect`; they are never reported
+/// twice. OSC 52 writes need no acknowledgement; unanswered reads return empty.
+pub trait EffectHandler {
+    fn effect(&mut self, effect: Effect);
+
+    fn clipboard_read(&mut self, _request: &clipboard::Read) -> Vec<clipboard::Content> {
+        Vec::new()
+    }
+
+    fn clipboard_write(&mut self, _request: &clipboard::Write) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +173,29 @@ impl Terminal {
         // hyperlinks), so reconcile the byte budget after the complete update.
         self.primary.enforce_limits();
         effects
+    }
+
+    /// Feed bytes while servicing clipboard requests before the next parser
+    /// event. The generated read reply is delivered through `handler.effect`.
+    /// Hosts that need deferred consent can use `feed` and `Read::reply` instead.
+    pub fn feed_with_handler(&mut self, bytes: &[u8], handler: &mut impl EffectHandler) {
+        let mut effects = Vec::new();
+        let mut parser = std::mem::take(&mut self.parser);
+        parser.advance(bytes, |event| {
+            self.handle(event, &mut effects);
+            for effect in effects.drain(..) {
+                match effect {
+                    Effect::ClipboardRead(request) => {
+                        let contents = handler.clipboard_read(&request);
+                        handler.effect(Effect::Write(request.reply(&contents)));
+                    }
+                    Effect::ClipboardWrite(request) => handler.clipboard_write(&request),
+                    effect => handler.effect(effect),
+                }
+            }
+        });
+        self.parser = parser;
+        self.primary.enforce_limits();
     }
 
     fn ensure_row_cells(&mut self, row: usize, end: usize) {
@@ -1465,26 +1492,43 @@ impl Terminal {
                 }
             }
             52 => {
-                if let Some((selection, encoded)) = text.split_once(';') {
-                    let selection = selection.to_owned();
-                    if encoded == "?" {
-                        effects.push(Effect::Clipboard {
-                            selection,
-                            data: None,
-                        });
+                if let Some(split @ 0..=1) = data.iter().position(|&b| b == b';') {
+                    let location =
+                        clipboard::Location::from_selector(if split == 0 { b'c' } else { data[0] });
+                    let encoded = &data[split + 1..];
+                    if encoded == b"?" {
+                        effects.push(Effect::ClipboardRead(clipboard::Read {
+                            location,
+                            terminator: if bell {
+                                clipboard::Terminator::Bell
+                            } else {
+                                clipboard::Terminator::St
+                            },
+                        }));
                     } else {
                         let engine = base64::engine::general_purpose::GeneralPurpose::new(
                             &base64::alphabet::STANDARD,
                             base64::engine::general_purpose::GeneralPurposeConfig::new()
-                                .with_decode_padding_mode(
-                                    base64::engine::DecodePaddingMode::Indifferent,
-                                ),
+                                .with_decode_allow_trailing_bits(true)
+                                .with_decode_padding_mode(if encoded.ends_with(b"=") {
+                                    base64::engine::DecodePaddingMode::RequireCanonical
+                                } else {
+                                    base64::engine::DecodePaddingMode::RequireNone
+                                }),
                         );
                         if let Ok(data) = engine.decode(encoded) {
-                            effects.push(Effect::Clipboard {
-                                selection,
-                                data: Some(data),
-                            });
+                            let contents = if encoded.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![clipboard::Content {
+                                    mime: b"text/plain".to_vec(),
+                                    data,
+                                }]
+                            };
+                            effects.push(Effect::ClipboardWrite(clipboard::Write {
+                                location,
+                                contents,
+                            }));
                         }
                     }
                 }

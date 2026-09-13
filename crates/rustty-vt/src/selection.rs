@@ -8,6 +8,103 @@ pub const DEFAULT_WORD_BOUNDARIES: &[char] = &[
 ];
 pub const DEFAULT_LINE_WHITESPACE: &[char] = &['\0', ' ', '\t'];
 
+/// Physical-grid motions for a selection's logical end, including scrollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Adjustment {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    BeginningOfLine,
+    EndOfLine,
+}
+
+impl Selection {
+    /// Move the logical end without changing the anchor or rectangular mode.
+    /// Horizontal motions skip unwritten cells; down skips unwritten rows.
+    /// Other motions may land on blank cells or wide-character spacers.
+    /// An endpoint outside this screen is left unchanged.
+    pub fn adjust(&mut self, screen: &Screen, adjustment: Adjustment) {
+        let grid = Grid(screen);
+        let Some(original) = grid.position(self.end) else {
+            return;
+        };
+        let last_written = || {
+            (0..grid.len())
+                .rev()
+                .find(|&y| {
+                    grid.row(y)
+                        .cells
+                        .iter()
+                        .any(|cell| codepoint(cell).is_some())
+                })
+                .map(|y| (y, grid.row(y).cells.len() - 1))
+                .unwrap_or(original)
+        };
+        let at_row = |y| (y, original.1.min(grid.row(y).cells.len() - 1));
+        let end = match adjustment {
+            Adjustment::Left | Adjustment::Right => {
+                let mut current = original;
+                let mut found = original;
+                while let Some(next) = if adjustment == Adjustment::Left {
+                    grid.previous(current)
+                } else {
+                    grid.next(current)
+                } {
+                    if codepoint(grid.cell(next)).is_some() {
+                        found = next;
+                        break;
+                    }
+                    current = next;
+                }
+                found
+            }
+            Adjustment::Up => original.0.checked_sub(1).map(at_row).unwrap_or((0, 0)),
+            Adjustment::Down => {
+                let mut column = original.1;
+                let mut found = (original.0, grid.row(original.0).cells.len() - 1);
+                for y in original.0 + 1..grid.len() {
+                    column = column.min(grid.row(y).cells.len() - 1);
+                    if grid
+                        .row(y)
+                        .cells
+                        .iter()
+                        .any(|cell| codepoint(cell).is_some())
+                    {
+                        found = (y, column);
+                        break;
+                    }
+                }
+                found
+            }
+            Adjustment::Home => (0, 0),
+            Adjustment::End => last_written(),
+            Adjustment::PageUp => original
+                .0
+                .checked_sub(screen.rows.len())
+                .map(at_row)
+                .unwrap_or((0, 0)),
+            Adjustment::PageDown => original
+                .0
+                .checked_add(screen.rows.len())
+                .filter(|&y| y < grid.len())
+                .map(at_row)
+                .unwrap_or_else(last_written),
+            Adjustment::BeginningOfLine => (original.0, 0),
+            Adjustment::EndOfLine => (original.0, grid.row(original.0).cells.len() - 1),
+        };
+        self.end = GridPoint {
+            row: grid.row(end.0).id,
+            col: end.1,
+        };
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SelectLine<'a> {
     /// `None` includes unwritten cells. An empty set trims only unwritten cells.

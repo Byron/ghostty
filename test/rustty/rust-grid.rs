@@ -1,5 +1,7 @@
 //! Direct selection/search/tracked-reference APIs, independent of snapshots.
-use rustty_vt::selection::{DEFAULT_LINE_WHITESPACE, DEFAULT_WORD_BOUNDARIES, SelectLine};
+use rustty_vt::selection::{
+    Adjustment, DEFAULT_LINE_WHITESPACE, DEFAULT_WORD_BOUNDARIES, SelectLine,
+};
 use rustty_vt::{GridPoint, Screen, ScrollbackLimits, Selection, Terminal, TrackedPoint};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -39,6 +41,7 @@ pub struct Operation {
     whitespace: Option<Vec<u32>>,
     trim_line: Option<bool>,
     semantic_prompt_boundary: Option<bool>,
+    adjustment: Option<Adjustment>,
 }
 
 struct Handle {
@@ -81,6 +84,16 @@ impl Context {
                 }
             }
             "clear_selection" => terminal.screen_mut().selection = None,
+            "adjust_selection" => {
+                let adjustment = op.adjustment.ok_or("InvalidAdjustment")?;
+                let screen = terminal.screen_mut();
+                if let Some(mut selection) = screen.selection {
+                    selection.adjust(screen, adjustment);
+                    screen.selection = Some(selection);
+                } else {
+                    status = "no_value";
+                }
+            }
             "select_word"
             | "select_word_between"
             | "select_line"

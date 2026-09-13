@@ -29,6 +29,7 @@ pub const Operation = struct {
     whitespace: ?[]const u32 = null,
     trim_line: ?bool = null,
     semantic_prompt_boundary: ?bool = null,
+    adjustment: ?vt.Selection.Adjustment = null,
 };
 const Location = struct {
     screen: ?[2]u32,
@@ -101,6 +102,11 @@ pub const Context = struct {
             } else status = "invalid";
         } else if (std.mem.eql(u8, op.action, "clear_selection")) {
             screen.clearSelection();
+        } else if (std.mem.eql(u8, op.action, "adjust_selection")) {
+            const adjustment = op.adjustment orelse return error.InvalidAdjustment;
+            if (screen.selection) |*selection| {
+                selection.adjust(screen, adjustment);
+            } else status = "no_value";
         } else if (std.mem.eql(u8, op.action, "select_word") or
             std.mem.eql(u8, op.action, "select_word_between") or
             std.mem.eql(u8, op.action, "select_line") or

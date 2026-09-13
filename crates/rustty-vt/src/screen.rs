@@ -2,14 +2,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
-use crate::page_layout::PageCapacity;
+use crate::page_list::{PageAllocationInfo, PageList};
 
 /// Independent logical storage budgets. `None` means unlimited.
 ///
-/// Bytes include active and history row storage, including cell, text, and
-/// hyperlink allocations. Active rows are always retained. Graphics use their
-/// own budget. Limits have Ghostty's minimum page-size floor; only an explicit
-/// zero byte limit disables history. Pruning currently removes individual rows.
+/// Bytes charge native page allocations, including active pages. Active rows
+/// are always retained; pruning removes complete historical pages. Graphics
+/// have their own budget. Limits have Ghostty's minimum page-size floor; an
+/// explicit zero byte limit disables ordinary scrolling into history.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrollbackLimits {
     pub bytes: Option<usize>,
@@ -458,6 +458,7 @@ pub struct Screen {
     pub(crate) iso_protection: bool,
     pub(crate) limits: ScrollbackLimits,
     pub(crate) history_bytes: usize,
+    pub(crate) pages: PageList,
     pub(crate) next_row: u64,
     #[serde(skip)]
     tracked: TrackedPoints,
@@ -505,6 +506,7 @@ impl Screen {
             iso_protection: false,
             limits,
             history_bytes: 0,
+            pages: PageList::new(cols as u16, rows),
             next_row: rows as u64,
             tracked: TrackedPoints::default(),
         }
@@ -512,6 +514,11 @@ impl Screen {
 
     pub fn all_rows(&self) -> impl DoubleEndedIterator<Item = &Row> {
         self.history.iter().chain(self.rows.iter())
+    }
+
+    /// Native allocation capacities and physical boundaries of the live pages.
+    pub fn page_allocations(&self) -> impl Iterator<Item = PageAllocationInfo> + '_ {
+        self.pages.allocations()
     }
 
     pub fn viewport(&self) -> impl Iterator<Item = &Row> {
@@ -540,6 +547,10 @@ impl Screen {
             iso_protection: self.iso_protection,
             limits: ScrollbackLimits::NONE,
             history_bytes: 0,
+            pages: self.pages.clone_range(
+                self.history.len().saturating_sub(self.viewport_offset),
+                self.rows.len(),
+            ),
             next_row: self.next_row,
             tracked: TrackedPoints::default(),
         }
@@ -665,6 +676,25 @@ impl Screen {
         Row::new(id, cols, background)
     }
 
+    pub(crate) fn extend_physical_row(&mut self, row: usize, columns: usize) {
+        let absolute = self.history.len() + row;
+        let columns = columns.max(usize::from(self.pages.page_at(absolute).0.columns));
+        let range = self.pages.extend_page(absolute, columns as u16);
+        for row in self
+            .history
+            .iter_mut()
+            .chain(&mut self.rows)
+            .skip(range.start)
+            .take(range.len())
+        {
+            row.cells.resize(columns, Cell::default());
+            row.repair_wide(Color::Default);
+        }
+        if range.start < self.history.len() {
+            self.history_bytes = self.history.iter().map(Row::storage_bytes).sum();
+        }
+    }
+
     pub(crate) fn split_cell_boundary(&mut self, col: usize) {
         let y = self.cursor.row;
         let cols = self.rows[y].cells.len();
@@ -745,7 +775,10 @@ impl Screen {
         if self.viewport_offset > 0 {
             self.viewport_offset += 1;
         }
-        self.enforce_limits();
+        let removed = self
+            .pages
+            .grow(self.columns as u16, self.rows.len(), self.limits);
+        self.discard_history_prefix(removed);
     }
 
     /// Charged bytes in history rows; container spare capacity and graphics are
@@ -754,10 +787,9 @@ impl Screen {
         self.history_bytes
     }
 
+    /// Logical native page allocation charge, including active and history pages.
     pub fn storage_bytes(&self) -> usize {
-        self.rows.iter().fold(self.history_bytes, |bytes, row| {
-            bytes.saturating_add(row.storage_bytes())
-        })
+        self.pages.allocation_bytes()
     }
 
     pub(crate) fn set_limits(&mut self, limits: ScrollbackLimits) {
@@ -771,44 +803,25 @@ impl Screen {
     }
 
     pub(crate) fn clear_history(&mut self) {
-        while let Some(row) = self.history.pop_front() {
-            self.discard_row(row.id);
-        }
-        self.history_bytes = 0;
+        self.pages.remove_prefix(self.history.len());
+        self.discard_history_prefix(self.history.len());
         self.viewport_offset = 0;
     }
 
     pub(crate) fn effective_limits(&self) -> ScrollbackLimits {
-        let capacity = PageCapacity::initial(self.columns as u16)
-            .expect("validated screen width has a native page capacity");
-        let minimum_lines = usize::from(capacity.rows);
-        let minimum_bytes = PageCapacity::STANDARD
-            .layout()
-            .expect("standard page layout is valid")
-            .allocation_bytes(false)
-            * (self.rows.len().max(1).div_ceil(minimum_lines) + 1);
-        ScrollbackLimits {
-            bytes: self.limits.bytes.map(|bytes| bytes.max(minimum_bytes)),
-            lines: self.limits.lines.map(|lines| lines.max(minimum_lines)),
-        }
+        PageList::effective_limits(self.columns as u16, self.rows.len(), self.limits)
     }
 
     pub(crate) fn enforce_limits(&mut self) {
         if self.history.is_empty() {
             return;
         }
-        let limits = self.effective_limits();
-        // ponytail: row storage is still charged here; page lifecycle and
-        // retained resource accounting are required for exact pruning parity.
-        let byte_budget = limits.bytes.map(|bytes| {
-            let active = self.rows.iter().fold(0usize, |bytes, row| {
-                bytes.saturating_add(row.storage_bytes())
-            });
-            bytes.saturating_sub(active)
-        });
-        while limits.lines.is_some_and(|max| self.history.len() > max)
-            || byte_budget.is_some_and(|max| self.history_bytes > max)
-        {
+        let removed = self.pages.prune(self.rows.len(), self.effective_limits());
+        self.discard_history_prefix(removed);
+    }
+
+    fn discard_history_prefix(&mut self, count: usize) {
+        for _ in 0..count {
             let row = self.history.pop_front().unwrap();
             self.history_bytes = self.history_bytes.saturating_sub(row.storage_bytes());
             self.discard_row(row.id);
@@ -898,7 +911,7 @@ impl Screen {
             .unwrap();
         // Narrowing uses the new height while wrapping; widening unwraps
         // first, before changing the height. This preserves the active boundary.
-        let height_first = !reflow || cols <= old_cols;
+        let height_first = reflow && cols <= old_cols;
         if height_first {
             self.resize_height(
                 &mut contents,
@@ -911,6 +924,13 @@ impl Screen {
         }
         let mut mapped_cursor = old_cursor;
         if columns_changed && reflow {
+            let source_pages = std::mem::take(&mut self.pages);
+            let first_capacity = source_pages
+                .pages
+                .front()
+                .unwrap()
+                .adjusted_capacity(cols as u16, false);
+            self.pages.append(first_capacity, 1);
             let height = if height_first { rows } else { old_rows };
             let active_start = contents.len().saturating_sub(height);
             let old_wrapped = contents
@@ -923,7 +943,9 @@ impl Screen {
             let mut line = self.blank_row(cols, Color::Default);
             let mut x: usize = 0;
             let mut pin_x: usize = 0;
-            for old in &contents {
+            for (old_index, old) in contents.iter().enumerate() {
+                let source_page = source_pages.page_at(old_index).0;
+                let capacity = source_page.adjusted_capacity(cols as u16, true);
                 let mut used = if old.wrapped {
                     old.cells.len()
                 } else {
@@ -954,6 +976,11 @@ impl Screen {
                 }
                 if old.semantic != SemanticContent::Output {
                     used = used.max(1);
+                }
+                if used > 0 {
+                    while self.pages.total_rows() <= output.len() {
+                        self.pages.reflow_row(capacity);
+                    }
                 }
                 line.semantic = old.semantic;
                 let mut wide_tail = None;
@@ -994,6 +1021,9 @@ impl Screen {
                         line.semantic = old.semantic;
                         line.wrap_continuation = true;
                         x = 0;
+                        while self.pages.total_rows() <= output.len() {
+                            self.pages.reflow_row(capacity);
+                        }
                     }
                     map.insert(
                         (old.id, old_col),
@@ -1072,8 +1102,11 @@ impl Screen {
             {
                 output.pop();
             }
+            if self.pages.total_rows() > output.len() {
+                self.pages.truncate(output.len());
+            }
             while output.len() < height {
-                output.push(self.blank_row(cols, Color::Default));
+                self.grow_contents(&mut output, cols, height);
             }
             let start = output.len() - height;
             if let Some(cursor_index) = output
@@ -1091,12 +1124,27 @@ impl Screen {
                     .saturating_sub(wrapped.saturating_sub(old_wrapped))
                     .saturating_sub(current);
                 for _ in 0..grow {
-                    output.push(self.blank_row(cols, Color::Default));
+                    self.grow_contents(&mut output, cols, height);
                 }
             }
             contents = output;
             self.graphics.reflow(&map);
         } else if columns_changed {
+            let mut start = 0;
+            let spacer_heads: Vec<_> = self
+                .pages
+                .pages
+                .iter()
+                .map(|page| {
+                    let end = start + usize::from(page.rows);
+                    let has_head = contents[start..end]
+                        .iter()
+                        .any(|row| row.cells.last().is_some_and(|cell| cell.spacer_head));
+                    start = end;
+                    has_head
+                })
+                .collect();
+            self.pages.resize_columns(cols as u16, &spacer_heads);
             for row in &mut contents {
                 row.cells.resize(cols, Cell::default());
                 row.repair_wide(Color::Default);
@@ -1117,7 +1165,7 @@ impl Screen {
             );
         }
         while contents.len() < rows {
-            contents.push(self.blank_row(cols, Color::Default));
+            self.grow_contents(&mut contents, cols, rows);
         }
         let start = contents.len() - rows;
         let cursor_index = contents.iter().position(|r| r.id == mapped_cursor.row);
@@ -1153,8 +1201,19 @@ impl Screen {
             .cursor
             .col
             .min(self.rows[self.cursor.row].cells.len() - 1);
-        for row in contents {
-            self.push_history(row);
+        self.history_bytes = contents.iter().map(Row::storage_bytes).sum();
+        self.history = contents.into();
+        if self.limits.bytes == Some(0) {
+            self.clear_history();
+        } else {
+            let removed = self.pages.prune(
+                rows,
+                ScrollbackLimits {
+                    bytes: None,
+                    ..self.effective_limits()
+                },
+            );
+            self.discard_history_prefix(removed);
         }
         self.viewport_offset = self.viewport_offset.min(self.history.len());
         // Native resize reattaches the cursor hyperlink to its new page,
@@ -1192,13 +1251,25 @@ impl Screen {
             contents.pop();
             trim -= 1;
         }
+        if self.pages.total_rows() > contents.len() {
+            self.pages.truncate(contents.len());
+        }
         if rows > old_rows && self.cursor.row < old_rows - 1 {
             for _ in 0..rows - old_rows {
-                contents.push(self.blank_row(cols, Color::Default));
+                self.grow_contents(contents, cols, rows);
             }
         }
         while contents.len() < rows {
-            contents.push(self.blank_row(cols, Color::Default));
+            self.grow_contents(contents, cols, rows);
+        }
+    }
+
+    fn grow_contents(&mut self, contents: &mut Vec<Row>, columns: usize, active_rows: usize) {
+        let removed = self.pages.grow(columns as u16, active_rows, self.limits);
+        let width = usize::from(self.pages.pages.back().unwrap().columns);
+        contents.push(self.blank_row(width, Color::Default));
+        for row in contents.drain(..removed) {
+            self.discard_row(row.id);
         }
     }
 }

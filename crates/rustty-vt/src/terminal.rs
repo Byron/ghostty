@@ -298,9 +298,6 @@ impl Terminal {
             }
         });
         self.parser = parser;
-        // Active rows can grow allocations without scrolling (graphemes and
-        // hyperlinks), so reconcile the byte budget after the complete update.
-        self.primary.enforce_limits();
         effects
     }
 
@@ -355,7 +352,6 @@ impl Terminal {
             }
         });
         self.parser = parser;
-        self.primary.enforce_limits();
     }
 
     /// Complete a deferred clipboard request, including an optional grant.
@@ -380,11 +376,11 @@ impl Terminal {
 
     fn ensure_row_cells(&mut self, row: usize, end: usize) {
         let columns = usize::from(self.cols);
-        let cells = &mut self.screen_mut().rows[row].cells;
-        if cells.len() < end.min(columns) {
+        if self.screen().rows[row].cells.len() < end.min(columns) {
             // A partial reflow can leave a physical row narrower than the
-            // logical screen. Keep it intact until an edit reaches past it.
-            cells.resize(columns, Cell::default());
+            // logical screen. Extend its actual page when an edit reaches
+            // past it, so subsequent snapshots keep valid PAGE dimensions.
+            self.screen_mut().extend_physical_row(row, columns);
         }
     }
 

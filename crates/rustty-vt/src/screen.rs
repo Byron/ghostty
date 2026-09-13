@@ -995,6 +995,13 @@ impl Screen {
             self.push_history(row);
         }
         self.viewport_offset = self.viewport_offset.min(self.history.len());
+        // Native resize reattaches the cursor hyperlink to its new page,
+        // assigning a new implicit identity while printed links keep theirs.
+        if matches!(self.cursor.hyperlink_id, Some(HyperlinkId::Implicit(_))) {
+            let id = self.metadata.hyperlink_implicit_id;
+            self.cursor.hyperlink_id = Some(HyperlinkId::Implicit(id));
+            self.metadata.hyperlink_implicit_id = id.wrapping_add(1);
+        }
     }
 
     fn resize_height(

@@ -193,3 +193,64 @@ fn repeated_1049_exit_still_restores_the_saved_cursor() {
         Some(HyperlinkId::Explicit(b"current".to_vec()))
     );
 }
+
+#[test]
+fn resizing_renews_implicit_cursor_links_without_changing_printed_links() {
+    for alternate in [false, true] {
+        let mut terminal = Terminal::new(10, 3, 0);
+        if alternate {
+            terminal.feed(b"\x1b[?1049h");
+        }
+        terminal.feed(&link(b"", b"current/\xff"));
+        terminal.feed(b"A");
+        terminal.resize(20, 3);
+        assert_eq!(
+            terminal.screen().cursor.hyperlink_id,
+            Some(HyperlinkId::Implicit(1))
+        );
+        assert_eq!(
+            terminal.screen().rows[0].cells[0].hyperlink_id,
+            Some(HyperlinkId::Implicit(0))
+        );
+        terminal.feed(b"B");
+        assert_eq!(
+            terminal.screen().rows[0].cells[1].hyperlink_id,
+            Some(HyperlinkId::Implicit(1))
+        );
+        let snapshot = rustty_vt::snapshot::encode_to_vec(&terminal).unwrap();
+        let mut terminal =
+            rustty_vt::snapshot::decode(snapshot.as_slice(), Default::default()).unwrap();
+        terminal.resize(20, 4);
+        terminal.resize(20, 4);
+        assert_eq!(
+            terminal.screen().cursor.hyperlink_id,
+            Some(HyperlinkId::Implicit(2))
+        );
+        assert_eq!(
+            terminal.screen().cursor.hyperlink_raw.as_deref(),
+            Some(b"current/\xff".as_slice())
+        );
+        terminal.feed(&link(b"", b"next"));
+        assert_eq!(
+            terminal.screen().cursor.hyperlink_id,
+            Some(HyperlinkId::Implicit(3))
+        );
+    }
+}
+
+#[test]
+fn resizing_keeps_explicit_links_and_the_next_implicit_id() {
+    let mut terminal = Terminal::new(10, 3, 0);
+    terminal.feed(&link(b"id=stable", b"current"));
+    terminal.resize(20, 3);
+    terminal.resize(20, 4);
+    assert_eq!(
+        terminal.screen().cursor.hyperlink_id,
+        Some(HyperlinkId::Explicit(b"stable".to_vec()))
+    );
+    terminal.feed(&link(b"", b"next"));
+    assert_eq!(
+        terminal.screen().cursor.hyperlink_id,
+        Some(HyperlinkId::Implicit(0))
+    );
+}

@@ -1656,7 +1656,15 @@ impl Terminal {
                 3 => self.tabstops.fill(false),
                 _ => {}
             },
-            ([], b'W') if n == 5 => {
+            ([], b'W') => match n {
+                0 | 2 => {
+                    let col = self.screen().cursor.col;
+                    self.tabstops[col] = n == 0;
+                }
+                5 => self.tabstops.fill(false),
+                _ => {}
+            },
+            ([b'?'], b'W') if p == [5] => {
                 for (col, set) in self.tabstops.iter_mut().enumerate() {
                     *set = col > 0 && col % 8 == 0;
                 }

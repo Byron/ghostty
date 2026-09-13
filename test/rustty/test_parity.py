@@ -1,4 +1,5 @@
 """Checks that the differential runner cannot hide missing coverage or state."""
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -58,6 +59,13 @@ class HarnessTests(unittest.TestCase):
     def test_generated_cases_are_reproducible(self):
         self.assertEqual(list(parity.generated_requests(42, 3)), list(parity.generated_requests(42, 3)))
         self.assertNotEqual(list(parity.generated_requests(41, 3)), list(parity.generated_requests(42, 3)))
+
+    def test_large_delivery_keeps_bytes_and_bounded_transport_overhead(self):
+        data = bytes(range(256)) * 512
+        request = {"id": "large", "operations": [{"op": "write", "data": data.hex()}]}
+        for variant in parity.variants(request):
+            self.assertEqual(data, b"".join(bytes.fromhex(op["data"]) for op in variant["operations"]))
+            self.assertLess(len(json.dumps(variant)), len(data) * 2 + 65536)
 
     def test_parser_corpus_keeps_its_first_byte(self):
         data = b"\x1b[31m"

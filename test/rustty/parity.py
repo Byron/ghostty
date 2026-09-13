@@ -33,6 +33,7 @@ import dnd_requests
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 ARTIFACTS = ROOT / "target/parity"
+MAX_REQUEST = 32 * 1024 * 1024
 MAX_RESPONSE = 128 * 1024 * 1024
 
 
@@ -57,7 +58,10 @@ class Peer:
             self.queue.put(error)
 
     def request(self, request):
-        self.process.stdin.write(json.dumps(request, separators=(",", ":")).encode() + b"\n")
+        data = json.dumps(request, separators=(",", ":")).encode()
+        if len(data) > MAX_REQUEST:
+            raise RuntimeError(f"{self.name}: request exceeded {MAX_REQUEST} bytes")
+        self.process.stdin.write(data + b"\n")
         self.process.stdin.flush()
         try:
             response = self.queue.get(timeout=self.timeout)
@@ -126,8 +130,11 @@ def variants(request, exhaustive=False):
                 data = bytes.fromhex(operation["data"])
                 pos = 0
                 index = 0
+                # Large capture-limit cases must fit the bounded JSON transport.
+                # Scalar delivery still exercises every individual input byte.
+                sizes = [2, 4096, 1, 16384, 7] if len(data) > 4096 else chunks
                 while pos < len(data):
-                    size = chunks[index % len(chunks)]
+                    size = sizes[index % len(sizes)]
                     operations.append({"op": "write", "data": data[pos:pos + size].hex()})
                     pos += size
                     index += 1

@@ -64,7 +64,7 @@ const CAPABILITIES: &[&str] = &[
     "snapshot.fixtures",
     "protocol.dcs",
 ];
-const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -592,10 +592,13 @@ fn main() -> io::Result<()> {
         {
             break;
         }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
         if line.len() as u64 > MAX_REQUEST_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "request exceeds 16 MiB",
+                format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
             ));
         }
         let response = match serde_json::from_slice::<Request>(&line) {

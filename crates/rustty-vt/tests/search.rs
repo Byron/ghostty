@@ -11,6 +11,76 @@ fn coordinates(screen: &Screen, point: GridPoint) -> (usize, usize) {
     )
 }
 
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn native_page_order_keeps_active_groups_and_repeated_soft_overlap() {
+    // The native macOS ARM64 pool holds 46 rows at 1024 columns.
+    let mut terminal = Terminal::new(1024, 64, 1000);
+    terminal.feed(&[b"X\r\n".repeat(63), b"X".to_vec()].concat());
+    let screen = terminal.screen();
+    let found = screen.search_literal(b"X");
+    let positions: Vec<_> = found
+        .iter()
+        .map(|found| coordinates(screen, found.start))
+        .collect();
+    assert_eq!(positions.len(), 64);
+    assert_eq!(positions[0], (0, 45));
+    assert_eq!(positions[45], (0, 0));
+    assert_eq!(positions[46], (0, 63));
+    assert_eq!(positions[63], (0, 46));
+
+    let mut terminal = Terminal::new(1024, 4, 1000);
+    let row = [vec![b'.'; 1023], b"X".to_vec()].concat();
+    terminal.feed(&row.repeat(64));
+    let screen = terminal.screen();
+    let found = screen.search_literal(b"X.");
+    assert_eq!(found.len(), 108);
+    assert_eq!(coordinates(screen, found[0].start), (1023, 44));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|found| coordinates(screen, found.start) == (1023, 44))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn no_scrollback_uses_the_strict_match_endpoint_at_active_top_left() {
+    let mut terminal = Terminal::with_limits(8, 4, rustty_vt::ScrollbackLimits::NONE);
+    terminal.feed(b"X");
+    assert!(terminal.screen().search_literal(b"X").is_empty());
+    assert!(terminal.screen().search_literal(b"X\n").is_empty());
+    terminal.feed(b"Y");
+    let screen = terminal.screen();
+    let found = screen.search_literal(b"XY");
+    assert_eq!(found.len(), 1);
+    assert_eq!(coordinates(screen, found[0].start), (0, 0));
+    assert_eq!(coordinates(screen, found[0].end), (1, 0));
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn no_scrollback_prunes_a_prefix_without_filtering_later_page_results() {
+    let mut terminal = Terminal::with_limits(
+        1024,
+        64,
+        rustty_vt::ScrollbackLimits {
+            bytes: Some(0),
+            lines: None,
+        },
+    );
+    terminal.feed(b"X\x1b[64;1HX\x1b[22J\x1b[HX\x1b[64;1HX");
+    let screen = terminal.screen();
+    assert_eq!(screen.history.len(), 64);
+    let positions: Vec<_> = screen
+        .search_literal(b"X")
+        .iter()
+        .map(|found| coordinates(screen, found.start))
+        .collect();
+    assert_eq!(positions, [(0, 64), (0, 63), (0, 127)]);
+}
+
 fn search(cols: u16, text: &str, needle: &[u8]) -> Vec<[(usize, usize); 2]> {
     let mut terminal = Terminal::new(cols, 4, 100);
     terminal.feed(text.as_bytes());

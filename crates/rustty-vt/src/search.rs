@@ -1,5 +1,5 @@
 //! Literal terminal search and regex matching with byte-to-cell coordinates.
-use crate::{GridPoint, Screen};
+use crate::{GridPoint, Row, Screen};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -28,12 +28,24 @@ pub struct Link {
     pub uri: String,
 }
 
+#[derive(Default)]
 struct Line {
     text: String,
     offsets: Vec<(usize, usize, GridPoint)>,
 }
 
 impl Line {
+    fn append(&mut self, other: &Self) {
+        let offset = self.text.len();
+        self.text.push_str(&other.text);
+        self.offsets.extend(
+            other
+                .offsets
+                .iter()
+                .map(|&(start, end, point)| (start + offset, end + offset, point)),
+        );
+    }
+
     fn push(&mut self, text: &str, point: GridPoint) {
         let start = self.text.len();
         self.text.push_str(text);
@@ -61,6 +73,19 @@ impl Line {
                     end,
                     text: m.as_str().to_owned(),
                 })
+            })
+            .collect()
+    }
+
+    fn literal_matches(&self, needle: &[u8]) -> Vec<LiteralMatch> {
+        self.text
+            .as_bytes()
+            .windows(needle.len())
+            .enumerate()
+            .filter(|(_, bytes)| bytes.eq_ignore_ascii_case(needle))
+            .filter_map(|(offset, _)| {
+                let (start, end) = self.cells(offset..offset + needle.len())?;
+                Some(LiteralMatch { start, end })
             })
             .collect()
     }
@@ -123,12 +148,8 @@ fn logical_lines(screen: &Screen) -> Vec<Line> {
 /// Plain, trimmed, unwrapped text and point mapping used by native search.
 /// Regex links deliberately use logical_lines instead: their whitespace and
 /// hard-line boundaries are part of the regex matching contract.
-fn literal_text(screen: &Screen) -> Line {
-    let rows: Vec<_> = screen.all_rows().collect();
-    let mut line = Line {
-        text: String::new(),
-        offsets: Vec::new(),
-    };
+fn literal_text(rows: &[&Row]) -> Line {
+    let mut line = Line::default();
     let Some(first) = rows.first() else {
         return line;
     };
@@ -217,28 +238,83 @@ impl Screen {
         matches
     }
 
-    /// Literal, ASCII-case-insensitive search in newest-first byte order.
+    /// Literal, ASCII-case-insensitive search in native page traversal order.
     ///
     /// Matches may overlap or span soft wraps and hard newlines. Empty needles
     /// produce no matches; arbitrary byte needles need not be valid UTF-8.
-    /// The grid is formatted as one range; native storage-page-specific result
-    /// ordering and trimming are not modeled by this row-based screen.
+    /// Each physical page is trimmed separately. Active and history searches
+    /// preserve their native overlap, including repeated matches and endpoints
+    /// that cross pages in reverse physical order.
     pub fn search_literal(&self, needle: &[u8]) -> Vec<LiteralMatch> {
         if needle.is_empty() {
             return Vec::new();
         }
-        let line = literal_text(self);
-        line.text
-            .as_bytes()
-            .windows(needle.len())
+        let rows: Vec<_> = self.all_rows().collect();
+        let row_positions: HashMap<_, _> = rows
+            .iter()
             .enumerate()
-            .rev()
-            .filter(|(_, bytes)| bytes.eq_ignore_ascii_case(needle))
-            .filter_map(|(offset, _)| {
-                let (start, end) = line.cells(offset..offset + needle.len())?;
-                Some(LiteralMatch { start, end })
-            })
-            .collect()
+            .map(|(index, row)| (row.id, index))
+            .collect();
+        let mut pages = Vec::with_capacity(self.pages.pages.len());
+        let mut start = 0;
+        let mut boundary = (0, 0);
+        for (index, page) in self.pages.pages.iter().enumerate() {
+            let end = start + usize::from(page.rows);
+            if start <= self.history.len() && end > self.history.len() {
+                boundary = (index, start);
+            }
+            pages.push((literal_text(&rows[start..end]), rows[end - 1].wrapped));
+            start = end;
+        }
+
+        // Native ActiveSearch appends newest pages first but formats/searches
+        // each one forward. Reversing results is a separate final operation.
+        let mut active = Line::default();
+        for (page, _) in pages[boundary.0..].iter().rev() {
+            active.append(page);
+        }
+        for (page, wrapped) in pages[..boundary.0].iter().rev() {
+            if !wrapped {
+                break;
+            }
+            active.append(page);
+            if page.text.len() >= needle.len() - 1 {
+                break;
+            }
+        }
+        let mut matches = active.literal_matches(needle);
+        if self.limits.bytes == Some(0) {
+            // Native removes only a leading prefix before reversing. Later
+            // historical matches from a boundary page can remain after ED22.
+            let prefix = matches
+                .iter()
+                .take_while(|found| {
+                    (row_positions[&found.end.row], found.end.col) <= (self.history.len(), 0)
+                })
+                .count();
+            matches.drain(..prefix);
+            matches.reverse();
+            return matches;
+        }
+        matches.reverse();
+        if boundary.0 == 0 {
+            return matches;
+        }
+
+        // Reversing this forward sequence's results is equivalent to native
+        // history's reversed bytes and reversed needle, including UTF-8 parts.
+        let mut history = Line::default();
+        for (page, _) in &pages[..=boundary.0] {
+            history.append(page);
+        }
+        matches.extend(
+            history
+                .literal_matches(needle)
+                .into_iter()
+                .rev()
+                .filter(|found| row_positions[&found.start.row] < boundary.1),
+        );
+        matches
     }
 }
 

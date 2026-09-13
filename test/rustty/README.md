@@ -96,14 +96,16 @@ Partial UTF-8 needles map each endpoint to the cell containing that byte. The
 regex search and link APIs keep their existing semantics. Match order and
 endpoints are compared without sorting, deduplication or normalization.
 
-Native search formats each internal storage page separately. Rust currently
-formats its row-based screen as one range; native page ordering, duplicated
-soft-wrap matches and trimmed blank page tails therefore remain incompatible.
-`search_pages.py` retains these failing cases, including a native integer
-underflow on a short search window (`sliding_window.zig`), and `--thorough`
-includes them. Run this bounded page suite independently with:
+Literal search formats each retained page separately and follows native active
+and history traversal, including repeated soft-wrap matches and trimmed blank
+page tails. With scrollback disabled, it preserves native prefix pruning by
+match endpoint before reversing results. `search_pages.py` also checks restored
+history whose row IDs differ from physical order. The suite retains a native
+integer underflow on a short search window (`sliding_window.zig`); `--thorough`
+includes that failing case. Run the page suite independently with:
 
 ```sh
+zig build vt-oracle -Demit-lib-vt=true -Demit-macos-app=false -Doptimize=ReleaseSafe
 python3 test/rustty/search_pages.py > target/search-pages.json
 python3 test/rustty/parity.py --no-build --fixtures target/search-pages.json --max-failures 10000
 ```
@@ -111,7 +113,8 @@ python3 test/rustty/parity.py --no-build --fixtures target/search-pages.json --m
 These direct search cases use `kind=input` to avoid serializing hundreds of
 thousands of unrelated cells; their search endpoints and result order remain
 unmodified. A reference-process crash is reported as a failure and ends that
-run. The search coverage entry remains partial.
+run. Incremental search and complete resource-driven page changes remain
+uncovered, so the search coverage entry remains partial.
 
 `--page-layout` compares native page/resource offsets, table and bitmap
 capacities, column adjustment, and pooled versus exact allocation charge.

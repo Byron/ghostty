@@ -4,7 +4,9 @@ This directory compares the Rust implementation with the current Ghostty Zig
 terminal in separate processes. Rustty's application and libraries never link
 the Zig oracle. Both adapters accept one JSON request per line and return one
 JSON response per line. Terminal input, outgoing bytes, title and PWD are hexadecimal;
-cell text is an array of Unicode scalar values. Adjacent PTY write callbacks
+cell text is an array of Unicode scalar values. Cell and cursor hyperlinks contain
+hexadecimal URI and explicit-ID bytes, or a numeric implicit ID. This preserves
+invalid UTF-8 without replacing it with display text. Adjacent PTY write callbacks
 are coalesced because callback batching is not part of the terminal protocol.
 Colors, styles, both screens, scrollback, cell widths and cursor state are
 compared directly; snapshots are not used as a substitute for observable state.
@@ -58,6 +60,12 @@ parser and UTF-8 decoder. For OSC it captures bytes at the parser's transition
 boundary because Zig exposes validated commands while Rust exposes raw OSC
 payloads. This comparison therefore does **not** validate OSC command parsing,
 effects or command-specific limits; those need terminal/protocol cases.
+
+The OSC hyperlink cases compare opaque URI/ID bytes in cells, the active cursor
+and restored snapshots. Full OSC 8 parsing remains incomplete: duplicate IDs,
+malformed option traversal and empty-URI endings with a nonempty ID still differ
+from the original implementation. These gaps remain separate from byte-preserving
+observation and are not treated as a parity pass.
 
 `--snapshots` exports one snapshot from each implementation, restores each
 encoding in both implementations, and resumes terminal input. It compares

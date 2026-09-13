@@ -1,12 +1,12 @@
-"""OSC title/PWD bytes, framing, capture bounds and command prefixes."""
+"""OSC title/PWD/hyperlink bytes, framing, capture bounds and command prefixes."""
 import base64
 
 
 def requests():
-    def case(name, operations, **options):
+    def case(name, operations, covers=None, **options):
         return ({"id": "protocol/osc/" + name, "host": {"title_report": True},
                  "operations": [op if isinstance(op, dict) else {"op": "write", "data": op.hex()} for op in operations],
-                 **options}, ["effects.title", "effects.pwd", "effects.host", "parser.events", "effects.pty"])
+                 **options}, covers or ["effects.title", "effects.pwd", "effects.host", "parser.events", "effects.pty"])
 
     def osc(number, body, end=b"\x07"):
         return b"\x1b]" + str(number).encode() + b";" + body + end
@@ -96,3 +96,15 @@ def requests():
             prefix = b"\x1b]" + str(number).encode() + b";" + b"x" * length
             yield case(f"snapshot/capture/{number}/{length}", [initial, prefix], kind="snapshot",
                        after=[{"op": "write", "data": (b"\x07" + query).hex()}])
+
+    # URI and explicit-ID bytes are opaque, including invalid UTF-8. Observe
+    # both the active pen and printed cells, then restore both wire encodings.
+    for uri in (b"https://example.org", "https://例え.test/é".encode(), b"\xff\x80"):
+        for option in (b"", b"id=stable", b"id=\xff\x80"):
+            body = option + b";" + uri
+            covers = ["terminal.cells", "terminal.cursor", "parser.events"]
+            for end in (b"\x07", b"\x1b\\"):
+                yield case(f"hyperlink/bytes/{body.hex()}/{end.hex()}",
+                           [osc(8, body, end), observe, b"X", observe, osc(8, b";"), b"Y"], covers=covers)
+            yield case(f"hyperlink/snapshot/{body.hex()}", [osc(8, body), b"X"], covers=covers,
+                       kind="snapshot", after=[{"op": "write", "data": (b"Y" + osc(8, b";") + b"Z").hex()}])

@@ -117,3 +117,31 @@ fn restoring_a_cursor_does_not_restore_or_default_semantic_content() {
         );
     }
 }
+
+#[test]
+fn screen_cursor_copies_carry_the_next_implicit_hyperlink_id() {
+    for mode in [47, 1047, 1049] {
+        let mut terminal = Terminal::new(10, 3, 0);
+        terminal.feed(&link(b"", b"primary"));
+        terminal.feed(format!("\x1b[?{mode}h").as_bytes());
+        terminal.feed(&link(b"", b"alternate"));
+        assert_eq!(
+            terminal.screen().cursor.hyperlink_id,
+            Some(HyperlinkId::Implicit(1))
+        );
+        let bytes = rustty_vt::snapshot::encode_to_vec(&terminal).unwrap();
+        let mut terminal =
+            rustty_vt::snapshot::decode(bytes.as_slice(), Default::default()).unwrap();
+        terminal.feed(&link(b"", b"after snapshot"));
+        assert_eq!(
+            terminal.screen().cursor.hyperlink_id,
+            Some(HyperlinkId::Implicit(2))
+        );
+        terminal.feed(format!("\x1b[?{mode}l").as_bytes());
+        terminal.feed(&link(b"", b"returned"));
+        assert_eq!(
+            terminal.screen().cursor.hyperlink_id,
+            Some(HyperlinkId::Implicit(if mode == 1049 { 1 } else { 3 }))
+        );
+    }
+}

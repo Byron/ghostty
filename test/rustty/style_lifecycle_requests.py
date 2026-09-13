@@ -122,6 +122,32 @@ def requests(reference):
         struct.pack_into("<H", screen, 2, len(pages))
         parts[1] = (2, screen)
         data = snapshots.frame(parts).hex()
+        for action, sequence in (
+            ("observe", b""),
+            ("cursor-down", b"\x1b[1;7H\x1b[B"),
+            ("cursor-down-across-page", b"\x1b[2;7H\x1b[B"),
+            ("cursor-up-across-page", b"\x1b[5;7H\x1b[A"),
+            ("cursor-right", b"\x1b[1;1H\x1b[7C"),
+            ("erase-chars", b"\x1b[1;1H\x1b[8X"),
+            ("erase-line", b"\x1b[1;1H\x1b[2K"),
+            ("erase-display", b"\x1b[1;1H\x1b[2J"),
+            ("erase-scrollback", b"\x1b[3J"),
+            ("insert-lines", b"\x1b[1;1H\x1b[L"),
+            ("delete-lines", b"\x1b[1;1H\x1b[M"),
+            ("insert-blanks", b"\x1b[1;1H\x1b[@"),
+            ("delete-chars", b"\x1b[1;1H\x1b[P"),
+            ("alignment", b"\x1b#8"),
+            ("scroll-up", b"\x1b[S"),
+            ("scroll-down", b"\x1b[T"),
+            ("print-wrap-margin", b"\x1b[?69h\x1b[1;3s\x1b[2;1H1234"),
+            ("print-wide", b"\x1b[2;1H1234567" + "⚠️A".encode()),
+            ("linked-wrap", b"\x1b[2;1H\x1b]8;id=test;https://example.com\x1b\\12345678Z"),
+        ):
+            request, covers = case(f"mixed-edit/{'-'.join(map(str, widths))}/{action}", 8, 6,
+                [{"op": "restore", "data": data}, observe, {"op": "observe"}, {"op": "snapshot"},
+                 write(sequence), observe, {"op": "observe"}, {"op": "snapshot"}])
+            yield request, covers + ["terminal.cells", "terminal.cursor", "terminal.styles"]
+
         for no_history in (False, True):
             for top, bottom in ((0, 4), (0, 5), (1, 4), (1, 5)):
                 operations = [{"op": "restore", "data": data}]
@@ -136,6 +162,16 @@ def requests(reference):
                                        8, 6, operations + [write(styles(10, start=2000) + b"\x1bD\x1bD"),
                                        observe, {"op": "observe"}, {"op": "snapshot"}])
                 continuation_requests.append((request, covers + ["terminal.cells", "terminal.styles"]))
+
+    # Ordinary wrapped text and wide-character spacer heads must both lose
+    # their continuation when ECH, EL, or DCH disconnects the current row.
+    for prefix in (b"abcdX", "abc界".encode()):
+        data = snapshots.frame(native_snapshot(4, 3, prefix)).hex()
+        for command in (b"\x1b[X", b"\x1b[K", b"\x1b[2K", b"\x1b[P"):
+            request, covers = case(f"wrap-reset/{prefix.hex()}/{command.hex()}", 4, 3,
+                [{"op": "restore", "data": data}, write(b"\x1b[H" + command),
+                 {"op": "observe"}, {"op": "snapshot"}])
+            yield request, covers + ["terminal.cells"]
 
     # These RGB values share native bucket zero at the largest STYLE table.
     # Thirty-two entries reach PSL 31; another style must split the page

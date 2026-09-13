@@ -859,5 +859,68 @@
       "terminal.cells",
       "terminal.cursor"
     ]
+  },
+  {
+    "request": {
+      "id": "terminal/scroll-clear/alternate",
+      "cols": 8,
+      "rows": 3,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b3f3130343968"
+        },
+        {
+          "op": "write",
+          "data": "410d0a421b5b32324a"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "write",
+          "data": "430d0a440d0a450d0a46"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cells",
+      "terminal.cursor"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_005011,src_004732,time_1368401,execs_2543570,op_havoc,rep_6"
+    ]
+  },
+  {
+    "request": {
+      "id": "terminal/scroll-clear/disabled",
+      "cols": 8,
+      "rows": 3,
+      "operations": [
+        {
+          "op": "grid",
+          "grid": {
+            "action": "limits",
+            "bytes": 0,
+            "lines": null
+          }
+        },
+        {
+          "op": "write",
+          "data": "410d0a421b5b32324a"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "write",
+          "data": "430d0a440d0a450d0a46"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cells",
+      "terminal.cursor"
+    ]
   }
 ]

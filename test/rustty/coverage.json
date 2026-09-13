@@ -119,7 +119,7 @@
     {
       "id": "graphics.kitty",
       "status": "partial",
-      "remaining": "Stored IDs, dimensions and RGBA pixels for raw/PNG/zlib uploads on both screens are compared; placement, virtual placement, transports and animation with deterministic clocks remain."
+      "remaining": "Stored IDs, dimensions and RGBA pixels for raw/PNG/zlib uploads on both screens are compared. Tagged placement keys, requested/source/pixel/grid geometry, zero pixel sizes, ordinary cursor/display/deletion/retransmission, basic history/reflow/screen/reset lifecycle and simple parent-orphan/virtual-clear cases are compared. Complete margin clipping, pruning, virtual placeholders, parent chains, transports and animation with deterministic clocks remain."
     },
     {
       "id": "graphics.png",

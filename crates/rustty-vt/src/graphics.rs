@@ -79,22 +79,126 @@ impl Image {
 #[derive(Clone, Debug)]
 pub struct Placement {
     pub image_id: u32,
-    pub placement_id: u32,
+    pub placement_id: PlacementId,
     pub row: u64,
     pub col: usize,
+    /// Requested c/r values; zero requests intrinsic or aspect-ratio sizing.
     pub columns: u32,
     pub rows: u32,
-    /// Requested c/r values, before inferring cells for cursor movement.
-    pub requested_size: [u32; 2],
     /// Projected anchor in viewport snapshots, including roots above the viewport.
     pub viewport_row: Option<i64>,
     pub z: i32,
-    /// Pixel-space source rectangle, clipped to the image.
+    /// Requested pixel-space source rectangle; zero size means full image.
     pub source: [u32; 4],
     pub offset: [u32; 2],
     pub virtual_placement: bool,
-    pub parent: Option<(u32, u32)>,
+    pub parent: Option<(u32, PlacementId)>,
     pub parent_offset: [i32; 2],
+}
+
+/// Automatic and application-supplied placement IDs occupy separate namespaces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PlacementId {
+    Internal(u32),
+    External(u32),
+}
+
+impl Placement {
+    pub fn source_rect(&self, image: &Image) -> [u32; 4] {
+        let [x, y, width, height] = self.source;
+        let x = x.min(image.width);
+        let y = y.min(image.height);
+        [
+            x,
+            y,
+            (if width == 0 { image.width } else { width }).min(image.width - x),
+            (if height == 0 { image.height } else { height }).min(image.height - y),
+        ]
+    }
+
+    pub fn cell_offset(&self, cell: [u32; 2]) -> [u32; 2] {
+        [
+            self.offset[0].min(cell[0].saturating_sub(1)),
+            self.offset[1].min(cell[1].saturating_sub(1)),
+        ]
+    }
+
+    pub fn pixel_size(&self, image: &Image, cell: [u32; 2]) -> [u32; 2] {
+        let [_, _, width, height] = self.source_rect(image);
+        if self.columns == 0 && self.rows == 0 {
+            return [width, height];
+        }
+        let offset = self.cell_offset(cell);
+        let target_width = cell[0]
+            .saturating_mul(self.columns)
+            .saturating_sub(offset[0]);
+        let target_height = cell[1].saturating_mul(self.rows).saturating_sub(offset[1]);
+        let scale = |value: u32, numerator: u32, denominator: u32| {
+            if denominator == 0 {
+                return 0;
+            }
+            ((u64::from(value) * u64::from(numerator) + u64::from(denominator) / 2)
+                / u64::from(denominator))
+            .min(u64::from(u32::MAX)) as u32
+        };
+        match (self.columns, self.rows) {
+            (_, 0) => [target_width, scale(target_width, height, width)],
+            (0, _) => [scale(target_height, width, height), target_height],
+            _ => [target_width, target_height],
+        }
+    }
+
+    pub fn grid_size(&self, image: &Image, cell: [u32; 2]) -> [u32; 2] {
+        if self.columns != 0 && self.rows != 0 {
+            return [self.columns, self.rows];
+        }
+        let size = self.pixel_size(image, cell);
+        let offset = self.cell_offset(cell);
+        let axis = |index: usize| {
+            if cell[index] == 0 {
+                0
+            } else {
+                size[index]
+                    .saturating_add(offset[index])
+                    .div_ceil(cell[index])
+            }
+        };
+        [axis(0), axis(1)]
+    }
+
+    /// Inclusive grid bounds, clipped at the screen's last physical row/column.
+    pub fn grid_rect(
+        &self,
+        screen: &Screen,
+        image: &Image,
+        cell: [u32; 2],
+    ) -> Option<(GridPoint, GridPoint)> {
+        if self.virtual_placement || self.parent.is_some() {
+            return None;
+        }
+        let [columns, rows] = self.grid_size(image, cell);
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+        let y = screen.all_rows().position(|row| row.id == self.row)?;
+        let end_y = y
+            .saturating_add(rows as usize - 1)
+            .min(screen.history.len() + screen.rows.len() - 1);
+        let end_x = self
+            .col
+            .saturating_add(columns as usize - 1)
+            .min(screen.columns - 1);
+        Some((
+            GridPoint {
+                row: self.row,
+                col: self.col,
+            },
+            GridPoint {
+                row: screen.all_rows().nth(end_y)?.id,
+                col: end_x,
+            },
+        ))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +229,7 @@ impl Default for Graphics {
             limit: 320_000_000,
             loading: None,
             next_image: 2147483647,
-            next_placement: 1,
+            next_placement: 0,
         }
     }
 }
@@ -162,6 +266,28 @@ impl Graphics {
     }
     pub(crate) fn discard_row(&mut self, row: u64) {
         self.placements.retain(|p| p.row != row);
+    }
+
+    fn reap_orphans(&mut self) -> HashSet<u32> {
+        let mut removed = HashSet::new();
+        loop {
+            let keys: HashSet<_> = self
+                .placements
+                .iter()
+                .map(|p| (p.image_id, p.placement_id))
+                .collect();
+            let before = self.placements.len();
+            self.placements.retain(|p| {
+                let keep = p.parent.is_none_or(|parent| keys.contains(&parent));
+                if !keep {
+                    removed.insert(p.image_id);
+                }
+                keep
+            });
+            if self.placements.len() == before {
+                return removed;
+            }
+        }
     }
     pub(crate) fn reflow(&mut self, points: &HashMap<(u64, usize), GridPoint>) {
         self.placements.retain_mut(|p| {
@@ -398,6 +524,13 @@ impl Terminal {
             }
             return;
         }
+        // A new transmission replaces an explicit image immediately, including
+        // its placements and orphaned descendants, even if decoding fails.
+        if matches!(action, b't' | b'T') && id != 0 && self.graphics().loading.is_none() {
+            self.graphics_delete(&Command {
+                values: [(b'd', i64::from(b'I')), (b'i', i64::from(id))].into(),
+            });
+        }
         let engine = base64::engine::general_purpose::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
             base64::engine::general_purpose::GeneralPurposeConfig::new()
@@ -499,6 +632,8 @@ impl Terminal {
             return;
         }
         storage.generation = storage.generation.wrapping_add(1);
+        storage.placements.retain(|p| p.image_id != id);
+        storage.reap_orphans();
         storage.images.insert(
             id,
             Image {
@@ -535,55 +670,38 @@ impl Terminal {
             .images
             .get(&id)
             .ok_or("ENOENT: image not found")?;
-        let x = cmd.n(b'x').min(image.width);
-        let y = cmd.n(b'y').min(image.height);
-        let width = if cmd.n(b'w') == 0 {
-            image.width
-        } else {
-            cmd.n(b'w')
-        }
-        .min(image.width - x);
-        let height = if cmd.n(b'h') == 0 {
-            image.height
-        } else {
-            cmd.n(b'h')
-        }
-        .min(image.height - y);
-        let cell_w = (self.width_px / u32::from(self.cols)).max(1);
-        let cell_h = (self.height_px / u32::from(self.rows)).max(1);
-        let offset = [cmd.n(b'X').min(cell_w - 1), cmd.n(b'Y').min(cell_h - 1)];
-        let mut columns = cmd.n(b'c');
-        let mut rows = cmd.n(b'r');
-        if columns == 0 && rows == 0 {
-            columns = (width + offset[0]).div_ceil(cell_w);
-            rows = (height + offset[1]).div_ceil(cell_h);
-        } else if columns == 0 {
-            columns = (u64::from(width) * u64::from(rows) * u64::from(cell_h)
-                / u64::from(height.max(1)))
-            .div_ceil(u64::from(cell_w))
-            .min(u64::from(u32::MAX)) as u32;
-        } else if rows == 0 {
-            rows = (u64::from(height) * u64::from(columns) * u64::from(cell_w)
-                / u64::from(width.max(1)))
-            .div_ceil(u64::from(cell_h))
-            .min(u64::from(u32::MAX)) as u32;
+        let cell = [
+            self.width_px / u32::from(self.cols),
+            self.height_px / u32::from(self.rows),
+        ];
+        let mut offset = [cmd.n(b'X'), cmd.n(b'Y')];
+        for axis in 0..2 {
+            if cell[axis] > 0 {
+                offset[axis] = offset[axis].min(cell[axis] - 1);
+            }
         }
         let parent = if cmd.n(b'P') != 0 {
             let parent = self
                 .graphics()
                 .placements
                 .iter()
-                .find(|p| {
-                    p.image_id == cmd.n(b'P') && (cmd.n(b'Q') == 0 || p.placement_id == cmd.n(b'Q'))
+                .filter(|p| {
+                    p.image_id == cmd.n(b'P')
+                        && (cmd.n(b'Q') == 0
+                            || p.placement_id == PlacementId::External(cmd.n(b'Q')))
+                })
+                .min_by_key(|p| match p.placement_id {
+                    PlacementId::External(id) => (false, id),
+                    PlacementId::Internal(id) => (true, id),
                 })
                 .ok_or("ENOPARENT: parent placement not found")?;
-            if id == parent.image_id && cmd.n(b'p') == parent.placement_id {
+            if id == parent.image_id && PlacementId::External(cmd.n(b'p')) == parent.placement_id {
                 return Err("EINVAL: placement cannot be its own parent");
             }
             let mut current = Some((parent.image_id, parent.placement_id));
             let mut seen = HashSet::new();
             while let Some(key) = current {
-                if key == (id, cmd.n(b'p')) || !seen.insert(key) {
+                if key == (id, PlacementId::External(cmd.n(b'p'))) || !seen.insert(key) {
                     return Err("ECYCLE: parent chain creates a cycle");
                 }
                 if seen.len() > 64 {
@@ -602,41 +720,49 @@ impl Terminal {
         };
         let cursor = self.screen().cursor.clone();
         let row = self.screen().rows[cursor.row].id;
+        let mut placement = Placement {
+            image_id: id,
+            placement_id: PlacementId::External(cmd.n(b'p')),
+            row,
+            col: cursor.col,
+            columns: cmd.n(b'c'),
+            rows: cmd.n(b'r'),
+            viewport_row: None,
+            z: cmd.signed(b'z'),
+            source: [cmd.n(b'x'), cmd.n(b'y'), cmd.n(b'w'), cmd.n(b'h')],
+            offset,
+            virtual_placement: cmd.n(b'U') != 0,
+            parent,
+            parent_offset: [cmd.signed(b'H'), cmd.signed(b'V')],
+        };
+        let [columns, rows] = placement.grid_size(image, cell);
         let graphics = &mut self.screen_mut().graphics;
         let placement_id = if cmd.n(b'p') != 0 {
-            cmd.n(b'p')
+            PlacementId::External(cmd.n(b'p'))
         } else {
             let n = graphics.next_placement;
-            graphics.next_placement = n.wrapping_add(1).max(1);
-            n
+            graphics.next_placement = n.wrapping_add(1);
+            PlacementId::Internal(n)
         };
         if cmd.n(b'p') != 0 {
             graphics
                 .placements
                 .retain(|p| p.image_id != id || p.placement_id != placement_id);
         }
-        graphics.placements.push(Placement {
-            image_id: id,
-            placement_id,
-            row,
-            col: cursor.col,
-            columns,
-            rows,
-            requested_size: [cmd.n(b'c'), cmd.n(b'r')],
-            viewport_row: None,
-            z: cmd.signed(b'z'),
-            source: [x, y, width, height],
-            offset,
-            virtual_placement: cmd.n(b'U') != 0,
-            parent,
-            parent_offset: [cmd.signed(b'H'), cmd.signed(b'V')],
-        });
+        placement.placement_id = placement_id;
+        graphics.placements.push(placement);
         graphics.generation = graphics.generation.wrapping_add(1);
         if cmd.n(b'C') != 1 && cmd.n(b'U') == 0 && parent.is_none() {
             let target = cursor.col.saturating_add(columns as usize);
             let wraps = target >= self.cols as usize;
             let requested = rows.saturating_sub(1) as usize + usize::from(wraps);
-            let before = self.margins.bottom.saturating_sub(cursor.row);
+            let before = if (self.margins.top..=self.margins.bottom).contains(&cursor.row)
+                && (self.margins.left..=self.margins.right).contains(&cursor.col)
+            {
+                self.margins.bottom - cursor.row
+            } else {
+                0
+            };
             for _ in 0..requested.min(before + self.rows as usize) {
                 self.index();
             }
@@ -835,6 +961,15 @@ impl Terminal {
             .unwrap_or(0);
         let row_ids: Vec<_> = self.screen().rows.iter().map(|r| r.id).collect();
         let cursor = self.screen().cursor.clone();
+        let cell = [
+            self.width_px / u32::from(self.cols),
+            self.height_px / u32::from(self.rows),
+        ];
+        let visible = if what.eq_ignore_ascii_case(&b'a') {
+            self.screen().visible_placements(cell)
+        } else {
+            HashSet::new()
+        };
         let graphics = &mut self.screen_mut().graphics;
         graphics.loading = None;
         if what.eq_ignore_ascii_case(&b'f') {
@@ -857,21 +992,26 @@ impl Terminal {
             }
         } else {
             let mut removed = HashSet::new();
+            let images = &graphics.images;
             graphics.placements.retain(|p| {
+                let [columns, rows] = images
+                    .get(&p.image_id)
+                    .map_or([0; 2], |image| p.grid_size(image, cell));
                 let y = row_ids.iter().position(|&id| id == p.row);
                 let at = |x: usize, row: usize| {
                     y.is_some_and(|y| {
                         x >= p.col
-                            && x < p.col.saturating_add(p.columns as usize)
+                            && x < p.col.saturating_add(columns as usize)
                             && row >= y
-                            && row < y.saturating_add(p.rows as usize)
+                            && row < y.saturating_add(rows as usize)
                     })
                 };
                 let remove = match what.to_ascii_lowercase() {
-                    b'a' => y.is_some() && !p.virtual_placement,
+                    b'a' => visible.contains(&(p.image_id, p.placement_id)),
                     b'i' | b'n' => {
                         p.image_id == image_id
-                            && (cmd.n(b'p') == 0 || p.placement_id == cmd.n(b'p'))
+                            && (cmd.n(b'p') == 0
+                                || p.placement_id == PlacementId::External(cmd.n(b'p')))
                     }
                     b'c' => at(cursor.col, cursor.row),
                     b'p' => at(
@@ -888,11 +1028,11 @@ impl Terminal {
                     b'r' => (cmd.n(b'x')..=cmd.n(b'y')).contains(&p.image_id),
                     b'x' => {
                         cmd.n(b'x') as usize > p.col
-                            && (cmd.n(b'x') as usize) <= p.col.saturating_add(p.columns as usize)
+                            && (cmd.n(b'x') as usize) <= p.col.saturating_add(columns as usize)
                     }
                     b'y' => y.is_some_and(|y| {
                         cmd.n(b'y') as usize > y
-                            && (cmd.n(b'y') as usize) <= y.saturating_add(p.rows as usize)
+                            && (cmd.n(b'y') as usize) <= y.saturating_add(rows as usize)
                     }),
                     b'z' => p.z == cmd.signed(b'z'),
                     _ => false,
@@ -902,6 +1042,7 @@ impl Terminal {
                 }
                 !remove
             });
+            removed.extend(graphics.reap_orphans());
             if what.is_ascii_uppercase() {
                 if matches!(what, b'I' | b'N') && cmd.n(b'p') == 0 {
                     removed.insert(image_id);
@@ -1099,9 +1240,43 @@ fn blend(dst: &mut [u8], src: &[u8], overwrite: bool) {
 }
 
 impl Screen {
-    pub(crate) fn clear_visible_images(&mut self) {
+    fn visible_placements(&self, cell: [u32; 2]) -> HashSet<(u32, PlacementId)> {
         let ids: HashSet<_> = self.rows.iter().map(|r| r.id).collect();
-        self.graphics.placements.retain(|p| !ids.contains(&p.row));
+        self.graphics
+            .placements
+            .iter()
+            .filter(|p| {
+                !p.virtual_placement
+                    && p.parent.is_none()
+                    && (ids.contains(&p.row)
+                        || self
+                            .graphics
+                            .images
+                            .get(&p.image_id)
+                            .and_then(|image| p.grid_rect(self, image, cell))
+                            .is_some_and(|(_, end)| ids.contains(&end.row)))
+            })
+            .map(|p| (p.image_id, p.placement_id))
+            .collect()
+    }
+
+    pub(crate) fn clear_visible_images(&mut self, cell: [u32; 2]) {
+        let before = (self.graphics.placements.len(), self.graphics.images.len());
+        let visible = self.visible_placements(cell);
+        self.graphics
+            .placements
+            .retain(|p| !visible.contains(&(p.image_id, p.placement_id)));
+        self.graphics.reap_orphans();
+        let retained: HashSet<_> = self
+            .graphics
+            .placements
+            .iter()
+            .map(|p| p.image_id)
+            .collect();
+        self.graphics.images.retain(|id, _| retained.contains(id));
+        if before != (self.graphics.placements.len(), self.graphics.images.len()) {
+            self.graphics.generation = self.graphics.generation.wrapping_add(1);
+        }
     }
 }
 
@@ -1178,7 +1353,11 @@ mod tests {
             [1, 2, 3, 255, 4, 5, 6, 255]
         );
         assert_eq!(t.graphics().placements.len(), 1);
-        assert_eq!(t.graphics().placements[0].columns, 1);
+        assert_eq!(t.graphics().placements[0].columns, 0);
+        assert_eq!(
+            t.graphics().placements[0].grid_size(&t.graphics().images[&1], [10, 20]),
+            [1, 1]
+        );
         t.feed(b"\x1b_Ga=d,d=I,i=1\x1b\\");
         assert!(t.graphics().images.is_empty());
         assert!(
@@ -1186,6 +1365,50 @@ mod tests {
                 .is_empty()
         );
     }
+    #[test]
+    fn placement_size_uses_shared_integer_geometry() {
+        let mut t = Terminal::new(10, 8, 100);
+        t.set_pixel_size(80, 128);
+        let data = base64::engine::general_purpose::STANDARD.encode([0; 4 * 4 * 2]);
+        t.feed(format!("\x1b_Ga=t,i=1,f=32,s=4,v=2;{data}\x1b\\").as_bytes());
+        t.feed(b"\x1b_Ga=p,i=1,p=1,C=1,c=2,X=1,Y=3\x1b\\");
+        let graphics = t.graphics();
+        let p = &graphics.placements[0];
+        assert_eq!(p.pixel_size(&graphics.images[&1], [8, 16]), [15, 8]);
+        assert_eq!(p.grid_size(&graphics.images[&1], [8, 16]), [2, 1]);
+        t.feed(b"\x1b_Ga=p,i=1,p=1,C=1,r=2,X=1,Y=3\x1b\\");
+        let graphics = t.graphics();
+        let p = &graphics.placements[0];
+        assert_eq!(p.pixel_size(&graphics.images[&1], [8, 16]), [58, 29]);
+        assert_eq!(p.grid_size(&graphics.images[&1], [8, 16]), [8, 2]);
+        assert_eq!(p.grid_size(&graphics.images[&1], [0, 0]), [0, 0]);
+    }
+
+    #[test]
+    fn anonymous_placement_ids_do_not_collide_with_external_ids() {
+        let mut t = Terminal::new(10, 3, 100);
+        t.feed(b"\x1b_Ga=T,i=1,f=32,s=1,v=1,C=1;AQID/w==\x1b\\");
+        t.feed(b"\x1b_Ga=p,i=1,C=1\x1b\\\x1b_Ga=p,i=1,p=1,C=1\x1b\\");
+        let ids: Vec<_> = t
+            .graphics()
+            .placements
+            .iter()
+            .map(|p| p.placement_id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                PlacementId::Internal(0),
+                PlacementId::Internal(1),
+                PlacementId::External(1)
+            ]
+        );
+        t.feed(b"\x1b_Ga=d,d=i,i=1,p=1\x1b\\");
+        assert_eq!(t.graphics().placements.len(), 2);
+        t.feed(b"\x1b_Ga=t,i=1,f=32,s=1,v=1;AQID/w==\x1b\\");
+        assert!(t.graphics().placements.is_empty());
+    }
+
     #[test]
     fn animation_frames_are_bounded_and_advance_on_host_clock() {
         let mut t = Terminal::new(10, 3, 10);

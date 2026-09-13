@@ -342,7 +342,7 @@ impl Screen {
         cursor.visible &= cursor.row < self.rows.len();
         cursor.row = cursor.row.min(self.rows.len() - 1);
         Self {
-            graphics: self.graphics.snapshot(),
+            graphics: self.graphics.snapshot(self),
             rows: self.viewport().cloned().collect(),
             history: VecDeque::new(),
             cursor,

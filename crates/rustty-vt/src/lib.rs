@@ -3,6 +3,7 @@
 pub mod clipboard;
 pub mod color;
 pub mod dnd;
+pub mod formatter;
 pub mod glyph;
 pub mod graphics;
 pub mod input;

@@ -94,7 +94,7 @@
     {
       "id": "terminal.selection",
       "status": "partial",
-      "remaining": "Direct bounds/text, rectangles, wide/grapheme cells and whitespace/wrap cases pass. Pure word, word-between, line, all and output queries pass 384 comparisons across 128 fixtures. All ten selection-end adjustments pass 450 comparisons across 150 fixtures, including reversed/rectangular endpoints, blank and written-space rows, wide spacers, history, alternate screens and mixed physical widths. Complete mutation lifetimes, gestures and styled formats remain."
+      "remaining": "Direct bounds/text, rectangles, wide/grapheme cells and whitespace/wrap cases pass. Pure word, word-between, line, all and output queries pass 384 comparisons across 128 fixtures. All ten selection-end adjustments pass 450 comparisons across 150 fixtures, including reversed/rectangular endpoints, blank and written-space rows, wide spacers, history, alternate screens and mixed physical widths. Plain/VT/HTML selection export with all trim/unwrap combinations passes 363 comparisons across 121 fixtures. Complete mutation lifetimes, gestures, formatter coordinate maps and full terminal-state exports remain."
     },
     {
       "id": "terminal.search",

@@ -35,6 +35,7 @@ Use deterministic generated cases and saved failures to diagnose differences:
 python3 test/rustty/parity.py --no-build --generated 100 --seed 0
 python3 test/rustty/parity.py --no-build --input
 python3 test/rustty/parity.py --no-build --parser
+python3 test/rustty/parity.py --no-build --unicode
 python3 test/rustty/parity.py --no-build --snapshots
 python3 test/rustty/parity.py --no-build --snapshot-wire
 python3 test/rustty/parity.py --no-build --protocols
@@ -147,7 +148,12 @@ An oracle crash, invalid response, unsupported operation or timeout fails the
 run. Requests are limited to 16 MiB and responses to 128 MiB. Graphics file,
 temporary-file and shared-memory transports are disabled in the Zig oracle.
 
-`--thorough` additionally exercises input, parser, protocol and both snapshot suites, all split points
+`--unicode` compares the display widths of all 1,112,064 valid Unicode scalars
+in batches of 4,096 codepoints, plus rejected surrogate and out-of-range inputs.
+The cases enumerate the scalar range independently of Rust's generated table.
+This verifies scalar width; terminal grapheme composition needs separate cases.
+
+`--thorough` additionally exercises Unicode, input, parser, protocol and both snapshot suites, all split points
 for short writes, the inherited stream corpus and generated operations. The
 stream corpus's first byte is its original delivery selector, so it is removed
 from the terminal input.

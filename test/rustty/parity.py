@@ -159,6 +159,18 @@ def generated_requests(seed, count):
         yield {"id": f"generated/{seed}/{case}", "cols": 12, "rows": 4, "operations": operations}
 
 
+def unicode_requests():
+    """Compare every valid Unicode scalar without deriving cases from Rust's table."""
+    for start in range(0, 0x110000, 4096):
+        codepoints = [cp for cp in range(start, min(start + 4096, 0x110000))
+                      if not 0xD800 <= cp <= 0xDFFF]
+        yield ({"id": f"unicode/scalars/{start:06x}", "kind": "unicode",
+                "codepoints": codepoints}, ["unicode.width"])
+    for cp in (0xD800, 0xDFFF, 0x110000, 0xFFFFFFFF):
+        yield ({"id": f"unicode/scalars/reject-{cp:06x}", "kind": "unicode",
+                "codepoints": [cp], "expected_error": "InvalidCodepoint"}, ["unicode.width"])
+
+
 def input_requests():
     def request(name, setup, events, covers):
         return ({"id": "input/" + name, "kind": "input", "cols": 80, "rows": 24,
@@ -351,6 +363,7 @@ def main():
     parser.add_argument("--generated", type=int, default=0)
     parser.add_argument("--input", action="store_true", help="compare keyboard, mouse, focus and paste encoding")
     parser.add_argument("--parser", action="store_true", help="compare raw parser events and inherited parser corpus")
+    parser.add_argument("--unicode", action="store_true", help="compare widths of all 1,112,064 Unicode scalars")
     parser.add_argument("--snapshots", action="store_true", help="cross-decode both snapshot encodings and resume terminal input")
     parser.add_argument("--snapshot-wire", action="store_true", help="compare snapshot fixtures, streaming, malformed input and mixed PAGE widths")
     parser.add_argument("--protocols", action="store_true", help="compare terminal protocol queries and host effects")
@@ -391,6 +404,9 @@ def main():
                                 if not args.case or args.case in request["id"])
             if args.parser or args.thorough:
                 requests.extend((request, covers) for request, covers in parser_requests()
+                                if not args.case or args.case in request["id"])
+            if args.unicode or args.thorough:
+                requests.extend((request, covers) for request, covers in unicode_requests()
                                 if not args.case or args.case in request["id"])
             if args.snapshots or args.thorough:
                 requests.extend((request, covers) for request, covers in snapshots.requests()

@@ -90,6 +90,9 @@ impl Session {
             })
             .map_err(error)?;
         let command = command(config, &options)?;
+        let terminfo_name = command
+            .get_env("TERM")
+            .map(|name| name.to_string_lossy().into_owned());
         let mut child = pair.slave.spawn_command(command).map_err(error)?;
         drop(pair.slave);
         let mut killer = child.clone_killer();
@@ -103,6 +106,7 @@ impl Session {
         })?;
 
         let mut terminal = Terminal::with_limits(cols, rows, scrollback_limits(config));
+        terminal.terminfo_name = terminfo_name;
         apply_appearance(&mut terminal, config);
         terminal.working_directory = options
             .working_directory

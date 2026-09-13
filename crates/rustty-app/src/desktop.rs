@@ -63,6 +63,7 @@ struct Pane {
     exited: bool,
     started: Instant,
     exit_message: Option<String>,
+    links: vt::search::LinkMatcher,
 }
 impl Pane {
     fn write(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
@@ -531,6 +532,7 @@ impl App {
                 exited: false,
                 started,
                 exit_message: None,
+                links: vt::search::LinkMatcher::default(),
             },
         );
         Ok(())
@@ -2482,7 +2484,8 @@ impl App {
                     })
                     * scale,
             );
-        let Some(pane) = self.panes.get(&id) else {
+        let config = &self.loaded.config;
+        let Some(pane) = self.panes.get_mut(&id) else {
             return;
         };
         let Ok(mut terminal) = pane.session.terminal() else {
@@ -2515,13 +2518,10 @@ impl App {
             .map(|r| vt::GridPoint { row: r.id, col });
         if let Some(point) = point {
             if action == vt::MouseAction::Press && button == Some(vt::MouseButton::Left) {
-                if host.modifiers.super_key() && self.config().link_url {
-                    let mut matcher = vt::search::LinkMatcher::default();
-                    let links = matcher.links(&screen.snapshot_viewport());
-                    if let Some(link) = links.iter().find(|link| {
-                        (link.start.row, link.start.col) <= (point.row, point.col)
-                            && (link.end.row, link.end.col) >= (point.row, point.col)
-                    }) && let Some(platform) = &self.platform
+                if host.modifiers.super_key() && config.link_url {
+                    let links = pane.links.links(&screen.snapshot_viewport());
+                    if let Some(link) = links.iter().find(|link| link.contains(screen, point))
+                        && let Some(platform) = &self.platform
                         && let Err(error) = platform.open_url(&link.uri)
                     {
                         self.errors.push(error);
@@ -2543,13 +2543,13 @@ impl App {
             } else if action == vt::MouseAction::Release {
                 host.selection_anchor = None;
                 if matches!(
-                    self.config().copy_on_select,
+                    config.copy_on_select,
                     config::CopyOnSelect::Primary | config::CopyOnSelect::Both
                 ) {
                     self.primary_selection = screen.selection_text();
                 }
                 if matches!(
-                    self.config().copy_on_select,
+                    config.copy_on_select,
                     config::CopyOnSelect::Clipboard | config::CopyOnSelect::Both
                 ) && let Some(text) = screen.selection_text()
                 {

@@ -527,9 +527,21 @@ impl Screen {
             std::mem::swap(&mut first, &mut last);
             std::mem::swap(&mut left, &mut right);
         }
+        if !selection.rectangular
+            && rows[last]
+                .cells
+                .get(right)
+                .is_some_and(|cell| cell.spacer_head)
+            && last + 1 < rows.len()
+        {
+            last += 1;
+            right = 0;
+        }
         let mut result = String::new();
+        let mut blank_rows = 0;
+        let mut blank_cells = 0;
         for (i, row) in rows.iter().enumerate().take(last + 1).skip(first) {
-            let start = if selection.rectangular {
+            let mut start = if selection.rectangular {
                 left.min(right)
             } else if i == first {
                 left
@@ -537,30 +549,44 @@ impl Screen {
                 0
             };
             let end = if selection.rectangular {
-                left.max(right) + 1
+                left.max(right).saturating_add(1)
             } else if i == last {
-                right + 1
+                right.saturating_add(1)
             } else {
                 row.cells.len()
             };
-            let line_start = result.len();
-            for cell in &row.cells[start.min(row.cells.len())..end.min(row.cells.len())] {
+            start = start.min(row.cells.len());
+            if start > 0
+                && let Some(cell) = row.cells.get(start)
+            {
+                if cell.spacer_head {
+                    continue;
+                }
+                if cell.width == 0 {
+                    start -= 1;
+                }
+            }
+            let cells = &row.cells[start..end.min(row.cells.len())];
+            if cells.iter().all(|cell| cell.text.is_empty()) {
+                blank_rows += 1;
+                continue;
+            }
+            result.extend(std::iter::repeat_n('\n', blank_rows));
+            blank_rows = usize::from(!row.wrapped);
+            if !row.wrap_continuation {
+                blank_cells = 0;
+            }
+            for cell in cells {
                 if cell.width == 0 || cell.spacer_head {
                     continue;
                 }
-                if cell.text.is_empty() {
-                    result.push(' ');
-                } else {
-                    result.push_str(&cell.text);
+                if cell.text.is_empty() || cell.text.starts_with(' ') {
+                    blank_cells += 1;
+                    continue;
                 }
-            }
-            if selection.rectangular || !row.wrapped {
-                while result.len() > line_start && result.ends_with(' ') {
-                    result.pop();
-                }
-                if i < last {
-                    result.push('\n');
-                }
+                result.extend(std::iter::repeat_n(' ', blank_cells));
+                blank_cells = 0;
+                result.push_str(&cell.text);
             }
         }
         Some(result)

@@ -1,4 +1,5 @@
 //! The Rustty desktop terminal application.
 
-pub mod workspace;
+pub mod input;
 pub mod platform;
+pub mod workspace;

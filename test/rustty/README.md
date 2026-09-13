@@ -224,6 +224,15 @@ advanced cases currently expose differences and original Zig assertions;
 An expected rejection must be `InvalidSnapshot`; an unrelated adapter error
 or an unexpected successful decode still fails the case.
 
+`--snapshot-wire --case snapshot/resources/hyperlinks` compares PAGE hyperlink
+table admission, string-pool allocation, duplicate values and wire IDs, invalid
+entries, collision limits and the linked-cell map limit. Explicit IDs allocate
+before URIs; discarded entries retain their strings until the next successful
+allocation reaches set admission. Duplicate values also need temporary string
+space. The suite keeps the native bitmap bounds panic for oversized strings in
+`snapshot/reference-limit/hyperlinks/`, after the returning wire cases. These
+failures remain part of unfiltered `--snapshot-wire` and `--thorough` runs.
+
 `--protocols` compares terminal-level DCS replies and host notifications.
 Capability names are read
 from the original Zig terminfo source; the Rust table is not used to select

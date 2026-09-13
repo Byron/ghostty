@@ -9,7 +9,9 @@
 use crate::modes::Modes;
 use crate::page_layout::PageCapacity;
 use crate::page_list::PageList;
-use crate::page_resources::{BitmapAllocator, SetAdmission, StyleAdmission, hyperlink_hash};
+use crate::page_resources::{
+    BitmapAllocator, HyperlinkAdmission, SetAdmission, StyleAdmission, hyperlink_hash,
+};
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
     Cell, Color, Cursor, CursorShape, HyperlinkId, Margins, Row, Screen, ScrollbackLimits,
@@ -1241,14 +1243,20 @@ impl<R: Read> Decoder<R> {
             }
         }
         let mut links = HashMap::new();
+        let mut link_admission =
+            HyperlinkAdmission::new(layout.hyperlink_set_layout, layout.string_alloc_layout);
         for _ in 0..link_count {
             let id = r.u16()?;
-            let value = decode_link(&mut r, false)?;
-            if id != 0 {
-                links.entry(id).or_insert(value);
+            let retain = id != 0 && !links.contains_key(&id);
+            let value = decode_link(&mut r, false)?
+                .filter(|link| link_admission.admit(&link.id, &link.uri, retain));
+            if retain {
+                links.insert(id, value);
             }
         }
         let mut result = Vec::with_capacity(rows);
+        let mut linked_cells = 0;
+        let link_cell_limit = layout.hyperlink_map_layout.capacity as usize * 80 / 100;
         for y in 0..rows {
             let flags = r.u8()?;
             let count = usize::from(r.u16()?);
@@ -1298,8 +1306,11 @@ impl<R: Read> Decoder<R> {
                 cell.protected = word & (1 << 44) != 0;
                 cell.semantic = decode_semantic(((word >> 46) & 3) as u8);
                 let id = (word >> 48) as u16;
-                if let Some(Some(link)) = links.get(&id) {
+                if let Some(Some(link)) = links.get(&id)
+                    && linked_cells < link_cell_limit
+                {
                     assign_link(cell, link);
+                    linked_cells += 1;
                 }
             }
             for x in 0..cols {

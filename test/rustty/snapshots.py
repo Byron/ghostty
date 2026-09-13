@@ -35,9 +35,16 @@ def frame(records):
 
 
 def wire_requests(root, reference):
+    import hyperlink_requests
     import snapshot_resources
     yield from snapshot_resources.requests(reference)
     yield from snapshot_resources.style_requests(reference)
+    reference_limits = []
+    for request, covers in hyperlink_requests.requests(reference):
+        if request["id"].startswith("snapshot/reference-limit/"):
+            reference_limits.append((request, covers))
+        else:
+            yield request, covers
 
     data = fixture(root / "src/terminal/snapshot/testdata/complete-v1.hex")
     if frame(records(data)) != data:
@@ -47,7 +54,6 @@ def wire_requests(root, reference):
         write(b"\x1b[?1049l\x1b[0mZ"),
     ]}, ["snapshot.fixtures"])
 
-    reference_limits = []
     for physical, logical in ((4, 8), (8, 4)):
         encoded = reference.request({"id": "snapshot/mixed-source", "cols": physical, "rows": 1,
             "operations": [write(b"abcdefgh"[:physical]), {"op": "snapshot"}]})
@@ -59,9 +65,9 @@ def wire_requests(root, reference):
         struct.pack_into("<H", terminal, 18, logical - 1)
         parts[0] = (1, terminal)
         if physical > logical:
-            reference_limits.append({"id": "snapshot/reference-limit/wide-cursor", "operations": [
+            reference_limits.append(({"id": "snapshot/reference-limit/wide-cursor", "operations": [
                 {"op": "restore", "data": frame(parts).hex()}, {"op": "observe"},
-            ]})
+            ]}, ["snapshot.cross-decode"]))
             screen = bytearray(parts[1][1])
             struct.pack_into("<H", screen, 12, logical - 1)
             screen[17] &= ~1  # The cursor no longer reaches the physical edge.
@@ -76,13 +82,12 @@ def wire_requests(root, reference):
                 "operations": [{"op": "restore", "data": data.hex()}, {"op": "observe"}] + after}
             if physical < logical and name == "right":
                 request["id"] = "snapshot/reference-limit/narrow-cursor-right"
-                reference_limits.append(request)
+                reference_limits.append((request, ["snapshot.cross-decode"]))
             else:
                 yield request, ["snapshot.cross-decode"]
     # Keep reference assertions visible and in thorough runs. They are last so
     # an infrastructure abort does not hide the preceding decoder comparisons.
-    for request in reference_limits:
-        yield request, ["snapshot.cross-decode"]
+    yield from reference_limits
 
 
 def streaming_requests(root):

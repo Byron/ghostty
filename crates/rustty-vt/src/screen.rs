@@ -819,6 +819,7 @@ impl Screen {
                 if old.semantic != SemanticContent::Output {
                     used = used.max(1);
                 }
+                line.semantic = old.semantic;
                 let mut wide_tail = None;
                 for (old_col, cell) in old.cells.iter().take(used).enumerate() {
                     if cell.width == 0 {
@@ -854,6 +855,7 @@ impl Screen {
                         line.wrapped = true;
                         output.push(line);
                         line = self.blank_row(cols, Color::Default);
+                        line.semantic = old.semantic;
                         line.wrap_continuation = true;
                         x = 0;
                     }
@@ -895,7 +897,6 @@ impl Screen {
                     pin_x = x.min(cols - 1);
                 }
                 if !old.wrapped {
-                    line.semantic = old.semantic;
                     output.push(line);
                     line = self.blank_row(cols, Color::Default);
                     x = 0;

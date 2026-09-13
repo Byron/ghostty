@@ -172,3 +172,51 @@ fn explicit_zero_scroll_up_preserves_partial_regions() {
         assert_eq!(rows, ["a", "b", "c", "d"]);
     }
 }
+
+#[test]
+fn scroll_clear_omits_empty_rows_and_follows_the_cursor_row() {
+    let mut terminal = Terminal::new(8, 5, 20);
+    terminal.feed(b"\x1b[4;4H\x1b[22J");
+    assert!(terminal.screen().history.is_empty());
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (3, 3)
+    );
+    terminal.feed(b"\x1b[Habc\x1b[4;4H\x1b[22J");
+    assert_eq!(terminal.screen().history.len(), 1);
+    assert_eq!(terminal.screen().history[0].text(), "abc");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (2, 3)
+    );
+    terminal.feed(b"xy\x1b[22J");
+    assert_eq!(terminal.screen().history.len(), 4);
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (0, 0)
+    );
+}
+
+#[test]
+fn scroll_clear_counts_background_cells_and_preserves_cursor_attributes() {
+    let mut terminal = Terminal::new(8, 5, 20);
+    terminal.feed(b"\x1b[?69h\x1b[2;6s\x1b[2;4r\x1b[3;1H\x1b[44m\x1b[2K\x1b[5;4H\x1b[1\"q\x1b]8;id=cursor;https://example.org\x07\x1b[22J");
+    assert_eq!(terminal.screen().history.len(), 3);
+    let cursor = &terminal.screen().cursor;
+    assert_eq!((cursor.row, cursor.col), (1, 3));
+    assert_eq!(cursor.style.background, rustty_vt::Color::Indexed(4));
+    assert!(cursor.protected);
+    assert_eq!(cursor.hyperlink.as_deref(), Some("https://example.org"));
+    assert!(
+        terminal
+            .screen()
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .all(|cell| {
+                cell.text.is_empty() && cell.style.background == rustty_vt::Color::Default
+            })
+    );
+    assert_eq!(terminal.margins.top, 1);
+    assert_eq!(terminal.margins.left, 1);
+}

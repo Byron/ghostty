@@ -1144,7 +1144,7 @@ impl Terminal {
         if y == self.margins.bottom {
             let x = self.screen().cursor.col;
             if x >= self.margins.left && x <= self.margins.right {
-                self.scroll_up(1, true);
+                self.index_scroll();
             }
         } else if y + 1 < self.rows as usize {
             self.screen_mut().cursor.row += 1;
@@ -1173,6 +1173,136 @@ impl Terminal {
         } else {
             self.cursor_vertical(1, false);
         }
+    }
+
+    fn index_scroll(&mut self) {
+        let m = self.margins;
+        let cols = usize::from(self.cols);
+        let full = m.left == 0 && m.right == cols - 1;
+        // Native cross-page copies keep the destination's physical width.
+        // Partial copies also retain its recycled suffix and wrap flags.
+        let copy_row = |row: &Row, recycled: Option<&Row>, columns: usize, limit: usize| {
+            let mut copied = row.clone();
+            let end = copied.cells.len().min(columns).min(limit);
+            copied.cells.truncate(end);
+            if end < columns {
+                if let Some(recycled) = recycled {
+                    copied
+                        .cells
+                        .extend_from_slice(&recycled.cells[end..columns]);
+                } else {
+                    copied.cells.resize(columns, Cell::default());
+                }
+                copied.wrapped = recycled.is_some_and(|row| row.wrapped);
+                copied.wrap_continuation = recycled.is_some_and(|row| row.wrap_continuation);
+            }
+            if columns > row.cells.len() {
+                copied.cells[row.cells.len() - 1].spacer_head = false;
+            }
+            copied
+        };
+        if full && self.rows == 1 && self.screen().limits.bytes == Some(0) {
+            let screen = self.screen_mut();
+            let row = &mut screen.rows[0];
+            *row = Row::new(row.id, row.cells.len(), screen.cursor.style.background);
+            return;
+        }
+        if !full || (m.top == 0 && (self.screen().limits.bytes != Some(0) || m.bottom == 0)) {
+            self.scroll_up(1, true);
+            if full && self.screen().limits.bytes != Some(0) {
+                let screen = self.screen_mut();
+                let bottom = screen.history.len() + m.bottom;
+                let at_end = m.bottom + 1 == screen.rows.len();
+                let columns = usize::from(if at_end {
+                    screen.pages.pages.back().unwrap().columns
+                } else {
+                    screen.pages.page_at(bottom).0.columns
+                });
+                if screen.rows[m.bottom].cells.len() != columns {
+                    screen.rows[m.bottom] = Row::new(
+                        screen.rows[m.bottom].id,
+                        columns,
+                        screen.cursor.style.background,
+                    );
+                }
+                if at_end {
+                    return;
+                }
+                // History insertion moves the suffix down through the page
+                // list. At each boundary, native code copies into that page's
+                // recycled last row (or a fresh blank row after growing).
+                let mut page_start = 0;
+                for page in &screen.pages.pages {
+                    let page_end = page_start + usize::from(page.rows);
+                    if page_start > bottom {
+                        let target = page_start - screen.history.len();
+                        let columns = usize::from(page.columns);
+                        let row = &screen.rows[target];
+                        if row.cells.len() != columns || cols < columns {
+                            screen.rows[target] = copy_row(
+                                row,
+                                screen.rows.get(page_end - screen.history.len()),
+                                columns,
+                                cols,
+                            );
+                        }
+                    }
+                    page_start = page_end;
+                }
+            }
+            return;
+        }
+
+        // Full-width IND rotates complete rows, unlike SU/DL which detach
+        // wrapped lines and keep pins at their physical coordinates.
+        let screen = self.screen_mut();
+        let top = screen.history.len() + m.top;
+        let bottom = screen.history.len() + m.bottom;
+        let (page, page_row) = screen.pages.page_at(top);
+        let mut copies = Vec::new();
+        if top - page_row + usize::from(page.rows) <= bottom {
+            let mut page_start = 0;
+            for page in &screen.pages.pages {
+                let page_end = page_start + usize::from(page.rows);
+                if page_end > bottom {
+                    break;
+                }
+                if page_end > top {
+                    let source = page_end - screen.history.len();
+                    let columns = usize::from(page.columns);
+                    let row = &screen.rows[source];
+                    if row.cells.len() != columns {
+                        let recycled = &screen.rows[page_start.max(top) - screen.history.len()];
+                        copies.push((source - 1, copy_row(row, Some(recycled), columns, columns)));
+                    }
+                }
+                page_start = page_end;
+            }
+        }
+        let erased = screen.rows[m.top].id;
+        let replacement = if page_row == 0 {
+            screen.rows[m.top + 1].id
+        } else {
+            screen.all_rows().nth(top - 1).unwrap().id
+        };
+        for point in screen.grid_points_mut() {
+            if point.row == erased {
+                point.row = replacement;
+                if page_row == 0 {
+                    point.col = 0;
+                }
+            }
+        }
+        let blank = screen.blank_row(
+            screen.rows[m.bottom].cells.len(),
+            screen.cursor.style.background,
+        );
+        let row = screen.rows.remove(m.top);
+        screen.rows.insert(m.bottom, blank);
+        for (row, copy) in copies {
+            screen.rows[row] = copy;
+        }
+        screen.discard_row(row.id);
     }
 
     fn scroll_up(&mut self, count: usize, history: bool) {

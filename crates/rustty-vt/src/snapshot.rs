@@ -3,8 +3,8 @@
 //! The encoder streams active rows before history. Decode budgets bound record
 //! sizes and the total cells restored; PAGE allocation hints are advisory and
 //! do not control native allocation. Version 1 excludes graphics and selection.
-//! Physical PAGE widths are preserved on restore. The terminal normalizes mixed
-//! widths at the next live mutation, so saving a restored snapshot is lossless.
+//! Physical PAGE widths are preserved on restore and during in-bounds edits.
+//! Column resizes reflow them; edits beyond a narrow row extend it safely.
 use crate::modes::Modes;
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
@@ -1054,9 +1054,6 @@ impl<R: Read> Decoder<R> {
         if contents.len() < usize::from(rows) {
             return Err(invalid("snapshot pages do not cover active rows"));
         }
-        screen.metadata.needs_reflow = contents
-            .iter()
-            .any(|row| row.cells.len() != usize::from(cols));
         for (i, row) in contents.iter_mut().enumerate() {
             row.id = i as u64;
         }
@@ -1249,8 +1246,6 @@ impl<R: Read> Decoder<R> {
                             .bytes
                             .is_none_or(|max| bytes.saturating_add(screen.storage_bytes()) <= max);
                     if allowed {
-                        screen.metadata.needs_reflow |=
-                            rows.iter().any(|r| r.cells.len() != usize::from(t.cols));
                         count = rows.len();
                         for row in &mut rows {
                             row.id = screen.next_row;
@@ -1343,7 +1338,6 @@ impl Default for TerminalMetadata {
 pub(crate) struct ScreenMetadata {
     pub identity: u64,
     pub reflow_generation: u64,
-    pub needs_reflow: bool,
     pub hyperlink_implicit_id: u32,
     pub protected_mode: u8,
     pub semantic_click: [u8; 2],
@@ -1356,7 +1350,6 @@ impl Default for ScreenMetadata {
         Self {
             identity: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             reflow_generation: 0,
-            needs_reflow: false,
             hyperlink_implicit_id: 0,
             protected_mode: 0,
             semantic_click: [0; 2],

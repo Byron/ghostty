@@ -334,7 +334,7 @@ fn kitty_keyboard_ring_overflows_pops_and_resumes_after_restore() {
 }
 
 #[test]
-fn mixed_physical_widths_roundtrip_and_reflow_only_for_live_input() {
+fn mixed_physical_widths_survive_safe_edits_and_grow_at_the_access_boundary() {
     let mut source = Terminal::new(4, 1, 10);
     source.feed(b"abcd");
     let narrow_page = records(&encode_to_vec(&source).unwrap())[2].clone();
@@ -358,7 +358,7 @@ fn mixed_physical_widths_roundtrip_and_reflow_only_for_live_input() {
     terminal.feed(b"");
     assert_eq!(terminal.screen().rows[0].cells.len(), 4);
     terminal.feed(b"mX");
-    assert!(terminal.screen().all_rows().all(|row| row.cells.len() == 8));
+    assert_eq!(terminal.screen().rows[0].cells.len(), 4);
     assert_eq!(text(&terminal.screen().rows), ["abcd", "X"]);
     assert!(!terminal.screen().rows[0].wrapped);
     assert_eq!(
@@ -370,8 +370,11 @@ fn mixed_physical_widths_roundtrip_and_reflow_only_for_live_input() {
     query.feed(b"m\x1b[6n\x1b[?7$p\x1bP$qm\x1b\\");
     assert_eq!(query.screen().rows[0].cells.len(), 4);
     assert_eq!(query.screen().cursor.col, 3);
+    query.feed(b"\x1b[1;8H!");
+    assert_eq!(query.screen().rows[0].cells.len(), 8);
+    assert_eq!(query.screen().rows[0].cells[7].text, "!");
 
-    // Wider physical rows preserve their hidden suffix until normalization.
+    // Wider physical rows preserve their hidden suffix through safe edits.
     let mut source = Terminal::new(8, 1, 10);
     source.feed(b"abcdef");
     let wide_page = records(&encode_to_vec(&source).unwrap())[2].clone();
@@ -388,14 +391,23 @@ fn mixed_physical_widths_roundtrip_and_reflow_only_for_live_input() {
         let mut terminal = decode(bytes.as_slice(), DecodeOptions::default()).unwrap();
         assert_eq!(terminal.screen().rows[0].text(), "abcdef");
         terminal.feed(input);
-        assert!(terminal.screen().all_rows().all(|row| row.cells.len() == 4));
+        assert!(terminal.screen().all_rows().all(|row| row.cells.len() >= 4));
         assert!(terminal.screen().cursor.col < 4);
         assert!(terminal.screen().cursor.row < 2);
+        terminal.resize(5, 2);
+        assert!(terminal.screen().all_rows().all(|row| row.cells.len() == 5));
     }
+    let mut terminal = decode(bytes.as_slice(), DecodeOptions::default()).unwrap();
+    terminal.feed(b"X");
+    assert_eq!(terminal.screen().rows[0].cells.len(), 8);
+    assert_eq!(terminal.screen().rows[0].text(), "Xbcdef");
+    terminal.feed(b"\x1b[2J");
+    assert_eq!(terminal.screen().rows[0].cells.len(), 8);
+    assert_eq!(terminal.screen().rows[0].text(), "");
 }
 
 #[test]
-fn history_restore_stops_after_lazy_normalization_changes_the_row_layout() {
+fn history_restore_preserves_mixed_physical_rows_while_live_input_arrives() {
     let mut stream = records(&fixture());
     let narrow_page = records(&encode_to_vec(&Terminal::new(1, 1, 10)).unwrap())[2].clone();
     let first_history_page = stream.iter().position(|(tag, _)| *tag == 4).unwrap() + 1;
@@ -411,9 +423,18 @@ fn history_restore_stops_after_lazy_normalization_changes_the_row_layout() {
     terminal.feed(b"X");
     assert_eq!(
         decoder.next_history(&mut terminal).unwrap().unwrap().rows,
-        0
+        2
     );
     assert!(decoder.next_history(&mut terminal).unwrap().is_none());
+    assert_eq!(
+        terminal
+            .primary_screen()
+            .history
+            .iter()
+            .map(|row| row.cells.len())
+            .collect::<Vec<_>>(),
+        [2, 2, 1]
+    );
 }
 
 #[test]

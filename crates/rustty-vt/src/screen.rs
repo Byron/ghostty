@@ -350,8 +350,8 @@ pub struct Screen {
     pub(crate) metadata: crate::snapshot::ScreenMetadata,
     #[serde(skip)]
     pub graphics: crate::graphics::Graphics,
-    /// Logical width. Restored physical rows may retain a different width until
-    /// the terminal receives its next mutation and reflows them.
+    /// Logical width. Restored physical rows retain their own width until a
+    /// column resize reflows them or an edit needs additional cells.
     pub columns: usize,
     pub rows: Vec<Row>,
     pub history: VecDeque<Row>,
@@ -526,8 +526,8 @@ impl Screen {
         let y = self.cursor.row;
         let cols = self.rows[y].cells.len();
         let background = self.cursor.style.background;
-        if col == cols {
-            if self.rows[y].wrapped && self.rows[y].cells[cols - 1].spacer_head {
+        if col >= cols {
+            if col == cols && self.rows[y].wrapped && self.rows[y].cells[cols - 1].spacer_head {
                 self.rows[y].erase(cols - 1, cols, background, false);
             }
             return;
@@ -541,10 +541,11 @@ impl Screen {
             };
             if let Some(previous) = previous
                 && previous.wrapped
-                && previous.cells[cols - 1].spacer_head
+                && previous.cells.last().is_some_and(|cell| cell.spacer_head)
             {
                 let before = previous.storage_bytes();
-                previous.erase(cols - 1, cols, background, false);
+                let width = previous.cells.len();
+                previous.erase(width - 1, width, background, false);
                 if y == 0 {
                     self.history_bytes = self
                         .history_bytes
@@ -636,12 +637,11 @@ impl Screen {
 
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
         let old_cols = self.columns;
-        let columns_changed = cols != old_cols || self.metadata.needs_reflow;
+        let columns_changed = cols != old_cols;
         if columns_changed {
             self.metadata.reflow_generation = self.metadata.reflow_generation.wrapping_add(1);
         }
         self.columns = cols;
-        self.metadata.needs_reflow = false;
         let old_rows = self.rows.len();
         let cursor_y = self.cursor.row;
         let old_cursor = GridPoint {
@@ -911,6 +911,10 @@ impl Screen {
             }
         }
         self.rows = contents.split_off(start);
+        self.cursor.col = self
+            .cursor
+            .col
+            .min(self.rows[self.cursor.row].cells.len() - 1);
         for row in contents {
             self.push_history(row);
         }

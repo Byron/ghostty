@@ -1,6 +1,6 @@
 //! Selection queries over physical rows, including retained history.
 
-use crate::{Cell, GridPoint, Row, Screen, Selection};
+use crate::{Cell, GridPoint, Row, Screen, Selection, SemanticContent};
 
 pub const DEFAULT_WORD_BOUNDARIES: &[char] = &[
     '\0', ' ', '\t', '\'', '"', '│', '`', '|', ':', ';', ',', '(', ')', '[', ']', '{', '}', '<',
@@ -161,6 +161,76 @@ impl Screen {
             end,
             rectangular: false,
         })
+    }
+
+    /// Select command output bounded by shell integration's prompt markers.
+    /// Explicit spaces count as output; unwritten trailing cells do not.
+    /// Returns none on prompt/input cells or when no prompt bounds the output.
+    /// Like the other queries, this leaves the active selection unchanged.
+    pub fn select_output(&self, point: GridPoint) -> Option<Selection> {
+        let grid = Grid(self);
+        let clicked = grid.position(point)?;
+        if grid.cell(clicked).semantic != SemanticContent::Output {
+            return None;
+        }
+
+        let prompt = (0..=clicked.0)
+            .rev()
+            .find(|&y| grid.row(y).semantic != SemanticContent::Output);
+        let Some(mut prompt) = prompt else {
+            let next = (clicked.0..grid.len())
+                .find(|&y| grid.row(y).semantic != SemanticContent::Output)?;
+            let mut end = grid.previous((next, 0))?;
+            while codepoint(grid.cell(end)).is_none() {
+                let Some(previous) = grid.previous(end) else {
+                    break;
+                };
+                end = previous;
+            }
+            // Native includes the origin even when this entire prefix is blank.
+            return Some(grid.selection((0, 0), end));
+        };
+
+        if grid.row(prompt).semantic == SemanticContent::Input {
+            let mut y = prompt;
+            while let Some(previous) = y.checked_sub(1) {
+                match grid.row(previous).semantic {
+                    SemanticContent::Output => {
+                        prompt = y;
+                        break;
+                    }
+                    SemanticContent::Prompt => {
+                        prompt = previous;
+                        break;
+                    }
+                    SemanticContent::Input => y = previous,
+                }
+            }
+            // A continuation group reaching the retained top keeps the first
+            // encountered row, matching native PromptIterator::nextLeftUp.
+        }
+
+        let mut after = prompt + 1;
+        while after < grid.len() && grid.row(after).semantic == SemanticContent::Input {
+            after += 1;
+        }
+        let limit = (after..grid.len())
+            .find(|&y| grid.row(y).semantic != SemanticContent::Output)
+            .unwrap_or(grid.len());
+        let mut bounds = None;
+        'output: for y in prompt..limit {
+            for (x, cell) in grid.row(y).cells.iter().enumerate() {
+                if cell.semantic != SemanticContent::Output {
+                    if bounds.is_some() {
+                        break 'output;
+                    }
+                } else if codepoint(cell).is_some() {
+                    let (_, end) = bounds.get_or_insert(((y, x), (y, x)));
+                    *end = (y, x);
+                }
+            }
+        }
+        bounds.map(|(start, end)| grid.selection(start, end))
     }
 }
 

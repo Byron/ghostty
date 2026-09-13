@@ -1,4 +1,4 @@
-"""Pure word/line/all selection queries, observed without replacing selection."""
+"""Pure selection queries, observed without replacing the active selection."""
 
 
 def requests():
@@ -76,6 +76,62 @@ def requests():
                    [grid("select_all"), grid("select_word", point=point(4)),
                     grid("select_line", point=point(1))])
 
+    prompt = b"\x1b]133;A\x07"
+    continuation = b"\x1b]133;P;k=s\x07"
+    input_start = b"\x1b]133;B\x07"
+    output = b"\x1b]133;C\x07"
+    command = prompt + b"$ " + input_start + b"cmd\r\n" + output
+    output_cases = [
+        ("unmarked", b"free\r\noutput"), ("blank", b""),
+        ("output-only", output + b"free"),
+        ("before-prompt", b"pre\r\n\r\n" + prompt + b"P"),
+        ("blank-prefix", b"\r\n\r\n" + prompt + b"P"),
+        ("space-prefix", b"   \r\n \r\n" + prompt + b"P"),
+        ("prompt-only", prompt + b"P"),
+        ("input-only", prompt + b"P" + input_start + b"input"),
+        ("blank-command", command),
+        ("spaces", command + b"  out \r\n\r\n" + prompt + b"P"),
+        ("background", command + b"\x1b[44m\x1b[K"),
+        ("space-background", command + b" \x1b[44m\x1b[K"),
+        ("inline", prompt + b"P" + input_start + b"in" + output + b"out"),
+        ("inline-prompts", prompt + b"P" + output + b"a" + prompt + b"Q" + output + b"b"),
+        ("wrap", command + b"abcdefghijklmno\r\ntail"),
+        ("wide", command + "a界e\u0301🙂".encode()),
+        ("wide-wrap", command + "1234567界abc".encode()),
+        ("commands", b"pre\r\n" + command + b"one\r\n" + command + b"two"),
+        ("continuation", prompt + b"P\r\n" + continuation + b"Q" + input_start
+         + b"in\r\n" + output + b"out"),
+        ("clipped-continuation", continuation + b"P" + output + b"early\r\n"
+         + continuation + b"Q" + output + b"last\r\nend"),
+        ("gapped-continuation", b"old\r\n" + continuation + b"P\r\n"
+         + continuation + b"Q\r\n" + output + b"out"),
+        ("erased-prompt", command + b"out\x1b[1;1H\x1b[2K"),
+    ]
+    for name, text in output_cases:
+        yield case("output/" + name, text,
+                   [grid("select_output", point=point(x, y))
+                    for y in range(6) for x in range(8)], rows=6)
+
+    for cols, rows in ((1, 1), (1, 4), (4, 1)):
+        for index, text in enumerate((prompt + b"P" + output + b"a", b"a\r\n" + prompt + b"P")):
+            yield case(f"output/small/{cols}/{rows}/{index}", text,
+                       [grid("select_output", point=point(x, y))
+                        for y in range(rows) for x in range(cols)], cols, rows)
+
+    history = b"pre\r\n" + (command + b"out\r\n") * 4
+    for tag in ("active", "viewport", "screen", "history"):
+        yield case("output/history/" + tag, history,
+                   [grid("viewport", delta=-3),
+                    *[grid("select_output", point=point(x, y, tag))
+                      for y in range(10) for x in (0, 4, 7)]], rows=3)
+    for alternate in (b"\x1b[?47h", b"\x1b[?1049h"):
+        yield case("output/alternate/" + alternate.hex(), history + alternate + command + b"alt",
+                   [grid("select_output", point=point(x, y))
+                    for y in range(4) for x in range(8)])
+    for invalid in (point(8), point(65535), point(y=65535)):
+        yield case(f"output/invalid/{invalid['x']}/{invalid['y']}", command + b"out",
+                   [grid("select_output", point=invalid)])
+
     for action in ("select_word", "select_word_between", "select_line"):
         for invalid in (point(8), point(65535), point(y=65535)):
             yield case(f"invalid/{action}/{invalid['x']}/{invalid['y']}", b"one two",
@@ -129,3 +185,28 @@ def snapshot_requests(reference):
         operations.append({"op": "grid", "grid": {"action": "select_all"}})
         yield ({"id": "grid/selectors/mixed-pages/" + "-".join(map(str, widths)),
                 "operations": operations}, ["terminal.selection", "snapshot.cross-decode"])
+
+    output_pages = [
+        ("groups", (b" \r\npre",
+                    b"\x1b]133;A\x07P\x1b]133;B\x07i\x1b]133;C\x07O\r\nout ",
+                    b"tail\r\n\x1b]133;A\x07P")),
+        ("continuations", (b"\x1b]133;P;k=s\x07P\x1b]133;C\x07X\r\n\x1b]133;P;k=s\x07P",
+                           b"\x1b]133;P;k=s\x07P\x1b]133;C\x07O\r\nout",
+                           b"tail\r\n\x1b]133;A\x07P")),
+    ]
+    for logical in (4, 8):
+        for widths in ((8, 4, 8), (4, 8, 4)):
+            for name, texts in output_pages:
+                parts = snapshot(logical, 6, b"")
+                pages = [snapshot(width, 2, text)[2] for width, text in zip(widths, texts)]
+                parts[2:3] = pages
+                screen = bytearray(parts[1][1])
+                struct.pack_into("<H", screen, 2, len(pages))
+                parts[1] = (2, screen)
+                operations = [{"op": "restore", "data": frame(parts).hex()}]
+                operations.extend({"op": "grid", "grid": {
+                    "action": "select_output", "point": {"tag": "screen", "x": x, "y": y}}}
+                    for y in range(6) for x in range(8))
+                yield ({"id": f"grid/selectors/output/mixed-pages/{name}/{logical}/"
+                        + "-".join(map(str, widths)), "operations": operations},
+                       ["terminal.selection", "snapshot.cross-decode"])

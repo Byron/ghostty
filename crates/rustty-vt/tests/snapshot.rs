@@ -298,3 +298,37 @@ fn invalid_utf8_metadata_and_links_survive_without_loss() {
         Some(b"https://x/\xfd".as_slice())
     );
 }
+
+#[test]
+fn kitty_keyboard_ring_overflows_pops_and_resumes_after_restore() {
+    let mut terminal = Terminal::new(5, 3, 10);
+    for flag in 1..=10 {
+        terminal.feed(format!("\x1b[>{flag}u").as_bytes());
+    }
+    let mut restored = decode(
+        encode_to_vec(&terminal).unwrap().as_slice(),
+        DecodeOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        terminal.screen().kitty_keyboard,
+        restored.screen().kitty_keyboard
+    );
+    for (sequence, expected) in [
+        (b"\x1b[<2u".as_slice(), 8),
+        (b"\x1b[<1u", 7),
+        (b"\x1b[=16;2u", 23),
+        (b"\x1b[=3;3u", 20),
+        (b"\x1b[<8u", 0),
+        (b"\x1b[>5u", 5),
+        (b"\x1b[<65535u", 0),
+    ] {
+        terminal.feed(sequence);
+        restored.feed(sequence);
+        assert_eq!(restored.screen().kitty_keyboard.current(), expected);
+        assert_eq!(
+            terminal.screen().kitty_keyboard,
+            restored.screen().kitty_keyboard
+        );
+    }
+}

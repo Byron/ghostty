@@ -244,6 +244,46 @@ pub struct Cursor {
     pub semantic: SemanticContent,
 }
 
+/// Kitty's eight-entry cyclic keyboard flag stack. Overflow evicts the oldest
+/// entry, while popping a full turn resets the stack to its disabled state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KittyKeyboard {
+    pub(crate) flags: [u8; 8],
+    pub(crate) index: u8,
+}
+
+impl KittyKeyboard {
+    pub fn current(&self) -> u8 {
+        self.flags[usize::from(self.index)]
+    }
+
+    pub fn push(&mut self, flags: u8) {
+        self.index = (self.index + 1) % 8;
+        self.flags[usize::from(self.index)] = flags & 31;
+    }
+
+    pub fn pop(&mut self, count: usize) {
+        if count >= self.flags.len() {
+            *self = Self::default();
+            return;
+        }
+        for _ in 0..count {
+            self.flags[usize::from(self.index)] = 0;
+            self.index = self.index.wrapping_sub(1) % 8;
+        }
+    }
+
+    pub fn set(&mut self, flags: u8, mode: u16) {
+        let current = &mut self.flags[usize::from(self.index)];
+        match mode {
+            0 | 1 => *current = flags & 31,
+            2 => *current |= flags & 31,
+            3 => *current &= !(flags & 31),
+            _ => {}
+        }
+    }
+}
+
 impl Default for Cursor {
     fn default() -> Self {
         Self {
@@ -315,7 +355,7 @@ pub struct Screen {
     pub cursor: Cursor,
     pub selection: Option<Selection>,
     pub viewport_offset: usize,
-    pub kitty_keyboard: Vec<u8>,
+    pub kitty_keyboard: KittyKeyboard,
     pub(crate) saved_cursor: Option<SavedCursor>,
     pub(crate) charset: CharsetState,
     pub(crate) iso_protection: bool,
@@ -340,7 +380,7 @@ impl Screen {
             cursor: Cursor::default(),
             selection: None,
             viewport_offset: 0,
-            kitty_keyboard: Vec::new(),
+            kitty_keyboard: KittyKeyboard::default(),
             saved_cursor: None,
             charset: CharsetState::default(),
             iso_protection: false,

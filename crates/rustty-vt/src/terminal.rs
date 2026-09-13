@@ -1261,36 +1261,16 @@ impl Terminal {
             ([b'='], b'c') => effects.push(Effect::Write(b"\x1bP!|00000000\x1b\\".to_vec())),
             ([b'>'], b'q') => effects.push(Effect::Write(b"\x1bP>|rustty 0.1.0\x1b\\".to_vec())),
             ([b'?'], b'u') => effects.push(Effect::Write(
-                format!(
-                    "\x1b[?{}u",
-                    self.screen().kitty_keyboard.last().copied().unwrap_or(0)
-                )
-                .into_bytes(),
+                format!("\x1b[?{}u", self.screen().kitty_keyboard.current()).into_bytes(),
             )),
             ([b'>'], b'u') => {
-                let flags = (n & 31) as u8;
-                let stack = &mut self.screen_mut().kitty_keyboard;
-                if stack.len() == 16 {
-                    stack.remove(0);
-                }
-                stack.push(flags);
+                self.screen_mut().kitty_keyboard.push((n & 31) as u8);
             }
             ([b'<'], b'u') => {
-                let stack = &mut self.screen_mut().kitty_keyboard;
-                stack.truncate(stack.len().saturating_sub(count));
+                self.screen_mut().kitty_keyboard.pop(count);
             }
             ([b'='], b'u') => {
-                let stack = &mut self.screen_mut().kitty_keyboard;
-                if stack.is_empty() {
-                    stack.push(0);
-                }
-                let flags = stack.last_mut().unwrap();
-                match second {
-                    0 | 1 => *flags = (n & 31) as u8,
-                    2 => *flags |= (n & 31) as u8,
-                    3 => *flags &= !(n as u8),
-                    _ => {}
-                }
+                self.screen_mut().kitty_keyboard.set((n & 31) as u8, second);
             }
             ([b'$'], b'}') => self.status_display = n == 1,
             ([b'$'], b'~') => {}

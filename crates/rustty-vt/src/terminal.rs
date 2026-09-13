@@ -1313,17 +1313,18 @@ impl Terminal {
             origin: false,
             charset: CharsetState::default(),
         });
-        let shape = self.screen().cursor.shape;
-        let visible = self.screen().cursor.visible;
-        let blink = self.screen().cursor.blink;
-        self.screen_mut().cursor = saved.cursor;
-        self.screen_mut().cursor.shape = shape;
-        self.screen_mut().cursor.visible = visible;
-        self.screen_mut().cursor.blink = blink;
-        self.screen_mut().cursor.col = self.screen().cursor.col.min(self.cols as usize - 1);
+        let cols = self.cols as usize;
+        let rows = self.rows as usize;
+        let screen = self.screen_mut();
+        // DECRC restores only saved attributes. Hyperlinks, semantic content,
+        // and cursor appearance retain their current state.
+        screen.cursor.col = saved.cursor.col.min(cols - 1);
+        screen.cursor.row = saved.cursor.row.min(rows - 1);
+        screen.cursor.style = saved.cursor.style;
+        screen.cursor.protected = saved.cursor.protected;
+        screen.cursor.pending_wrap = saved.cursor.pending_wrap;
+        screen.charset = saved.charset;
         self.ensure_row_cells(self.screen().cursor.row, self.screen().cursor.col + 1);
-        self.screen_mut().cursor.row = self.screen().cursor.row.min(self.rows as usize - 1);
-        self.screen_mut().charset = saved.charset;
         self.modes.set(true, 6, saved.origin);
         self.changed();
     }
@@ -1842,12 +1843,31 @@ impl Terminal {
             }
             8 => {
                 if let Some(split) = data.iter().position(|&b| b == b';') {
-                    self.end_hyperlink();
                     let uri = &data[split + 1..];
+                    let params = &data[..split];
+                    let mut explicit = None;
+                    let mut start = 0;
+                    while start < params.len() {
+                        // Native option traversal searches past the first
+                        // byte, so an empty field prefixes the next option.
+                        let end = params[start + 1..]
+                            .iter()
+                            .position(|&byte| matches!(byte, b':' | 0))
+                            .map_or(params.len(), |offset| start + 1 + offset);
+                        let option = &params[start..end];
+                        let Some(equal) = option.iter().position(|&byte| byte == b'=') else {
+                            break;
+                        };
+                        if option[..equal] == *b"id" && equal + 1 < option.len() {
+                            explicit = Some(&option[equal + 1..]);
+                        }
+                        start = end + 1;
+                    }
+                    if uri.is_empty() && explicit.is_some() {
+                        return;
+                    }
+                    self.end_hyperlink();
                     if !uri.is_empty() {
-                        let explicit = data[..split]
-                            .split(|&b| b == b':')
-                            .find_map(|part| part.strip_prefix(b"id=").filter(|id| !id.is_empty()));
                         let screen = self.screen_mut();
                         let id = match explicit {
                             Some(id) => HyperlinkId::Explicit(id.to_vec()),

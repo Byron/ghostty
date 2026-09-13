@@ -17,3 +17,7 @@ png.workspace = true
 flate2.workspace = true
 lz4_flex.workspace = true
 crc32c.workspace = true
+
+[[example]]
+name = "parity"
+path = "../../test/rustty/rust-oracle.rs"

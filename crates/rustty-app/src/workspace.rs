@@ -227,20 +227,33 @@ impl Tree {
         );
         out
     }
+    fn weight(&self, direction: Axis) -> usize {
+        match &self.kind {
+            Node::Split {
+                axis,
+                first,
+                second,
+                ..
+            } if *axis == direction => first.weight(direction) + second.weight(direction),
+            _ => 1,
+        }
+    }
     pub fn equalize(&mut self) {
         if let Node::Split {
+            axis,
             ratio,
             first,
             second,
-            ..
         } = &mut self.kind
         {
-            *ratio = 0.5;
+            let a = first.weight(*axis);
+            let b = second.weight(*axis);
+            *ratio = a as f32 / (a + b) as f32;
             first.equalize();
             second.equalize();
         }
     }
-    pub fn resize(&mut self, pane: Id, direction: Direction, delta: f32) -> bool {
+    pub fn resize(&mut self, pane: Id, direction: Direction, pixels: f32, bounds: Rect) -> bool {
         let Node::Split {
             axis,
             ratio,
@@ -250,21 +263,80 @@ impl Tree {
         else {
             return false;
         };
+        let mut child_bounds = bounds;
         let in_first = first.contains(pane);
-        if if in_first {
-            first.resize(pane, direction, delta)
-        } else {
-            second.resize(pane, direction, delta)
-        } {
+        if !in_first && !second.contains(pane) {
+            return false;
+        }
+        match axis {
+            Axis::Horizontal => {
+                child_bounds.width *= if in_first { *ratio } else { 1.0 - *ratio };
+                if !in_first {
+                    child_bounds.x += bounds.width * *ratio;
+                }
+            }
+            Axis::Vertical => {
+                child_bounds.height *= if in_first { *ratio } else { 1.0 - *ratio };
+                if !in_first {
+                    child_bounds.y += bounds.height * *ratio;
+                }
+            }
+        }
+        let child = if in_first { first } else { second };
+        if child.resize(pane, direction, pixels, child_bounds) {
             return true;
         }
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
         if horizontal != (*axis == Axis::Horizontal) {
             return false;
         }
+        let size = if horizontal {
+            bounds.width
+        } else {
+            bounds.height
+        };
+        if size <= 0.0 || !size.is_finite() || !pixels.is_finite() {
+            return false;
+        }
+        let delta = pixels / size;
         let positive = matches!(direction, Direction::Right | Direction::Down);
-        *ratio = (*ratio + if positive { delta } else { -delta }).clamp(0.05, 0.95);
+        *ratio = (*ratio + if positive { delta } else { -delta }).clamp(0.1, 0.9);
         true
+    }
+    pub fn set_ratio(&mut self, id: Id, value: f32) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        match &mut self.kind {
+            Node::Split { ratio, .. } if self.id == id => {
+                *ratio = value.clamp(0.1, 0.9);
+                true
+            }
+            Node::Split { first, second, .. } => {
+                first.set_ratio(id, value) || second.set_ratio(id, value)
+            }
+            _ => false,
+        }
+    }
+    /// Return the deepest divider under the pointer and its parent bounds.
+    pub fn divider_at(
+        &self,
+        bounds: Rect,
+        point: [f32; 2],
+        tolerance: f32,
+    ) -> Option<(Id, Axis, Rect)> {
+        let mut nodes = Vec::new();
+        self.layout_into(bounds, &mut nodes, true);
+        nodes.into_iter().rev().find_map(|(id, rect)| {
+            let Node::Split { axis, ratio, .. } = self.node(id)?.kind else {
+                return None;
+            };
+            let near = match axis {
+                Axis::Horizontal => (point[0] - rect.x - rect.width * ratio).abs() <= tolerance,
+                Axis::Vertical => (point[1] - rect.y - rect.height * ratio).abs() <= tolerance,
+            };
+            (rect.contains(point) && near).then_some((id, axis, rect))
+        })
     }
     pub fn quadrant(&self, pane: Id) -> Option<Id> {
         fn find(tree: &Tree, pane: Id, horizontal: bool, vertical: bool) -> Option<Id> {
@@ -681,6 +753,33 @@ mod tests {
         assert_eq!(tab.target(9, Direction::Right), None);
         assert_eq!(tab.target(9, Direction::Next), Some(2));
         assert_eq!(tab.target(9, Direction::QuadrantRight), Some(3));
+    }
+    #[test]
+    fn split_sizes_use_axis_weights_pixels_and_clamped_dividers() {
+        let mut tree = Tree::leaf(1);
+        tree.split(1, 2, 3, Direction::Right);
+        tree.split(2, 4, 5, Direction::Right);
+        tree.split(4, 6, 7, Direction::Down);
+        tree.equalize();
+        let bounds = Rect {
+            width: 900.0,
+            height: 600.0,
+            ..Rect::UNIT
+        };
+        for (_, rect) in tree.layout(bounds) {
+            assert!((rect.width - 300.0).abs() < 0.001);
+        }
+        assert!(tree.resize(4, Direction::Left, 60.0, bounds));
+        let widths = tree.layout(bounds);
+        assert!((widths[1].1.width - 240.0).abs() < 0.001);
+        assert!((widths[2].1.width - 360.0).abs() < 0.001);
+        let (id, axis, parent) = tree.divider_at(bounds, [540.0, 20.0], 3.0).unwrap();
+        assert_eq!((id, axis), (5, Axis::Horizontal));
+        assert!((parent.width - 600.0).abs() < 0.001);
+        assert!(tree.set_ratio(id, 2.0));
+        assert!((tree.layout(bounds)[1].1.width - 540.0).abs() < 0.001);
+        assert!(!tree.set_ratio(id, f32::NAN));
+        assert!(!tree.resize(99, Direction::Left, 20.0, bounds));
     }
     #[test]
     fn serialized_workspace_preserves_layout_focus_and_directories() {

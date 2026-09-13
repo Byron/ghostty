@@ -400,5 +400,46 @@
     "covers": [
       "unicode.width"
     ]
+  },
+  {
+    "request": {
+      "id": "corpus/c1-reverse-index",
+      "cols": 4,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "0a1b8d"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.write",
+      "terminal.cursor"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000349,time_0,execs_0,orig_id_000792,src_000000,time_6222,execs_36037,op_havoc,rep_4"
+    ]
+  },
+  {
+    "request": {
+      "id": "corpus/c1-start-protected-area",
+      "cols": 2,
+      "rows": 1,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b96"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.write",
+      "terminal.cursor"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_000251,time_0,execs_0,orig_id_000643,src_000000,time_3824,execs_21884,op_havoc,rep_4",
+      "stream-cmin/id_000221,time_0,execs_0,orig_id_000594,src_000000,time_3206,execs_18299,op_havoc,rep_2"
+    ]
   }
 ]

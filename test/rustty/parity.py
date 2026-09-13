@@ -231,6 +231,21 @@ def input_requests():
         ):
             yield request(f"key/text-{flags}/{name}", f"\x1b[>{flags}u" if flags else "",
                           [dict(event, kind="key")], ["input.key"])
+    for flags in (0, 1, 3, 8, 24, 31):
+        for option in ("false", "true", "left", "right"):
+            for sides in range(16):
+                events = [
+                    {"kind": "key", "key": "key_e", "data": text.encode().hex(),
+                     "unshifted": 101, "modifiers": modifiers | sides << 6,
+                     "consumed_modifiers": consumed, "action": action,
+                     "macos_option_as_alt": option}
+                    for modifiers in (4, 5, 6, 12, 20, 36, 0xFC04)
+                    for consumed in (0, 4)
+                    for text in ("", "e", "é", "€", "èe")
+                    for action in ("press", "repeat", "release")
+                ]
+                yield request(f"option/{flags}/{option}/{sides}", f"\x1b[>{flags}u" if flags else "",
+                              events, ["input.key"])
     for mode in (9, 1000, 1002, 1003):
         for encoding in (0, 1005, 1006, 1015, 1016):
             setup = f"\x1b[?{mode}h" + (f"\x1b[?{encoding}h" if encoding else "")

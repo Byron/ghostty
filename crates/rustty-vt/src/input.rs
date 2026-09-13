@@ -113,6 +113,13 @@ pub struct KeyEvent {
     pub composing: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyEncodeOptions {
+    /// Whether the held macOS Option key acts as terminal Alt. The host resolves
+    /// left/right configuration using native modifier-side information.
+    pub macos_option_as_alt: bool,
+}
+
 impl KeyEvent {
     pub fn new(key: Key) -> Self {
         Self {
@@ -175,13 +182,23 @@ pub struct MouseEvent {
 }
 
 impl Terminal {
+    /// Encode an event whose Alt modifier already denotes terminal Alt.
     pub fn encode_key(&self, event: &KeyEvent) -> Vec<u8> {
+        self.encode_key_with_options(
+            event,
+            KeyEncodeOptions {
+                macos_option_as_alt: true,
+            },
+        )
+    }
+
+    pub fn encode_key_with_options(&self, event: &KeyEvent, options: KeyEncodeOptions) -> Vec<u8> {
         if self.modes.get(false, 2) {
             return Vec::new();
         }
         let flags = self.screen().kitty_keyboard.current();
         if flags != 0 {
-            return kitty_key(event, flags);
+            return kitty_key(event, flags, options);
         }
         if event.action == KeyAction::Release || event.composing {
             return Vec::new();
@@ -220,7 +237,7 @@ impl Terminal {
             };
         }
         if text.is_empty() {
-            return alt_prefix(self, event).unwrap_or_default();
+            return alt_prefix(self, event, options).unwrap_or_default();
         }
         if mods.control
             && let Some(mut cp) = single_char(text)
@@ -235,7 +252,7 @@ impl Terminal {
             }
             return format!("\x1b[{};{}u", cp as u32, sequence_mods.number()).into_bytes();
         }
-        if let Some(output) = alt_prefix(self, event) {
+        if let Some(output) = alt_prefix(self, event, options) {
             return output;
         }
         if cfg!(target_os = "macos") && mods.super_key {
@@ -389,8 +406,11 @@ fn physical_codepoint(key: Key) -> Option<char> {
     }
 }
 
-fn alt_prefix(terminal: &Terminal, event: &KeyEvent) -> Option<Vec<u8>> {
-    if !event.effective_modifiers().alt || !terminal.modes.dec(1036) {
+fn alt_prefix(terminal: &Terminal, event: &KeyEvent, options: KeyEncodeOptions) -> Option<Vec<u8>> {
+    if !event.effective_modifiers().alt
+        || !terminal.modes.dec(1036)
+        || cfg!(target_os = "macos") && !options.macos_option_as_alt
+    {
         return None;
     }
     let text = event.text.as_deref().unwrap_or("");
@@ -567,7 +587,7 @@ fn keypad(key: Key) -> Option<(char, char)> {
     })
 }
 
-fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
+fn kitty_key(event: &KeyEvent, flags: u8, options: KeyEncodeOptions) -> Vec<u8> {
     let all = flags & 8 != 0;
     let report_events = flags & 2 != 0;
     let modifier_key = matches!(
@@ -722,7 +742,7 @@ fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
     if flags & 16 != 0
         && event.action != KeyAction::Release
         && !event.modifiers.control
-        && !event.modifiers.alt
+        && !(event.modifiers.alt && (!cfg!(target_os = "macos") || options.macos_option_as_alt))
         && !event.modifiers.super_key
     {
         let mut chars = text.chars().filter(|&cp| !is_control(cp)).peekable();
@@ -746,6 +766,24 @@ fn kitty_key(event: &KeyEvent, flags: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn option_text_and_terminal_alt_have_distinct_legacy_and_kitty_output() {
+        let mut terminal = Terminal::new(80, 24, 0);
+        let mut event = KeyEvent::new(Key::Char('['));
+        event.text = Some("{".into());
+        event.modifiers.alt = true;
+        let option = KeyEncodeOptions::default();
+        assert_eq!(terminal.encode_key_with_options(&event, option), b"{");
+        assert_eq!(terminal.encode_key(&event), b"\x1b{");
+        terminal.feed(b"\x1b[>24u");
+        assert_eq!(
+            terminal.encode_key_with_options(&event, option),
+            b"\x1b[91;3;123u"
+        );
+        assert_eq!(terminal.encode_key(&event), b"\x1b[91;3u");
+    }
+
     #[test]
     fn key_modes_and_ime() {
         let mut t = Terminal::new(80, 24, 10);

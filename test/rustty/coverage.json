@@ -134,7 +134,7 @@
     {
       "id": "input.key",
       "status": "partial",
-      "remaining": "All named keys in the native legacy/Kitty tables, right-side modifiers, text fallback and IME are compared; host key mapping, modifier-side bits and macOS Option policy still require complete coverage."
+      "remaining": "All named keys in the native legacy/Kitty tables, text fallback, IME, modifier-side bits and macOS Option policies are compared; host event mapping and complete text/control combinations remain."
     },
     {
       "id": "input.mouse",

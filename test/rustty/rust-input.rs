@@ -1,6 +1,7 @@
 //! Input protocol adapter. Physical key names match the Zig public API.
 use rustty_vt::{
-    Key, KeyAction, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent, Terminal,
+    Key, KeyAction, KeyEncodeOptions, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent,
+    Terminal,
 };
 use serde::Deserialize;
 
@@ -15,6 +16,7 @@ pub struct Event {
     consumed_modifiers: u16,
     unshifted: u32,
     composing: bool,
+    macos_option_as_alt: String,
     focused: bool,
     button: Option<String>,
     x: f32,
@@ -32,6 +34,7 @@ impl Default for Event {
             consumed_modifiers: 0,
             unshifted: 0,
             composing: false,
+            macos_option_as_alt: "true".into(),
             focused: true,
             button: None,
             x: 0.,
@@ -44,9 +47,6 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
     let mods = modifiers(event.modifiers);
     match event.kind.as_str() {
         "key" => {
-            if event.modifiers & !63 != 0 || event.consumed_modifiers & !63 != 0 {
-                return Err("UnsupportedModifiers");
-            }
             let text = String::from_utf8(super::unhex(&event.data)?).map_err(|_| "InvalidText")?;
             let key = key(&event.key)?;
             let action = match event.action.as_str() {
@@ -55,17 +55,29 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
                 "release" => KeyAction::Release,
                 _ => return Err("InvalidAction"),
             };
-            Ok(terminal.encode_key(&KeyEvent {
-                key,
-                text: (!text.is_empty()).then_some(text),
-                modifiers: mods,
-                consumed_modifiers: modifiers(event.consumed_modifiers),
-                action,
-                unshifted: (event.unshifted != 0)
-                    .then(|| char::from_u32(event.unshifted))
-                    .flatten(),
-                composing: event.composing,
-            }))
+            let options = KeyEncodeOptions {
+                macos_option_as_alt: match event.macos_option_as_alt.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    "left" => event.modifiers & 256 == 0,
+                    "right" => event.modifiers & 256 != 0,
+                    _ => return Err("InvalidOptionAsAlt"),
+                },
+            };
+            Ok(terminal.encode_key_with_options(
+                &KeyEvent {
+                    key,
+                    text: (!text.is_empty()).then_some(text),
+                    modifiers: mods,
+                    consumed_modifiers: modifiers(event.consumed_modifiers),
+                    action,
+                    unshifted: (event.unshifted != 0)
+                        .then(|| char::from_u32(event.unshifted))
+                        .flatten(),
+                    composing: event.composing,
+                },
+                options,
+            ))
         }
         "mouse" => {
             if !event.x.is_finite() || !event.y.is_finite() {

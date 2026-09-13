@@ -27,6 +27,7 @@ const CAPABILITIES: &[&str] = &[
     "input.mouse",
     "input.focus-paste",
     "parser.raw-events",
+    "snapshot.cross-decode",
 ];
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -104,7 +105,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -134,6 +135,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     }
     let mut observations = Vec::new();
     let mut events: Vec<Value> = Vec::new();
+    let mut snapshots = Vec::new();
     for operation in &request.operations {
         let effects = match operation.op.as_str() {
             "write" => {
@@ -161,6 +163,24 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 let bytes =
                     input::encode(&terminal, operation.input.as_ref().ok_or("MissingInput")?)?;
                 events.push(json!({"kind":"input","data":hex(&bytes)}));
+                Vec::new()
+            }
+            "checkpoint" => {
+                observations.clear();
+                events.clear();
+                Vec::new()
+            }
+            "snapshot" => {
+                snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
+                    .map_err(|_| "SnapshotEncodeFailed")?));
+                Vec::new()
+            }
+            "restore" => {
+                terminal = rustty_vt::snapshot::decode(
+                    &unhex(&operation.data)?[..],
+                    rustty_vt::snapshot::DecodeOptions::default(),
+                )
+                .map_err(|_| "InvalidSnapshot")?;
                 Vec::new()
             }
             _ => return Err("UnsupportedOperation"),
@@ -191,6 +211,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     }
     result["observations"] = json!(observations);
     result["events"] = json!(events);
+    result["snapshots"] = json!(snapshots);
     Ok(result)
 }
 

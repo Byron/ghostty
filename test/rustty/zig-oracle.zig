@@ -9,11 +9,11 @@ const Allocator = std.mem.Allocator;
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
-    "terminal.write",    "terminal.resize", "terminal.reset",   "terminal.observe",
-    "terminal.cells",    "terminal.styles", "terminal.screens", "terminal.cursor",
-    "effects.pty",       "effects.title",   "effects.pwd",      "effects.bell",
-    "unicode.width",     "input.key",       "input.mouse",      "input.focus-paste",
-    "parser.raw-events",
+    "terminal.write",    "terminal.resize",       "terminal.reset",   "terminal.observe",
+    "terminal.cells",    "terminal.styles",       "terminal.screens", "terminal.cursor",
+    "effects.pty",       "effects.title",         "effects.pwd",      "effects.bell",
+    "unicode.width",     "input.key",             "input.mouse",      "input.focus-paste",
+    "parser.raw-events", "snapshot.cross-decode",
 };
 
 const Operation = struct {
@@ -87,6 +87,7 @@ const Response = struct {
     events: []Event = &.{},
     widths: []const i8 = &.{},
     parser: ?parser_adapter.Result = null,
+    snapshots: []const []const u8 = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -184,16 +185,13 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         .kitty_image_loading_limits = .direct,
     });
     defer t.deinit(alloc);
-    var stream = t.vtStream();
+    var stream = terminalStream(alloc, &t);
     defer stream.deinit();
     var ctx: Context = .{ .alloc = alloc };
     current = &ctx;
     defer current = null;
-    stream.handler.effects.write_pty = Context.write;
-    stream.handler.effects.bell = Context.bell;
-    stream.handler.effects.title_changed = Context.title;
-    stream.handler.effects.pwd_changed = Context.pwd;
     var observations: std.ArrayList(Observation) = .empty;
+    var snapshots: std.ArrayList([]const u8) = .empty;
     for (request.operations) |op| {
         if (std.mem.eql(u8, op.op, "write")) {
             const bytes = try hexDecode(alloc, op.data);
@@ -209,12 +207,49 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             try observations.append(alloc, try observe(alloc, &t));
         } else if (std.mem.eql(u8, op.op, "input")) {
             Context.append("input", try input_adapter.encode(alloc, &t, op.input orelse return error.MissingInput));
+        } else if (std.mem.eql(u8, op.op, "checkpoint")) {
+            observations.clearRetainingCapacity();
+            ctx.events.clearRetainingCapacity();
+        } else if (std.mem.eql(u8, op.op, "snapshot")) {
+            var continuation: std.Io.Writer.Allocating = .init(alloc);
+            try stream.writeContinuation(&continuation.writer);
+            var encoded: std.Io.Writer.Allocating = .init(alloc);
+            try vt.snapshot.encode(alloc, &encoded.writer, &t, .{
+                .continuation = if (continuation.written().len == 0) .ground else .{ .bytes = continuation.written() },
+            });
+            try snapshots.append(alloc, try hexEncode(alloc, encoded.written()));
+        } else if (std.mem.eql(u8, op.op, "restore")) {
+            var source: std.Io.Reader = .fixed(try hexDecode(alloc, op.data));
+            var decoded = vt.snapshot.decode(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
+            defer decoded.deinit(alloc);
+            stream.deinit();
+            t.deinit(alloc);
+            t = decoded.toOwned();
+            stream = terminalStream(alloc, &t);
+            switch (decoded.continuation) {
+                .ground => {},
+                .bytes => |bytes| stream.nextSlice(bytes),
+            }
         } else return error.UnsupportedOperation;
     }
     if (observe_terminal) try observations.append(alloc, try observe(alloc, &t));
     response.observations = observations.items;
     response.events = ctx.events.items;
+    response.snapshots = snapshots.items;
     return response;
+}
+
+fn terminalStream(alloc: Allocator, terminal: *vt.Terminal) vt.TerminalStream {
+    var result = vt.TerminalStream.init(.{
+        .allocator = alloc,
+        .handler = .init(terminal),
+        .continuation_max_bytes = 8 * 1024 * 1024,
+    });
+    result.handler.effects.write_pty = Context.write;
+    result.handler.effects.bell = Context.bell;
+    result.handler.effects.title_changed = Context.title;
+    result.handler.effects.pwd_changed = Context.pwd;
+    return result;
 }
 
 fn observe(alloc: Allocator, t: *vt.Terminal) !Observation {

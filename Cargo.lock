@@ -746,6 +746,11 @@ dependencies = [
 [[package]]
 name = "rustty-app"
 version = "0.1.0"
+dependencies = [
+ "rustty",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "rustty-font"

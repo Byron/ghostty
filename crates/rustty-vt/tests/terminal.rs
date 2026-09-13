@@ -77,6 +77,33 @@ fn graphemes_have_bounded_storage_and_track_width() {
 }
 
 #[test]
+fn combining_at_right_edge_respects_grapheme_and_wrap_modes() {
+    for grapheme in [false, true] {
+        for wrap in [false, true] {
+            let mut terminal = Terminal::new(2, 2, 0);
+            terminal.set_mode(true, 7, wrap);
+            terminal.set_mode(true, 2027, grapheme);
+            terminal.feed("ab\u{596}".as_bytes());
+            let cells = &terminal.screen().rows[0].cells;
+            if wrap || grapheme {
+                assert_eq!(cells[0].text, "a");
+                assert_eq!(cells[1].text, "b\u{596}");
+            } else {
+                assert_eq!(cells[0].text, "a\u{596}");
+                assert_eq!(cells[1].text, "b");
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_combining_without_wrap_is_ignored_at_column_zero() {
+    let mut terminal = Terminal::new(1, 2, 0);
+    terminal.feed("\x1b[?7la\u{596}".as_bytes());
+    assert_eq!(terminal.screen().rows[0].cells[0].text, "a");
+}
+
+#[test]
 fn erase_retains_background_but_clears_other_style_and_protects_cells() {
     let mut t = Terminal::new(5, 2, 0);
     t.feed(b"\x1b[1;31;44mabc\x1b[2K");

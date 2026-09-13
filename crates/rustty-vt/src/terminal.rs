@@ -754,7 +754,8 @@ impl Terminal {
         };
         let previous_col = if current.pending_wrap && self.modes.dec(7) {
             Some(current.col)
-        } else if !self.modes.dec(7)
+        } else if self.modes.dec(2027)
+            && !self.modes.dec(7)
             && current.col == right
             && !self.screen().rows[current.row].cells[right].text.is_empty()
         {

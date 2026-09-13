@@ -805,5 +805,59 @@
       "terminal.cells",
       "terminal.cursor"
     ]
+  },
+  {
+    "request": {
+      "id": "terminal/combining-right-edge/legacy",
+      "cols": 2,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b3f376c6162d696"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cells",
+      "terminal.cursor"
+    ],
+    "corpus_sources": [
+      "stream-cmin/id_003609,src_003119,time_470959,execs_1125737,op_havoc,rep_15"
+    ]
+  },
+  {
+    "request": {
+      "id": "terminal/combining-right-edge/grapheme",
+      "cols": 2,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b3f376c1b5b3f32303237686162d696"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cells",
+      "terminal.cursor"
+    ]
+  },
+  {
+    "request": {
+      "id": "terminal/combining-right-edge/column-zero",
+      "cols": 1,
+      "rows": 2,
+      "operations": [
+        {
+          "op": "write",
+          "data": "1b5b3f376c61d696"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.cells",
+      "terminal.cursor"
+    ]
   }
 ]

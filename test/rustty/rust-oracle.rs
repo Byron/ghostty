@@ -1,6 +1,7 @@
 //! Test-only NDJSON adapter for comparisons with the original Zig terminal.
 use rustty_vt::{
-    Color, Effect, EffectHandler, Screen, SemanticContent, Style, Terminal, clipboard, query,
+    Color, CursorShape, Effect, EffectHandler, Screen, SemanticContent, Style, Terminal, clipboard,
+    modes::Modes, query,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,6 +21,7 @@ const CAPABILITIES: &[&str] = &[
     "terminal.styles",
     "terminal.screens",
     "terminal.cursor",
+    "terminal.modes",
     "effects.pty",
     "effects.title",
     "effects.pwd",
@@ -53,6 +55,8 @@ struct Request {
     clipboard_write_enabled: bool,
     clipboard_write_limit: usize,
     host: HostOptions,
+    observe_modes: Vec<ModeTag>,
+    observe_mode_effects: bool,
 }
 
 impl Default for Request {
@@ -70,6 +74,8 @@ impl Default for Request {
             clipboard_write_enabled: true,
             clipboard_write_limit: 64 * 1024 * 1024,
             host: HostOptions::default(),
+            observe_modes: Vec::new(),
+            observe_mode_effects: false,
         }
     }
 }
@@ -96,6 +102,31 @@ struct Operation {
     host: Option<HostOptions>,
     #[serde(default)]
     cell_size: Option<[u32; 2]>,
+    #[serde(default)]
+    number: u16,
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    value: bool,
+    #[serde(default = "default_cursor_shape")]
+    cursor_shape: String,
+    #[serde(default = "default_cursor_blink")]
+    cursor_blink: Option<bool>,
+}
+
+fn default_cursor_shape() -> String {
+    "block".into()
+}
+
+fn default_cursor_blink() -> Option<bool> {
+    Some(false)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModeTag {
+    number: u16,
+    private: bool,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -512,7 +543,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[]})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -542,6 +573,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
         terminal.set_pixel_size(u32::from(request.cols) * 8, u32::from(request.rows) * 16);
     }
     let mut observations = Vec::new();
+    let mut mode_results = Vec::new();
     let mut host = Host::new(request)?;
     host.host.configure(&mut terminal);
     let mut snapshots = Vec::new();
@@ -572,6 +604,44 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             }
             "reset" => terminal.feed_with_handler(b"\x1bc", &mut host),
             "terminal_reset" => terminal.reset(),
+            "mode_set" => mode_results.push(terminal.modes.set(
+                operation.private,
+                operation.number,
+                operation.value,
+            )),
+            "mode_default" => mode_results.push(terminal.set_default_mode(
+                operation.private,
+                operation.number,
+                operation.value,
+            )),
+            "mode_raw_default" => mode_results.push(terminal.modes.set_default(
+                operation.private,
+                operation.number,
+                operation.value,
+            )),
+            "mode_save" | "mode_restore" => {
+                let known = terminal
+                    .modes
+                    .get_default(operation.private, operation.number)
+                    .is_some();
+                if operation.op == "mode_save" {
+                    terminal.modes.save(operation.private, operation.number);
+                } else {
+                    terminal.modes.restore(operation.private, operation.number);
+                }
+                mode_results.push(known);
+            }
+            "modes_reset" => terminal.modes.reset(),
+            "cursor_defaults" => {
+                let shape = match operation.cursor_shape.as_str() {
+                    "block" => CursorShape::Block,
+                    "bar" => CursorShape::Bar,
+                    "underline" => CursorShape::Underline,
+                    "block_hollow" => CursorShape::HollowBlock,
+                    _ => return Err("InvalidCursorShape"),
+                };
+                terminal.set_default_cursor(shape, operation.cursor_blink);
+            }
             "host_options" => {
                 host.host = DecodedHost::new(operation.host.as_ref().ok_or("MissingHostOptions")?)?;
                 host.host.configure(&mut terminal);
@@ -589,7 +659,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 }
             }
             "observe" => {
-                observations.push(observe(&terminal));
+                observations.push(observe(&terminal, request));
             }
             "input" => {
                 let bytes =
@@ -599,6 +669,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             "checkpoint" => {
                 observations.clear();
                 host.events.clear();
+                mode_results.clear();
             }
             "snapshot" => {
                 snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
@@ -650,12 +721,13 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
         }
     }
     if request.kind == "terminal" {
-        observations.push(observe(&terminal));
+        observations.push(observe(&terminal, request));
     }
     result["observations"] = json!(observations);
     result["events"] = json!(host.events);
     result["snapshots"] = json!(snapshots);
     result["snapshot_progress"] = json!(snapshot_progress);
+    result["mode_results"] = json!(mode_results);
     Ok(result)
 }
 
@@ -683,20 +755,41 @@ fn dimensions(cols: u16, rows: u16) -> Result<(), &'static str> {
     }
 }
 
-fn observe(terminal: &Terminal) -> Value {
+fn observe(terminal: &Terminal, request: &Request) -> Value {
     let m = &terminal.margins;
+    let modes: Vec<_> = request
+        .observe_modes
+        .iter()
+        .map(|tag| {
+            let default = terminal.modes.get_default(tag.private, tag.number);
+            json!({"number":tag.number,"private":tag.private,
+            "current":default.map(|_| terminal.modes.get(tag.private,tag.number)),
+            "saved":terminal.modes.get_saved(tag.private,tag.number),"default":default,
+            "report":terminal.modes.report(tag.private,tag.number),
+            "default_configurable":Modes::default_configurable(tag.private,tag.number)})
+        })
+        .collect();
+    let mode_effects = request.observe_mode_effects.then(|| {
+        let cursor = &terminal.screen().cursor;
+        json!({"cursor_visible":cursor.visible,"cursor_blink":cursor.blink,
+            "mouse_mode":terminal.mouse_mode,"mouse_format":terminal.mouse_format})
+    });
     json!({"cols":terminal.cols,"rows":terminal.rows,
         "alternate_active":terminal.is_alternate_screen(),
         "primary":screen(terminal.primary_screen()),
         "alternate":terminal.alternate_screen().map(screen),
         "margins":[m.top,m.bottom,m.left,m.right],
-        "title":terminal.title,"pwd":terminal.working_directory})
+        "title":terminal.title,"pwd":terminal.working_directory,
+        "modes":modes,"mode_effects":mode_effects})
 }
 
 fn screen(screen: &Screen) -> Value {
     let c = &screen.cursor;
     json!({"cursor":{"x":c.col,"y":c.row,"pending_wrap":c.pending_wrap,
-        "shape":format!("{:?}",c.shape).to_lowercase(),"style":style(c.style),
+        "shape":match c.shape {
+            CursorShape::Block => "block", CursorShape::Bar => "bar",
+            CursorShape::Underline => "underline", CursorShape::HollowBlock => "block_hollow",
+        },"style":style(c.style),
         "protected":c.protected,"semantic":semantic(c.semantic)},
         "rows":screen.rows.iter().map(row).collect::<Vec<_>>(),
         "history":screen.history.iter().map(row).collect::<Vec<_>>()})

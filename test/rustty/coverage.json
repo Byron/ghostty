@@ -19,12 +19,12 @@
     {
       "id": "terminal.reset",
       "status": "partial",
-      "remaining": "Default settings and all reset modes need full coverage."
+      "remaining": "Mode and cursor defaults, saved bits, RIS and direct resets are compared; color, graphics and other reset state still need complete coverage."
     },
     {
       "id": "terminal.observe",
       "status": "partial",
-      "remaining": "Saved cursor, mode stacks, palette, viewport and internal continuation are not yet compared."
+      "remaining": "Mode current/saved/default state and cursor/mouse transition effects are optionally observed; saved cursor, palette, viewport and complete continuation remain."
     },
     {
       "id": "terminal.cells",
@@ -44,12 +44,12 @@
     {
       "id": "terminal.cursor",
       "status": "partial",
-      "remaining": "Cursor is observed; visible/blink state, saved cursor and all motion cases remain."
+      "remaining": "Cursor shape, visibility/blink and configured reset defaults are compared; saved cursor and all motion cases remain."
     },
     {
       "id": "effects.pty",
       "status": "partial",
-      "remaining": "Host-supplied query answers and callback order are compared; all mode/color replies, disabled PTY writes and complete control contexts remain."
+      "remaining": "Host query decisions and mode reports are compared; all color replies, disabled PTY writes and complete control contexts remain."
     },
     {
       "id": "effects.title",
@@ -83,8 +83,8 @@
     },
     {
       "id": "terminal.modes",
-      "status": "pending",
-      "remaining": "All ANSI/DEC modes, stacks, private requests and saved state."
+      "status": "partial",
+      "remaining": "All current source modes, raw saved/default bits, guarded reset policy, DECRQM and basic stream/mouse/cursor transitions are compared; complete cross-mode interactions and screen/input behavior remain."
     },
     {
       "id": "terminal.colors",

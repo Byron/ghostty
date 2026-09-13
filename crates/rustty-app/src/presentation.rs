@@ -84,8 +84,22 @@ pub struct Activity {
     command_running: bool,
     title: TitleActivity,
     reported_progress: bool,
+    progress: Option<Progress>,
     progress_deadline: Option<Instant>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub state: u8,
+    pub value: Option<u8>,
+}
+impl Progress {
+    /// Ghostty shows an unspecified paused report as a full, stationary bar.
+    pub fn percentage(self) -> Option<u8> {
+        self.value.or((self.state == 4).then_some(100))
+    }
+}
+
 impl Activity {
     /// Underline inactive tabs/labels while a command or any progress report exists.
     pub fn is_active(&self) -> bool {
@@ -123,11 +137,15 @@ impl Activity {
 
     /// OSC 9;4 states: 0 removes, 1 sets, 2 errors, 3 is indeterminate, 4 pauses.
     /// Returns a per-pane stop transition, even if another pane is still active.
-    pub fn progress_reported(&mut self, state: u8, now: Instant) -> bool {
+    pub fn progress_reported(&mut self, state: u8, value: Option<u8>, now: Instant) -> bool {
         if state > 4 {
             return false;
         }
         let was_active = self.is_active();
+        self.progress = (state != 0).then_some(Progress {
+            state,
+            value: value.map(|value| value.min(100)),
+        });
         self.progress_deadline = (state != 0).then(|| now + PROGRESS_TIMEOUT);
         self.reported_progress = matches!(state, 1 | 3);
         was_active && !self.is_active()
@@ -137,13 +155,17 @@ impl Activity {
         self.progress_deadline
     }
 
+    pub fn progress(&self) -> Option<Progress> {
+        self.progress
+    }
+
     /// Call at the deadline, including for hidden panes, to expire stale progress.
     pub fn expire(&mut self, now: Instant) -> bool {
         if self
             .progress_deadline
             .is_some_and(|deadline| deadline <= now)
         {
-            self.progress_reported(0, now)
+            self.progress_reported(0, None, now)
         } else {
             false
         }
@@ -277,6 +299,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn progress_retains_percentages_and_stops_on_removal_expiry_or_exit() {
+        let now = Instant::now();
+        let mut activity = Activity::default();
+        for (state, value, expected) in [
+            (1, Some(42), Some(42)),
+            (2, Some(70), Some(70)),
+            (2, None, None),
+            (3, None, None),
+            (4, None, Some(100)),
+            (4, Some(30), Some(30)),
+            (1, Some(255), Some(100)),
+        ] {
+            activity.progress_reported(state, value, now);
+            assert_eq!(activity.progress().unwrap().percentage(), expected);
+            assert_eq!(activity.progress().unwrap().state, state);
+            assert_eq!(activity.deadline(), Some(now + PROGRESS_TIMEOUT));
+        }
+        activity.progress_reported(255, None, now);
+        assert_eq!(activity.progress().unwrap().percentage(), Some(100));
+        activity.command_started();
+        activity.command_finished();
+        assert!(activity.progress().is_some());
+        activity.progress_reported(0, None, now);
+        assert_eq!(activity.progress(), None);
+        assert_eq!(activity.deadline(), None);
+        activity.progress_reported(3, None, now);
+        activity.expire(now + PROGRESS_TIMEOUT);
+        assert_eq!(activity.progress(), None);
+        activity.progress_reported(1, Some(42), now);
+        activity.clear();
+        assert_eq!(activity.progress(), None);
+    }
+
+    #[test]
     fn cursor_blink_restarts_visible_until_typing_stops() {
         let started = Instant::now();
         let interval = Duration::from_millis(600);
@@ -363,10 +419,10 @@ mod tests {
             }
         }
         for (state, expected) in [(1, true), (2, false), (3, true), (4, false), (0, false)] {
-            pane.progress_reported(state, now);
+            pane.progress_reported(state, None, now);
             assert_eq!(pane.reported_active(), expected);
         }
-        pane.progress_reported(1, now);
+        pane.progress_reported(1, None, now);
         for title in ["[ ! ] Action Required", "[ . ] Action Required | project"] {
             pane.title_changed(title);
             assert!(!pane.reported_active());
@@ -400,18 +456,18 @@ mod tests {
         );
         assert!(second.is_active());
         assert!(!first.command_finished());
-        first.progress_reported(1, now);
+        first.progress_reported(1, None, now);
         let updated = now + Duration::from_secs(10);
-        first.progress_reported(4, updated);
+        first.progress_reported(4, None, updated);
         assert!(!first.expire(now + PROGRESS_TIMEOUT));
         assert_eq!(first.deadline(), Some(updated + PROGRESS_TIMEOUT));
         assert!(first.expire(updated + PROGRESS_TIMEOUT));
         assert!(!first.is_active());
         assert!(!first.expire(updated + PROGRESS_TIMEOUT));
         assert_eq!(first.deadline(), None);
-        second.progress_reported(3, now);
+        second.progress_reported(3, None, now);
         assert!(!second.command_finished());
-        assert!(second.progress_reported(0, now));
+        assert!(second.progress_reported(0, None, now));
         assert!(!second.clear());
     }
 

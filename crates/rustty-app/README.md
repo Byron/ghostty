@@ -47,6 +47,11 @@ do not count as active work. Each pane can trigger a short completion flash even
 while another pane remains busy. Quadrants share one directory label when every
 pane has the same basename; differing or missing directories keep individual labels.
 
+OSC 9;4 progress reports show a thin bar at the top of their pane, with percentages,
+red errors, orange pauses and animated indeterminate progress. Reports disappear
+when removed or after 15 seconds without an update. Ghostty's `progress-style = false`
+setting disables them. Determinate bars do not schedule animation frames.
+
 The terminal port is still undergoing differential compatibility work. A passing
 smoke test does not establish full libghostty-vt parity. The exhaustive coverage
 gate in `test/rustty/coverage.json` records unfinished protocol and snapshot work;

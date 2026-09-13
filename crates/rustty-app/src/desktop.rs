@@ -11,8 +11,8 @@ use rustty_app::{
     input,
     platform::{Platform, PlatformEvent},
     presentation::{
-        Activity, CompletionFlash, DirectoryLabel, FocusHint, TabAccent, common_directory_name,
-        cursor_blink_phase, directory_name,
+        Activity, CompletionFlash, DirectoryLabel, FocusHint, Progress, TabAccent,
+        common_directory_name, cursor_blink_phase, directory_name,
     },
     workspace::{self, Axis, Id, Peek, Rect, SavedPane, Tab, WindowState, Workspace},
 };
@@ -1115,8 +1115,12 @@ impl App {
                         pane.title = title.into_owned();
                     }
                 }
-                SessionEvent::Effect(vt::Effect::Progress { state, .. }) => {
-                    stopped |= pane.activity.progress_reported(state, Instant::now());
+                SessionEvent::Effect(vt::Effect::Progress { state, value }) => {
+                    stopped |= pane.activity.progress_reported(
+                        if config.progress_style { state } else { 0 },
+                        value,
+                        Instant::now(),
+                    );
                 }
                 SessionEvent::Effect(vt::Effect::CommandStart) => {
                     pane.running = Some(Instant::now());
@@ -1988,9 +1992,12 @@ impl App {
         {
             self.errors.push(error);
         }
-        for pane in self.panes.values() {
+        for pane in self.panes.values_mut() {
             if let Err(error) = pane.session.apply_config(&self.loaded.config) {
                 self.errors.push(error.to_string());
+            }
+            if !self.loaded.config.progress_style {
+                pane.activity.progress_reported(0, None, Instant::now());
             }
         }
         self.update_fonts(host.as_deref_mut());
@@ -2327,7 +2334,7 @@ impl App {
             .target_format;
         let (blink_on, blink_deadline) = cursor_blink_phase(host.cursor_blink_started, now);
         let mut needs_blink = false;
-        let mut graphics_deadline: Option<Instant> = None;
+        let mut animation_deadline: Option<Instant> = None;
         if host
             .navigation_warning
             .is_some_and(|(_, until)| until <= Instant::now())
@@ -2426,7 +2433,7 @@ impl App {
                                 ));
                             }
                             let flash =
-                                self.flash_opacity(tab.id, now, &mut graphics_deadline) * 0.45;
+                                self.flash_opacity(tab.id, now, &mut animation_deadline) * 0.45;
                             let fill = if selected {
                                 color
                             } else {
@@ -2605,8 +2612,9 @@ impl App {
                                 if let Some(next) = terminal.tick_graphics(now_ms) {
                                     let deadline = Instant::now()
                                         + Duration::from_millis(next.saturating_sub(now_ms));
-                                    graphics_deadline = Some(
-                                        graphics_deadline.map_or(deadline, |old| old.min(deadline)),
+                                    animation_deadline = Some(
+                                        animation_deadline
+                                            .map_or(deadline, |old| old.min(deadline)),
                                     );
                                 }
                             }
@@ -2799,6 +2807,22 @@ impl App {
                                 egui::StrokeKind::Inside,
                             );
                         }
+                        if config.progress_style
+                            && let Some(progress) =
+                                self.panes.get(&id).and_then(|p| p.activity.progress())
+                            && paint_progress(
+                                ui,
+                                id,
+                                rect,
+                                progress,
+                                accent,
+                                now.duration_since(self.started),
+                            )
+                        {
+                            let deadline = now + Duration::from_millis(33);
+                            animation_deadline =
+                                Some(animation_deadline.map_or(deadline, |old| old.min(deadline)));
+                        }
                     }
                     for (&id, &rect) in &host.rects {
                         if let Some(error) = self.failed_panes.get(&id) {
@@ -2887,7 +2911,7 @@ impl App {
                                         .get(id)
                                         .is_some_and(|pane| pane.activity.is_active())
                                 }),
-                                flash: self.flash_opacity(id, now, &mut graphics_deadline),
+                                flash: self.flash_opacity(id, now, &mut animation_deadline),
                             }
                             .paint(ui);
                         }
@@ -2911,7 +2935,7 @@ impl App {
                                     && (host.peek.is_some() || active.zoom == active.quadrant_zoom),
                             );
                             let flash = if label.shows_flash(true, false) {
-                                self.flash_opacity(id, now, &mut graphics_deadline)
+                                self.flash_opacity(id, now, &mut animation_deadline)
                             } else {
                                 0.0
                             };
@@ -3149,7 +3173,7 @@ impl App {
             &host.window,
         );
         host.frames += 1;
-        host.deadline = graphics_deadline;
+        host.deadline = animation_deadline;
         if let Some(deadline) = host.focus_hint.deadline(now) {
             host.deadline = Some(host.deadline.map_or(deadline, |old| old.min(deadline)));
         }
@@ -4369,6 +4393,65 @@ fn configure_ui_fonts(context: &egui::Context) {
     }
 }
 
+/// Returns whether a visible indeterminate bar needs another frame.
+fn paint_progress(
+    ui: &mut egui::Ui,
+    pane: Id,
+    bounds: egui::Rect,
+    progress: Progress,
+    accent: Color32,
+    elapsed: Duration,
+) -> bool {
+    // Keep a static fill separate from the focused split's same-color outline.
+    let bounds = bounds.shrink(2.0);
+    let bar = egui::Rect::from_min_size(bounds.min, Vec2::new(bounds.width(), 2.0));
+    if !ui.is_rect_visible(bar) {
+        return false;
+    }
+    let color = match progress.state {
+        2 => Color32::from_rgb(255, 59, 48),
+        4 => Color32::from_rgb(255, 149, 0),
+        _ => accent,
+    };
+    let percentage = progress.percentage();
+    let (offset, fraction) = if let Some(value) = percentage {
+        (0.0, f32::from(value) / 100.0)
+    } else {
+        ui.painter()
+            .rect_filled(bar, 0.0, color.gamma_multiply(0.3));
+        let phase = elapsed.as_secs_f32() * std::f32::consts::PI / 1.2;
+        (0.375 * (1.0 - phase.cos()), 0.25)
+    };
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(
+            bar.min + Vec2::new(offset * bar.width(), 0.0),
+            Vec2::new(fraction * bar.width(), bar.height()),
+        ),
+        0.0,
+        color,
+    );
+    let response = ui.interact(
+        bar,
+        egui::Id::new(("terminal-progress", pane)),
+        Sense::empty(),
+    );
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::ProgressIndicator);
+        node.set_label(match progress.state {
+            2 => "Terminal progress — Error",
+            4 => "Terminal progress — Paused",
+            3 => "Terminal progress — In progress",
+            _ => "Terminal progress",
+        });
+        if let Some(value) = percentage {
+            node.set_min_numeric_value(0.0);
+            node.set_max_numeric_value(100.0);
+            node.set_numeric_value(f64::from(value));
+        }
+    });
+    percentage.is_none()
+}
+
 fn ui_theme(config: &Config) -> egui::ThemePreference {
     match config.window_theme {
         config::WindowTheme::System => egui::ThemePreference::System,
@@ -4390,6 +4473,103 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn determinate_progress_does_not_blend_into_the_focused_split_outline() {
+        let context = egui::Context::default();
+        let bounds = egui::Rect::from_min_size(Pos2::new(20.0, 30.0), Vec2::new(200.0, 100.0));
+        let accent = Color32::from_rgb(200, 90, 230);
+        for percentage in [25, 50, 100] {
+            let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+                ui.painter().rect_stroke(
+                    bounds,
+                    0.0,
+                    egui::Stroke::new(1.5, accent),
+                    egui::StrokeKind::Inside,
+                );
+                assert!(!paint_progress(
+                    ui,
+                    1,
+                    bounds,
+                    Progress {
+                        state: 1,
+                        value: Some(percentage)
+                    },
+                    accent,
+                    Duration::ZERO
+                ));
+            });
+            output.textures_delta.clear();
+            let rectangles: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) => Some(rect),
+                    _ => None,
+                })
+                .collect();
+            let (outline, fill) = (rectangles[0], rectangles[1]);
+            assert!(
+                fill.rect.top() >= outline.rect.top() + outline.stroke.width,
+                "a static fill with the same accent must not cover the split outline"
+            );
+            assert!(fill.rect.left() >= outline.rect.left() + outline.stroke.width);
+            assert!(fill.rect.right() <= outline.rect.right() - outline.stroke.width);
+            assert_eq!(
+                fill.rect.width(),
+                (bounds.width() - 4.0) * f32::from(percentage) / 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn progress_bars_render_percentages_and_only_animate_without_a_value() {
+        let context = egui::Context::default();
+        let bounds = egui::Rect::from_min_size(Pos2::new(20.0, 30.0), Vec2::new(200.0, 100.0));
+        for (state, value, width, animated) in [
+            (1, Some(40), 78.4, false),
+            (2, Some(75), 147.0, false),
+            (4, None, 196.0, false),
+            (3, None, 49.0, true),
+            (2, None, 49.0, true),
+        ] {
+            let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+                assert_eq!(
+                    paint_progress(
+                        ui,
+                        1,
+                        bounds,
+                        Progress { state, value },
+                        Color32::BLUE,
+                        Duration::ZERO
+                    ),
+                    animated,
+                );
+            });
+            output.textures_delta.clear();
+            let fill = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) => Some(rect),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap();
+            assert_eq!(
+                fill.rect,
+                egui::Rect::from_min_size(bounds.min + Vec2::splat(2.0), Vec2::new(width, 2.0))
+            );
+            assert_eq!(
+                fill.fill,
+                match state {
+                    2 => Color32::from_rgb(255, 59, 48),
+                    4 => Color32::from_rgb(255, 149, 0),
+                    _ => Color32::BLUE,
+                }
+            );
+        }
+    }
 
     #[test]
     fn directory_badges_are_centered_and_readable_with_the_native_font() {

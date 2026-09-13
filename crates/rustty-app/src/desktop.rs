@@ -166,6 +166,7 @@ struct Host {
     peek: Option<Peek>,
     navigation_warning: Option<(Id, Instant)>,
     mouse: Pos2,
+    deferred_pointer: Option<Pos2>,
     mouse_button: Option<vt::MouseButton>,
     selection_drag: Option<input::SelectionDrag>,
     focused: bool,
@@ -800,6 +801,7 @@ impl App {
             peek: None,
             navigation_warning: None,
             mouse: Pos2::ZERO,
+            deferred_pointer: None,
             mouse_button: None,
             selection_drag: None,
             focused: false,
@@ -2190,6 +2192,11 @@ impl App {
         }
         let mut raw = host.egui.take_egui_input(&host.window);
         raw.viewport_id = host.viewport;
+        if !self.passive_mouse_motion(host, host.mouse)
+            && let Some(position) = host.deferred_pointer.take()
+        {
+            raw.events.push(egui::Event::PointerMoved(position));
+        }
         input::filter_egui_events(&mut raw, host.ui_input());
         let context = self.context.clone();
         let now = Instant::now();
@@ -3058,6 +3065,22 @@ impl App {
         }
         Ok(())
     }
+    fn passive_mouse_motion(&self, host: &Host, position: Pos2) -> bool {
+        !host.ui_input()
+            && host.peek.is_none()
+            && host.divider_drag.is_none()
+            && host.mouse_button.is_none()
+            && host.egui.is_pointer_in_window()
+            && !self.context.egui_is_using_pointer()
+            && [host.mouse, position].into_iter().all(|position| {
+                host.rects.iter().any(|(id, rect)| {
+                    rect.contains(position) && !self.failed_panes.contains_key(id)
+                }) && self
+                    .context
+                    .layer_id_at(position)
+                    .is_none_or(|layer| layer.order == egui::Order::Background)
+            })
+    }
     fn mouse(&mut self, host: &mut Host, action: vt::MouseAction, button: Option<vt::MouseButton>) {
         if let Some((id, axis, bounds)) = host.divider_drag {
             if action == vt::MouseAction::Release {
@@ -3174,7 +3197,15 @@ impl App {
             let bytes = terminal.encode_mouse(event);
             drop(terminal);
             self.write(id, bytes);
-            host.repaint();
+            // Mouse reporting does not change the local screen; PTY output will repaint it.
+            if action != vt::MouseAction::Move || !self.errors.is_empty() {
+                host.repaint();
+            }
+            return;
+        }
+        if action == vt::MouseAction::Move
+            && (host.mouse_button != Some(vt::MouseButton::Left) || host.selection_drag.is_none())
+        {
             return;
         }
         let screen = terminal.screen_mut();
@@ -3502,8 +3533,27 @@ impl ApplicationHandler<Event> for App {
                 smoke.input(host.frames);
             }
         }
+        let passive_motion = if let WindowEvent::CursorMoved { position, .. } = &event {
+            let position = position.to_logical::<f32>(host.window.scale_factor());
+            self.passive_mouse_motion(&host, Pos2::new(position.x, position.y))
+        } else {
+            false
+        };
         let response = host.egui.on_window_event(&host.window, &event);
-        if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
+        if passive_motion {
+            // Merely ignoring response.repaint leaves PointerMoved queued, which
+            // restarts egui's repaint loop when the next cursor-blink frame runs.
+            host.deferred_pointer = input::defer_pointer_move(host.egui.egui_input_mut());
+        } else if matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorLeft { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::Touch(_)
+        ) {
+            host.deferred_pointer = None;
+        }
+        if response.repaint && !passive_motion && !matches!(event, WindowEvent::RedrawRequested) {
             host.repaint();
         }
         match event {

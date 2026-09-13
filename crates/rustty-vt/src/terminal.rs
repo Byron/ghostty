@@ -1596,7 +1596,9 @@ impl Terminal {
                 | b'a'
                 | b'b'
                 | b'd'
-                | b'e',
+                | b'e'
+                | b'j'
+                | b'k',
                 2..,
             )
             | ([], b'H' | b'f' | b'r' | b's', 3..)
@@ -1611,10 +1613,10 @@ impl Terminal {
         let second = p.get(1).copied().unwrap_or(0);
         let private = i.first() == Some(&b'?');
         match (i, byte) {
-            ([], b'A') => self.cursor_vertical(count, false),
+            ([], b'A' | b'k') => self.cursor_vertical(count, false),
             ([], b'B') => self.cursor_vertical(count, true),
             ([], b'C') => self.cursor_right(count),
-            ([], b'D') => self.cursor_left(count),
+            ([], b'D' | b'j') => self.cursor_left(count),
             ([], b'E' | b'F') => {
                 self.cursor_vertical(count, byte == b'E');
                 self.carriage_return();

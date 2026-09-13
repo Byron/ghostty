@@ -77,6 +77,23 @@ and restored snapshots. Duplicate IDs, malformed option traversal, invalid
 empty-URI endings and cursor restoration now match the native matrix. Complete
 control contexts and storage behavior still need coverage.
 
+`--protocols --case protocol/graphics/placements/` observes stored Kitty
+placements with the optional `observe_graphics_placements` request flag. The
+existing `graphics` image JSON stays separate. The placement observation includes
+internal/external ID namespaces, requested source/size/offset values, anchors,
+and the native source rectangle, pixel size, grid size and clipped grid bounds.
+Both implementations sort their unordered placement storage by its complete key.
+
+`placement_requests.py` checks ordinary display, cursor movement, source clipping,
+aspect-ratio rounding, saturating dimensions, unavailable pixel geometry, resize,
+replacement/deletion, history, resets and screen switches. Retransmitting an
+explicit image deletes its old placements as soon as transmission starts, even
+if the replacement fails. Terminal clears reclaim unplaced image data while
+preserving placements outside the active area. Basic parent-orphan and virtual
+clear cases are included; full parent chains, placeholder rendering, margin
+clipping, pruning, transports and animation clocks remain incomplete. Rust's
+renderer and terminal now share integer placement sizing from `rustty-vt`.
+
 `--protocols --case protocol/charsets` retains a bounded matrix of ASCII, UK
 and DEC graphics mappings through G0–G3, cell-write single shifts, repeat and
 snapshot continuation. Combining characters and wide-cell spacers exercise

@@ -1618,7 +1618,11 @@ impl Terminal {
                 {
                     self.scroll_clear();
                 }
-                self.screen_mut().clear_visible_images();
+                let cell = [
+                    self.width_px / u32::from(self.cols),
+                    self.height_px / u32::from(self.rows),
+                ];
+                self.screen_mut().clear_visible_images(cell);
                 (0, rows)
             }
             3 => {
@@ -1647,6 +1651,10 @@ impl Terminal {
     }
 
     fn scroll_clear(&mut self) {
+        let cell = [
+            self.width_px / u32::from(self.cols),
+            self.height_px / u32::from(self.rows),
+        ];
         let cols = usize::from(self.cols);
         let count = self
             .screen()
@@ -1675,7 +1683,7 @@ impl Terminal {
             screen.cursor.row -= count;
         }
         screen.cursor.pending_wrap = false;
-        screen.clear_visible_images();
+        screen.clear_visible_images(cell);
         self.clamp_cursor();
         self.changed();
     }

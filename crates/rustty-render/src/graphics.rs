@@ -4,7 +4,7 @@ use crate::Paint;
 use rustty_font::FontMetrics;
 use rustty_vt::{
     Screen,
-    graphics::{Image, Placement},
+    graphics::{Image, Placement, PlacementId},
     screen::{Cell, Color as TerminalColor},
 };
 use std::{collections::HashMap, sync::Arc};
@@ -22,7 +22,7 @@ pub(super) struct CachedTile {
 
 struct Geometry {
     image: u32,
-    placement: u32,
+    placement: PlacementId,
     z: i32,
     source: [f32; 4],
     rect: [f32; 4],
@@ -150,7 +150,7 @@ impl Renderer {
 fn geometry(screen: &Screen, metrics: FontMetrics, options: &RenderOptions) -> Vec<Geometry> {
     let cell = [metrics.cell_width as f32, metrics.cell_height as f32];
     let mut result = Vec::new();
-    let mut virtual_origins: HashMap<(u32, u32), [i64; 2]> = HashMap::new();
+    let mut virtual_origins: HashMap<(u32, PlacementId), [i64; 2]> = HashMap::new();
     for (row_index, row) in screen.viewport().enumerate() {
         let mut run: Option<Run> = None;
         for (col, cell) in row.cells.iter().enumerate() {
@@ -259,12 +259,9 @@ fn geometry(screen: &Screen, metrics: FontMetrics, options: &RenderOptions) -> V
             placement.offset[0].min(metrics.cell_width - 1) as f32,
             placement.offset[1].min(metrics.cell_height - 1) as f32,
         ];
-        let size = pixel_size(
-            placement.requested_size,
-            [source[2], source[3]],
-            cell,
-            shift,
-        );
+        let size = placement
+            .pixel_size(image, [metrics.cell_width, metrics.cell_height])
+            .map(|v| v as f32);
         result.push(Geometry {
             image: image.id,
             placement: placement.placement_id,
@@ -295,33 +292,7 @@ fn valid_image(image: &Image) -> bool {
 }
 
 fn clipped_source(p: &Placement, image: &Image) -> [f32; 4] {
-    let x = p.source[0].min(image.width);
-    let y = p.source[1].min(image.height);
-    [
-        x as f32,
-        y as f32,
-        p.source[2].min(image.width - x) as f32,
-        p.source[3].min(image.height - y) as f32,
-    ]
-}
-
-fn pixel_size(requested: [u32; 2], source: [f32; 2], cell: [f32; 2], offset: [f32; 2]) -> [f32; 2] {
-    let [cols, rows] = requested;
-    let width =
-        ((cols as f64 * cell[0] as f64).min(u32::MAX as f64) - offset[0] as f64).max(0.0) as f32;
-    let height =
-        ((rows as f64 * cell[1] as f64).min(u32::MAX as f64) - offset[1] as f64).max(0.0) as f32;
-    let scale = |value: f32, numerator: f32, denominator: f32| {
-        (value as f64 * numerator as f64 / denominator as f64)
-            .round()
-            .min(u32::MAX as f64) as f32
-    };
-    match (cols, rows) {
-        (0, 0) => source,
-        (_, 0) => [width, scale(width, source[1], source[0])],
-        (0, _) => [scale(height, source[0], source[1]), height],
-        _ => [width, height],
-    }
+    p.source_rect(image).map(|v| v as f32)
 }
 
 // Intersect in destination coordinates while preserving the source mapping.
@@ -413,13 +384,13 @@ fn virtual_geometry(
     metrics: FontMetrics,
     options: &RenderOptions,
     result: &mut Vec<Geometry>,
-    origins: &mut HashMap<(u32, u32), [i64; 2]>,
+    origins: &mut HashMap<(u32, PlacementId), [i64; 2]>,
 ) {
     let id = run.p.low | (u32::from(run.p.high.unwrap_or(0)) << 24);
     let Some(p) = screen.graphics.placements.iter().find(|p| {
         p.virtual_placement
             && p.image_id == id
-            && (run.p.placement == 0 || run.p.placement == p.placement_id)
+            && (run.p.placement == 0 || PlacementId::External(run.p.placement) == p.placement_id)
     }) else {
         return;
     };
@@ -433,15 +404,15 @@ fn virtual_geometry(
             o[1] = o[1].min(row as i64);
         })
         .or_insert([run.col as i64, row as i64]);
-    let cols = if p.requested_size[0] == 0 {
+    let cols = if p.columns == 0 {
         image.width.div_ceil(metrics.cell_width)
     } else {
-        p.requested_size[0]
+        p.columns
     };
-    let rows = if p.requested_size[1] == 0 {
+    let rows = if p.rows == 0 {
         image.height.div_ceil(metrics.cell_height)
     } else {
-        p.requested_size[1]
+        p.rows
     };
     let [col, img_row] = [run.p.col.unwrap_or(0), run.p.row.unwrap_or(0)];
     if col >= cols || img_row >= rows {
@@ -509,14 +480,6 @@ mod tests {
 
     #[test]
     fn kitty_layers_preserve_straight_alpha_and_native_size() {
-        assert_eq!(
-            pixel_size([2, 0], [4.0, 2.0], [8.0, 16.0], [1.0, 3.0]),
-            [15.0, 8.0]
-        );
-        assert_eq!(
-            pixel_size([0, 2], [4.0, 2.0], [8.0, 16.0], [1.0, 3.0]),
-            [58.0, 29.0]
-        );
         let mut terminal = Terminal::new(10, 3, 100);
         transmit(&mut terminal, 1, "z=-1073741825");
         transmit(&mut terminal, 2, "z=-1,c=1,r=1");

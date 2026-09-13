@@ -86,6 +86,7 @@ struct Request {
     observe_colors: bool,
     observe_semantic: bool,
     observe_graphics: bool,
+    observe_graphics_placements: bool,
     dnd_events: bool,
     color_inputs: Vec<String>,
     page_layout: Option<page_layout_adapter::Request>,
@@ -111,6 +112,7 @@ impl Default for Request {
             observe_colors: false,
             observe_semantic: false,
             observe_graphics: false,
+            observe_graphics_placements: false,
             dnd_events: true,
             color_inputs: Vec::new(),
             page_layout: None,
@@ -947,7 +949,8 @@ fn observe(terminal: &Terminal, request: &Request) -> Value {
         "title":hex(terminal.title_bytes()),"pwd":hex(terminal.working_directory_bytes()),
         "modes":modes,"mode_effects":mode_effects,"colors":colors,
         "semantic":request.observe_semantic.then(|| semantic_adapter::observe(terminal)),
-        "graphics":request.observe_graphics.then(|| graphics_adapter::observe(terminal))})
+        "graphics":request.observe_graphics.then(|| graphics_adapter::observe(terminal)),
+        "graphics_placements":request.observe_graphics_placements.then(|| graphics_adapter::observe_placements(terminal))})
 }
 
 fn screen(screen: &Screen) -> Value {

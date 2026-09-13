@@ -97,6 +97,7 @@ const Request = struct {
     observe_colors: bool = false,
     observe_semantic: bool = false,
     observe_graphics: bool = false,
+    observe_graphics_placements: bool = false,
     dnd_events: bool = true,
     color_inputs: []const []const u8 = &.{},
     page_layout: ?page_layout_adapter.Request = null,
@@ -250,6 +251,7 @@ const Observation = struct {
     colors: ?Colors,
     semantic: ?semantic_adapter.State,
     graphics: ?graphics_adapter.State,
+    graphics_placements: ?graphics_adapter.Placements,
 };
 const Notification = struct { title: []const u8, body: []const u8 };
 const Progress = struct { state: u8, value: ?u8 };
@@ -479,7 +481,7 @@ pub fn main(init: std.process.Init) !void {
 fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     const previous_png = vt.sys.decode_png;
     defer vt.sys.decode_png = previous_png;
-    if (request.observe_graphics) graphics_adapter.install();
+    if (request.observe_graphics or request.observe_graphics_placements) graphics_adapter.install();
     var response: Response = .{ .id = request.id };
     if (std.mem.eql(u8, request.kind, "capabilities")) return response;
     if (std.mem.eql(u8, request.kind, "page_layout")) {
@@ -807,6 +809,7 @@ fn observe(alloc: Allocator, t: *vt.Terminal, request: Request) !Observation {
         .colors = if (request.observe_colors) observeColors(&t.colors) else null,
         .semantic = if (request.observe_semantic) try semantic_adapter.observe(alloc, t) else null,
         .graphics = if (request.observe_graphics) try graphics_adapter.observe(alloc, t) else null,
+        .graphics_placements = if (request.observe_graphics_placements) try graphics_adapter.observePlacements(alloc, t) else null,
     };
 }
 

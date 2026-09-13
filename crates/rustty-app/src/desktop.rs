@@ -167,7 +167,7 @@ struct Host {
     navigation_warning: Option<(Id, Instant)>,
     mouse: Pos2,
     mouse_button: Option<vt::MouseButton>,
-    selection_anchor: Option<vt::GridPoint>,
+    selection_drag: Option<input::SelectionDrag>,
     focused: bool,
     visible: bool,
     occluded: bool,
@@ -734,6 +734,8 @@ impl App {
         }
         let attributes = Window::default_attributes()
             .with_title("Rustty")
+            // AppKit consumes the activation click before any terminal/UI action.
+            .with_accepts_first_mouse(false)
             .with_decorations(!quick)
             .with_nonactivating_panel(quick)
             .with_visible(false)
@@ -798,7 +800,7 @@ impl App {
             navigation_warning: None,
             mouse: Pos2::ZERO,
             mouse_button: None,
-            selection_anchor: None,
+            selection_drag: None,
             focused: false,
             visible: !quick,
             occluded: false,
@@ -3190,21 +3192,19 @@ impl App {
                         self.errors.push(error);
                     }
                 } else {
-                    host.selection_anchor = Some(point);
+                    host.selection_drag = Some(input::SelectionDrag::new(point, host.mouse));
                     screen.selection = None;
                 }
             } else if action == vt::MouseAction::Move
                 && host.mouse_button == Some(vt::MouseButton::Left)
             {
-                if let Some(start) = host.selection_anchor {
-                    screen.selection = Some(vt::Selection {
-                        start,
-                        end: point,
-                        rectangular: host.modifiers.state().alt_key(),
-                    });
+                if let Some(drag) = &mut host.selection_drag
+                    && let Some(selection) =
+                        drag.update(host.mouse, point, host.modifiers.state().alt_key())
+                {
+                    screen.selection = Some(selection);
                 }
-            } else if action == vt::MouseAction::Release {
-                host.selection_anchor = None;
+            } else if action == vt::MouseAction::Release && host.selection_drag.take().is_some() {
                 let copy = config.copy_on_select;
                 let text = screen.selection_text();
                 drop(terminal);
@@ -3568,6 +3568,8 @@ impl ApplicationHandler<Event> for App {
                     host.modifiers = Modifiers::default();
                     host.consumed_keys.clear();
                     host.divider_drag = None;
+                    host.mouse_button = None;
+                    host.selection_drag = None;
                     host.composing = false;
                     host.preedit.clear();
                     host.preedit_selection = None;
@@ -3717,6 +3719,7 @@ impl ApplicationHandler<Event> for App {
                 );
                 if state == ElementState::Released {
                     host.mouse_button = None;
+                    host.selection_drag = None;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if !host.ui_input() => {

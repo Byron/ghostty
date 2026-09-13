@@ -86,7 +86,7 @@ minimized inherited failures with their original corpus source identifiers.
 `--grid` compares direct selection, literal search and tracked-reference APIs.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,
 `clear_selection`, `select_word`, `select_word_between`, `select_line`,
-`select_all`, `select_output`, `adjust_selection`, `track`, `untrack`, `viewport`, `limits`, `search`,
+`select_all`, `select_output`, `adjust_selection`, `format_selection`, `track`, `untrack`, `viewport`, `limits`, `search`,
 `search_needle`, `search_feed`, `search_viewport` and `observe`.
 Points name `active`, `viewport`, `screen` or `history` coordinates. Observations
 translate each implementation's own handles to those coordinates and include
@@ -129,6 +129,19 @@ printed spaces; down skips unwritten rows. Direct page motion clamps only at
 its destination, while down retains clamps from intervening narrow pages.
 The 150 fixtures passed 450 delivery comparisons, including reversed and
 collapsed endpoints, wide spacers, hard/soft wraps, history and restored pages.
+
+`--grid --case grid/selection-format/` compares selection exports byte-for-byte
+using `format_selection`. Its `format` options select `plain`, `vt` or `html`
+in `emit`, with independent `unwrap` and `trim` flags. The `formatted` result
+contains hexadecimal bytes. `Screen::format_selection` exports content;
+`Terminal::format_selection` also emits the palette for styled output and the
+current cursor style/hyperlink for VT, matching native formatter defaults.
+HTML retains native page wrappers, escaping and hyperlink identity boundaries;
+VT retains native SGR ordering. The 121 fixtures exercise all 12 option
+combinations, including rectangles, wide/grapheme cells, colors and attributes,
+opaque hyperlink bytes, empty rows, cross-page wrapping and restored mixed-width
+pages. These are selection exports; full terminal-state serialization and
+formatter coordinate maps remain separate requirements.
 
 Literal search formats each retained page separately and follows native active
 and history traversal, including repeated soft-wrap matches and trimmed blank

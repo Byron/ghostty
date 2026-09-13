@@ -639,79 +639,8 @@ impl Screen {
     }
 
     pub fn selection_text(&self) -> Option<String> {
-        let selection = self.selection?;
-        let rows: Vec<_> = self.all_rows().collect();
-        let mut first = rows.iter().position(|r| r.id == selection.start.row)?;
-        let mut last = rows.iter().position(|r| r.id == selection.end.row)?;
-        let mut left = selection.start.col;
-        let mut right = selection.end.col;
-        if (first, left) > (last, right) {
-            std::mem::swap(&mut first, &mut last);
-            std::mem::swap(&mut left, &mut right);
-        }
-        if !selection.rectangular
-            && rows[last]
-                .cells
-                .get(right)
-                .is_some_and(|cell| cell.spacer_head)
-            && last + 1 < rows.len()
-        {
-            last += 1;
-            right = 0;
-        }
-        let mut result = String::new();
-        let mut blank_rows = 0;
-        let mut blank_cells = 0;
-        for (i, row) in rows.iter().enumerate().take(last + 1).skip(first) {
-            let mut start = if selection.rectangular {
-                left.min(right)
-            } else if i == first {
-                left
-            } else {
-                0
-            };
-            let end = if selection.rectangular {
-                left.max(right).saturating_add(1)
-            } else if i == last {
-                right.saturating_add(1)
-            } else {
-                row.cells.len()
-            };
-            start = start.min(row.cells.len());
-            if start > 0
-                && let Some(cell) = row.cells.get(start)
-            {
-                if cell.spacer_head {
-                    continue;
-                }
-                if cell.width == 0 {
-                    start -= 1;
-                }
-            }
-            let cells = &row.cells[start..end.min(row.cells.len())];
-            if cells.iter().all(|cell| cell.text.is_empty()) {
-                blank_rows += 1;
-                continue;
-            }
-            result.extend(std::iter::repeat_n('\n', blank_rows));
-            blank_rows = usize::from(!row.wrapped);
-            if !row.wrap_continuation {
-                blank_cells = 0;
-            }
-            for cell in cells {
-                if cell.width == 0 || cell.spacer_head {
-                    continue;
-                }
-                if cell.text.is_empty() || cell.text.starts_with(' ') {
-                    blank_cells += 1;
-                    continue;
-                }
-                result.extend(std::iter::repeat_n(' ', blank_cells));
-                blank_cells = 0;
-                result.push_str(&cell.text);
-            }
-        }
-        Some(result)
+        let bytes = self.format_selection(self.selection?, crate::formatter::Options::default())?;
+        Some(String::from_utf8(bytes).expect("plain cell formatting is valid UTF-8"))
     }
 
     fn physical_row_mut(&mut self, absolute: usize) -> &mut Row {

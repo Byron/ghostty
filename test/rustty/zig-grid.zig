@@ -31,6 +31,7 @@ pub const Operation = struct {
     trim_line: ?bool = null,
     semantic_prompt_boundary: ?bool = null,
     adjustment: ?vt.Selection.Adjustment = null,
+    format: ?struct { emit: vt.formatter.Format = .plain, unwrap: bool = true, trim: bool = true } = null,
 };
 const Location = struct {
     screen: ?[2]u32,
@@ -60,6 +61,7 @@ pub const Result = struct {
     viewport_top: ?[2]u32,
     selection: ?Selection,
     selection_result: ?Bounds,
+    formatted: ?[]const u8,
     tracked: []const Tracked,
 };
 const Handle = struct {
@@ -99,6 +101,8 @@ pub const Context = struct {
         const screen = terminal.screens.active;
         if (std.mem.eql(u8, op.action, "observe")) {
             // Reading is explicit so writes retain their original boundaries.
+        } else if (std.mem.eql(u8, op.action, "format_selection")) {
+            if (screen.selection == null) status = "no_value";
         } else if (std.mem.eql(u8, op.action, "select")) {
             if (screen.pages.pin(op.start.native())) |start| {
                 if (screen.pages.pin(op.end.native())) |end| {
@@ -241,6 +245,16 @@ pub const Context = struct {
             }
         }
         const active = terminal.screens.active;
+        const formatted = if (std.mem.eql(u8, op.action, "format_selection")) formatted: {
+            const selection = active.selection orelse break :formatted null;
+            const opts: @TypeOf(op.format.?) = op.format orelse .{};
+            var formatter: vt.formatter.TerminalFormatter = .init(terminal, .{ .emit = opts.emit, .unwrap = opts.unwrap, .trim = opts.trim });
+            formatter.content = .{ .selection = selection };
+            var output: std.Io.Writer.Allocating = .init(alloc);
+            defer output.deinit();
+            try formatter.format(&output.writer);
+            break :formatted try hex(alloc, output.written());
+        } else null;
         const selection = if (active.selection) |selection| sel: {
             const start = location(active, selection.start());
             const end = location(active, selection.end());
@@ -259,6 +273,7 @@ pub const Context = struct {
             .viewport_top = coordinate(active, .screen, active.pages.getTopLeft(.viewport)),
             .selection = selection,
             .selection_result = selection_result,
+            .formatted = formatted,
             .tracked = tracked,
         };
     }

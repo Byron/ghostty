@@ -44,6 +44,7 @@ pub struct Operation {
     trim_line: Option<bool>,
     semantic_prompt_boundary: Option<bool>,
     adjustment: Option<Adjustment>,
+    format: Option<rustty_vt::formatter::Options>,
 }
 
 struct Handle {
@@ -71,6 +72,11 @@ impl Context {
         let columns = terminal.cols;
         match op.action.as_str() {
             "observe" => {}
+            "format_selection" => {
+                if terminal.screen().selection.is_none() {
+                    status = "no_value";
+                }
+            }
             "select" => {
                 let screen = terminal.screen_mut();
                 match (
@@ -218,6 +224,17 @@ impl Context {
             }
             _ => return Err("UnsupportedGridAction"),
         }
+        let formatted = if op.action == "format_selection" {
+            terminal
+                .screen()
+                .selection
+                .and_then(|selection| {
+                    terminal.format_selection(selection, op.format.unwrap_or_default())
+                })
+                .map(|bytes| super::hex(&bytes))
+        } else {
+            None
+        };
         let screen = terminal.screen();
         let selection = screen.selection.map(|selection| {
             json!({"start": location(screen, selection.start), "end": location(screen, selection.end),
@@ -236,6 +253,7 @@ impl Context {
         }).collect::<Vec<_>>();
         Ok(
             json!({"action": op.action, "status": status, "matches": matches, "search_needle": search_needle,
+            "formatted": formatted,
             "active_screen": if terminal.is_alternate_screen() { "alternate" } else { "primary" },
             "viewport_top": [0, screen.history.len().saturating_sub(screen.viewport_offset)],
             "selection": selection, "selection_result": selection_result, "tracked": handles}),

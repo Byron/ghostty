@@ -1,9 +1,39 @@
 //! Shared tab, pane, and quadrant presentation rules from Ghostty Local.
+use crate::workspace::Id;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub const PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
 pub const FLASH_DURATION: Duration = Duration::from_millis(1200);
+
+/// A focus change shows its directory once, until typing or a single expiry.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FocusHint {
+    pane: Option<Id>,
+    expires: Option<Instant>,
+}
+impl FocusHint {
+    pub fn focus(&mut self, pane: Option<Id>, now: Instant) -> bool {
+        if self.pane == pane {
+            return false;
+        }
+        self.pane = pane;
+        self.expires = pane.map(|_| now + Duration::from_secs(2));
+        true
+    }
+
+    pub fn dismiss(&mut self) {
+        self.expires = None;
+    }
+
+    pub fn visible(&self, pane: Id, now: Instant) -> bool {
+        self.pane == Some(pane) && self.deadline(now).is_some()
+    }
+
+    pub fn deadline(&self, now: Instant) -> Option<Instant> {
+        self.expires.filter(|&expires| now < expires)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TitleActivity {
@@ -201,7 +231,7 @@ impl DirectoryLabel {
     }
 
     pub fn large(&self, large_inactive: bool) -> bool {
-        !self.focused && large_inactive
+        self.focused || large_inactive
     }
 
     pub fn shows_activity(&self, active: bool) -> bool {
@@ -235,6 +265,37 @@ impl TabAccent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_hint_expires_or_clears_on_input_without_rearming_on_hover() {
+        let now = Instant::now();
+        let mut hint = FocusHint::default();
+        assert!(hint.focus(Some(1), now));
+        assert!(hint.visible(1, now));
+        let expiry = now + Duration::from_secs(2);
+        assert_eq!(hint.deadline(now), Some(expiry));
+        assert!(!hint.focus(Some(1), now + Duration::from_secs(1)));
+        assert_eq!(hint.deadline(now), Some(expiry));
+        assert!(!hint.visible(1, expiry));
+        assert_eq!(hint.deadline(expiry), None);
+        assert!(!hint.focus(Some(1), expiry));
+        assert!(!hint.visible(1, expiry));
+
+        assert!(hint.focus(Some(2), expiry));
+        assert!(!hint.visible(1, expiry));
+        assert!(hint.visible(2, expiry));
+        hint.dismiss();
+        assert!(!hint.focus(Some(2), expiry));
+        assert!(!hint.visible(2, expiry));
+        assert_eq!(hint.deadline(expiry), None);
+
+        assert!(hint.focus(None, expiry));
+        assert!(hint.focus(Some(2), expiry));
+        assert!(hint.visible(2, expiry));
+        assert!(hint.focus(None, expiry));
+        assert!(!hint.visible(2, expiry));
+        assert_eq!(hint.deadline(expiry), None);
+    }
 
     #[test]
     fn work_count_distinguishes_commands_spinners_progress_and_waiting() {
@@ -333,7 +394,8 @@ mod tests {
         for (window_focused, show_focused) in [(false, false), (true, true)] {
             let label = DirectoryLabel::new(name(), true, window_focused, show_focused).unwrap();
             assert!(label.focused);
-            assert!(!label.large(true));
+            assert!(label.large(true));
+            assert!(label.large(false));
             assert!(!label.shows_activity(true));
             assert!(!label.shows_flash(true, false));
             assert!(label.shows_flash(true, true));

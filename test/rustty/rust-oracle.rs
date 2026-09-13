@@ -122,6 +122,9 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     }
     dimensions(request.cols, request.rows)?;
     let mut terminal = Terminal::new(request.cols, request.rows, usize::MAX);
+    if request.kind == "input" {
+        terminal.set_pixel_size(u32::from(request.cols) * 8, u32::from(request.rows) * 16);
+    }
     let mut observations = Vec::new();
     let mut events: Vec<Value> = Vec::new();
     for operation in &request.operations {

@@ -192,10 +192,11 @@ def input_requests():
     for mode in (9, 1000, 1002, 1003):
         for encoding in (0, 1005, 1006, 1015, 1016):
             setup = f"\x1b[?{mode}h" + (f"\x1b[?{encoding}h" if encoding else "")
-            for button in (None, "left", "middle", "right", "four", "five", "six", "seven"):
+            for button in (None, "left", "middle", "right", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven"):
                 events = [{"kind": "mouse", "button": button, "action": action, "modifiers": modifiers, "x": x, "y": y}
                           for action in ("press", "release", "motion") for modifiers in (0, 1, 2, 4, 7)
-                          for x, y in ((0, 0), (9, 17), (639, 383), (640, 384), (2000, 4000))]
+                          for x, y in ((0, 0), (9, 17), (639, 383), (640, 384), (2000, 4000),
+                                       (-1, -1), (-0.25, 0), (1.5, 2.5), (640.25, 384.25))]
                 yield request(f"mouse/{mode}/{encoding}/{button}", setup, events, ["input.mouse"])
     for enabled in (False, True):
         yield request(f"focus/{enabled}", "\x1b[?1004h" if enabled else "",

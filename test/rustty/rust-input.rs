@@ -68,7 +68,7 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
             }))
         }
         "mouse" => {
-            if !event.x.is_finite() || !event.y.is_finite() || event.x < 0. || event.y < 0. {
+            if !event.x.is_finite() || !event.y.is_finite() {
                 return Err("UnsupportedCoordinates");
             }
             let button = match event.button.as_deref() {
@@ -80,6 +80,10 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
                 Some("five") => Some(MouseButton::WheelDown),
                 Some("six") => Some(MouseButton::WheelLeft),
                 Some("seven") => Some(MouseButton::WheelRight),
+                Some("eight") => Some(MouseButton::Extra(0)),
+                Some("nine") => Some(MouseButton::Extra(1)),
+                Some("ten") => Some(MouseButton::Extra(2)),
+                Some("eleven") => Some(MouseButton::Extra(3)),
                 _ => return Err("InvalidButton"),
             };
             let action = match event.action.as_str() {
@@ -94,8 +98,8 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
                 modifiers: mods,
                 col: (event.x / 8.).floor() as usize,
                 row: (event.y / 16.).floor() as usize,
-                x: event.x.floor() as u32,
-                y: event.y.floor() as u32,
+                x: f64::from(event.x),
+                y: f64::from(event.y),
             }))
         }
         "focus" => Ok(terminal.encode_focus(event.focused)),

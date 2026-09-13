@@ -326,9 +326,13 @@ table admission, string-pool allocation, duplicate values and wire IDs, invalid
 entries, collision limits and the linked-cell map limit. Explicit IDs allocate
 before URIs; discarded entries retain their strings until the next successful
 allocation reaches set admission. Duplicate values also need temporary string
-space. The suite keeps the native bitmap bounds panic for oversized strings in
-`snapshot/reference-limit/hyperlinks/`, after the returning wire cases. These
-failures remain part of unfiltered `--snapshot-wire` and `--thorough` runs.
+space. Oversized strings exposed a native bitmap bounds panic: the large-span
+allocator checked intermediate words but not the final word. The reference now
+rejects that allocation without changing the bitmap, allowing snapshot decoding
+to discard the oversized hyperlink and continue. All 222 fixtures (660 delivery
+comparisons) pass, including those formerly under
+`snapshot/reference-limit/hyperlinks/`. The original failure remains recorded;
+passing cases measure the repaired native reference.
 
 `--protocols` compares terminal-level DCS replies and host notifications.
 Capability names are read

@@ -6,3 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "Terminal font discovery, shaping, and glyph rasterization."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-text.workspace = true
+objc2-core-graphics.workspace = true
+objc2-core-foundation.workspace = true

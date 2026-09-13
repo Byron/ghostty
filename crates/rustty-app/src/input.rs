@@ -33,27 +33,7 @@ pub fn terminal_key(
     let unmodified = event.key_without_modifiers();
     let key = match &unmodified {
         Key::Character(text) => vt::Key::Char(text.chars().next()?),
-        Key::Named(key) => match key {
-            NamedKey::Enter => vt::Key::Enter,
-            NamedKey::Tab => vt::Key::Tab,
-            NamedKey::Backspace => vt::Key::Backspace,
-            NamedKey::Escape => vt::Key::Escape,
-            NamedKey::ArrowUp => vt::Key::Up,
-            NamedKey::ArrowDown => vt::Key::Down,
-            NamedKey::ArrowLeft => vt::Key::Left,
-            NamedKey::ArrowRight => vt::Key::Right,
-            NamedKey::Home => vt::Key::Home,
-            NamedKey::End => vt::Key::End,
-            NamedKey::PageUp => vt::Key::PageUp,
-            NamedKey::PageDown => vt::Key::PageDown,
-            NamedKey::Insert => vt::Key::Insert,
-            NamedKey::Delete => vt::Key::Delete,
-            NamedKey::Shift => vt::Key::Shift,
-            NamedKey::Control => vt::Key::Control,
-            NamedKey::Alt => vt::Key::Alt,
-            NamedKey::Super => vt::Key::Super,
-            key => vt::Key::Function(format!("{key:?}").strip_prefix('F')?.parse().ok()?),
-        },
+        Key::Named(key) => terminal_named_key(*key)?,
         _ => return None,
     };
     let key = match event.physical_key {
@@ -94,6 +74,31 @@ pub fn terminal_key(
         },
         unshifted: unmodified.to_text().and_then(|text| text.chars().next()),
         composing,
+    })
+}
+
+fn terminal_named_key(key: NamedKey) -> Option<vt::Key> {
+    Some(match key {
+        NamedKey::Space => vt::Key::Char(' '),
+        NamedKey::Enter => vt::Key::Enter,
+        NamedKey::Tab => vt::Key::Tab,
+        NamedKey::Backspace => vt::Key::Backspace,
+        NamedKey::Escape => vt::Key::Escape,
+        NamedKey::ArrowUp => vt::Key::Up,
+        NamedKey::ArrowDown => vt::Key::Down,
+        NamedKey::ArrowLeft => vt::Key::Left,
+        NamedKey::ArrowRight => vt::Key::Right,
+        NamedKey::Home => vt::Key::Home,
+        NamedKey::End => vt::Key::End,
+        NamedKey::PageUp => vt::Key::PageUp,
+        NamedKey::PageDown => vt::Key::PageDown,
+        NamedKey::Insert => vt::Key::Insert,
+        NamedKey::Delete => vt::Key::Delete,
+        NamedKey::Shift => vt::Key::Shift,
+        NamedKey::Control => vt::Key::Control,
+        NamedKey::Alt => vt::Key::Alt,
+        NamedKey::Super => vt::Key::Super,
+        key => vt::Key::Function(format!("{key:?}").strip_prefix('F')?.parse().ok()?),
     })
 }
 
@@ -169,6 +174,22 @@ pub fn chord_held(chord: config::Modifiers, current: config::Modifiers) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spacebar_reaches_legacy_and_kitty_terminal_encoders() {
+        let key = terminal_named_key(NamedKey::Space).expect("spacebar is printable input");
+        let mut event = vt::KeyEvent::new(key);
+        let mut terminal = vt::Terminal::new(20, 2, 0);
+        assert_eq!(terminal.encode_key(&event), b" ");
+        event.action = vt::KeyAction::Repeat;
+        assert_eq!(terminal.encode_key(&event), b" ");
+        event.action = vt::KeyAction::Release;
+        assert!(terminal.encode_key(&event).is_empty());
+        event.action = vt::KeyAction::Press;
+        event.modifiers.control = true;
+        assert_eq!(terminal.encode_key(&event), [0]);
+        terminal.feed(b"\x1b[>1u");
+        assert_eq!(terminal.encode_key(&event), b"\x1b[32;5u");
+    }
     #[test]
     fn aliases_and_modifier_release_preserve_peek_chord() {
         assert_eq!(normalize_name("key_a"), "a");

@@ -450,6 +450,7 @@ fn enqueue(
 }
 
 fn apply_appearance(terminal: &mut Terminal, config: &Config) {
+    terminal.clipboard_write_limit = config.clipboard_write_limit_bytes.unwrap_or(usize::MAX);
     let palette: Vec<_> = config
         .palette
         .iter()
@@ -709,8 +710,10 @@ mod tests {
             .feed("\r\nline".repeat(40).as_bytes());
         assert_eq!(session.terminal().unwrap().screen().history.len(), 4);
         config.scrollback_limit_lines = Some(1);
+        config.clipboard_write_limit_bytes = Some(17);
         session.apply_config(&config).unwrap();
         assert_eq!(session.terminal().unwrap().screen().history.len(), 1);
+        assert_eq!(session.terminal().unwrap().clipboard_write_limit, 17);
         config.scrollback_limit_bytes = Some(0);
         session.apply_config(&config).unwrap();
         assert!(session.terminal().unwrap().screen().history.is_empty());

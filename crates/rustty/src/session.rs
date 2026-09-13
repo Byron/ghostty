@@ -47,7 +47,7 @@ pub enum SessionEvent {
 
 enum IoCommand {
     Write(Vec<u8>),
-    Resize(PtySize),
+    Resize { size: PtySize, reply: Vec<u8> },
     Close,
 }
 
@@ -98,7 +98,7 @@ impl Session {
         let command = command(config, &options)?;
         let terminfo_name = command
             .get_env("TERM")
-            .map(|name| name.to_string_lossy().into_owned());
+            .map(|name| name.as_encoded_bytes().to_vec());
         // Prepare handles before launching a child: any failure here has no
         // process to kill or reap. Retaining the slave keeps the reader from
         // seeing EOF while the workers are starting.
@@ -138,7 +138,10 @@ impl Session {
                             writer_pending.release(bytes.len());
                             result
                         }
-                        IoCommand::Resize(size) => master.resize(size).map_err(error),
+                        IoCommand::Resize { size, reply } => master
+                            .resize(size)
+                            .map_err(error)
+                            .and_then(|()| writer.write_all(&reply)),
                         IoCommand::Close => break,
                     };
                     if let Err(e) = result {
@@ -286,16 +289,36 @@ impl Session {
         {
             return Ok(());
         }
-        self.input
-            .send(IoCommand::Resize(PtySize {
-                cols,
-                rows,
-                pixel_width: width_px,
-                pixel_height: height_px,
-            }))
-            .map_err(error)?;
-        terminal.resize(cols, rows);
+        let effects = terminal.resize_with_cell_size(
+            cols,
+            rows,
+            Some((
+                u32::from(width_px) / u32::from(cols),
+                u32::from(height_px) / u32::from(rows),
+            )),
+        );
         terminal.set_pixel_size(width_px.into(), height_px.into());
+        drop(terminal);
+        let mut reply = Vec::new();
+        for effect in effects {
+            if let Effect::Write(bytes) = effect {
+                reply.extend(bytes);
+            }
+        }
+        // The owning IO worker writes the small resize report immediately
+        // after its resize, without blocking the UI or dropping a protocol
+        // reply when the user-input byte budget is full.
+        self.input
+            .send(IoCommand::Resize {
+                size: PtySize {
+                    cols,
+                    rows,
+                    pixel_width: width_px,
+                    pixel_height: height_px,
+                },
+                reply,
+            })
+            .map_err(error)?;
         Ok(())
     }
 

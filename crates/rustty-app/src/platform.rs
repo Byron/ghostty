@@ -30,7 +30,7 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAccessibility, NSAnimatablePropertyContainer, NSAnimationContext, NSApplication,
-    NSApplicationActivationOptions, NSColor, NSColorSpace, NSEvent, NSFloatingWindowLevel,
+    NSApplicationActivationOptions, NSColor, NSColorSpace, NSEvent, NSFloatingWindowLevel, NSMenu,
     NSPasteboard, NSPasteboardAccessBehavior, NSPasteboardItem, NSPasteboardTypeString,
     NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen, NSUserInterfaceItemIdentification,
     NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowTabbingMode,
@@ -189,6 +189,9 @@ impl Platform {
                 .and_then(|binding| menu_accelerator(&binding.trigger[0]));
             item.set_key_accelerator(accelerator)
                 .map_err(|e| e.to_string())?;
+        }
+        if let Some(menu) = NSApplication::sharedApplication(self.mtm).mainMenu() {
+            update_native_menu_accelerators(&menu, &config.keybinds);
         }
         let bindings: Vec<_> = config
             .keybinds
@@ -1241,6 +1244,61 @@ fn menu_accelerator(trigger: &KeyTrigger) -> Option<KeyAccelerator> {
     Some(KeyAccelerator::new(Some(mods), key))
 }
 
+fn update_native_menu_accelerators(menu: &NSMenu, bindings: &[KeyBinding]) {
+    for item in menu.itemArray() {
+        if let Some(submenu) = item.submenu() {
+            update_native_menu_accelerators(&submenu, bindings);
+        }
+        let Some(action) = item.action() else {
+            continue;
+        };
+        let (key, alt) = if action == sel!(hide:) {
+            ("h", false)
+        } else if action == sel!(hideOtherApplications:) {
+            ("h", true)
+        } else if action == sel!(performMiniaturize:) {
+            ("m", false)
+        } else {
+            continue;
+        };
+        // Muda has no accelerator setter for predefined items. Keep their native
+        // actions and modifier masks, but let configured keys reach app routing.
+        item.setKeyEquivalent(&NSString::from_str(native_menu_key_equivalent(
+            bindings,
+            key,
+            Modifiers {
+                alt,
+                super_key: true,
+                ..Modifiers::default()
+            },
+        )));
+    }
+}
+
+fn native_menu_key_equivalent<'a>(
+    bindings: &[KeyBinding],
+    key: &'a str,
+    modifiers: Modifiers,
+) -> &'a str {
+    let configured = bindings
+        .iter()
+        .filter(|binding| binding.table.is_none())
+        .flat_map(|binding| &binding.trigger)
+        .any(|trigger| {
+            trigger.modifiers == modifiers
+                && (trigger.physical
+                    || trigger.key == "catch_all"
+                    || trigger
+                        .key
+                        .strip_prefix("key_")
+                        .unwrap_or(&trigger.key)
+                        .eq_ignore_ascii_case(key))
+        });
+    // Include conditional bindings and every sequence step. Physical bindings
+    // stay in app routing since their characters depend on the keyboard layout.
+    if configured { "" } else { key }
+}
+
 struct TapRegistration {
     port: CFRetained<CFMachPort>,
     source: CFRetained<CFRunLoopSource>,
@@ -1783,6 +1841,54 @@ mod tests {
             assert_eq!(hidden.origin, origin);
             assert_eq!(hidden.size, frame.size);
         }
+    }
+
+    #[test]
+    fn native_menu_shortcuts_yield_to_configured_bindings_and_return_after_reload() {
+        let command = Modifiers {
+            super_key: true,
+            ..Modifiers::default()
+        };
+        let command_option = Modifiers {
+            alt: true,
+            ..command
+        };
+        let mut bindings = Config::default().keybinds;
+        assert_eq!(native_menu_key_equivalent(&bindings, "h", command), "h");
+        assert_eq!(
+            native_menu_key_equivalent(&bindings, "h", command_option),
+            "h"
+        );
+        assert_eq!(native_menu_key_equivalent(&bindings, "m", command), "m");
+        for (binding, key, modifiers, expected) in [
+            ("cmd+h=goto_split:left", "h", command, ""),
+            ("cmd+key_h=goto_split:left", "h", command, ""),
+            ("performable:cmd+h=goto_split:left", "h", command, ""),
+            ("unconsumed:cmd+h=goto_split:left", "h", command, ""),
+            ("all:cmd+h=goto_split:left", "h", command, ""),
+            ("global:cmd+h=goto_split:left", "h", command, ""),
+            ("cmd+h>l=goto_split:left", "h", command, ""),
+            ("cmd+k>cmd+h=goto_split:left", "h", command, ""),
+            ("cmd+catch_all=goto_split:left", "h", command, ""),
+            ("physical:cmd+h=goto_split:left", "h", command, ""),
+            // A physical Q can produce H on another keyboard layout.
+            ("physical:cmd+q=goto_split:left", "h", command, ""),
+            ("cmd+ctrl+h=goto_split:left", "h", command, "h"),
+            ("cmd+j=goto_split:left", "h", command, "h"),
+            ("navigation/cmd+h=goto_split:left", "h", command, "h"),
+            ("cmd+h=goto_split:left", "h", command_option, "h"),
+            ("cmd+alt+h=goto_split:left", "h", command_option, ""),
+            ("cmd+m=goto_split:left", "m", command, ""),
+        ] {
+            bindings = vec![KeyBinding::parse(binding).unwrap()];
+            assert_eq!(
+                native_menu_key_equivalent(&bindings, key, modifiers),
+                expected,
+                "{binding}"
+            );
+        }
+        bindings.clear();
+        assert_eq!(native_menu_key_equivalent(&bindings, "m", command), "m");
     }
 
     #[test]

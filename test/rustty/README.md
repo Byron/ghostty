@@ -47,6 +47,7 @@ python3 test/rustty/parity.py --pages
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
+python3 test/rustty/transport_limits.py zig-out/bin/vt-oracle target/debug/examples/parity
 ```
 
 `--input` adds matrices for legacy/Kitty keyboard modes, modifiers and key
@@ -287,9 +288,8 @@ binary/plain response boundaries, MIME/item limits, local-only errors, RIS
 retention and both snapshot encodings. Callback records include state at each
 event, so multiple registrations in one input read cannot hide lost metadata.
 `EffectHandler::drag_and_drop` borrows that state synchronously; deferred `feed`
-returns event tags. The 8 MiB OSC capture boundary still exceeds the harness's
-hex request budget and remains unverified, as do allocation failures and direct
-utility APIs.
+returns event tags. The 8 MiB OSC capture boundary, allocation failures and direct
+utility APIs remain unverified.
 
 Mode fixtures read the available ANSI/DEC entries from the original source.
 `observe_modes` selects mode tags (`number`, `private`) whose current, saved,
@@ -338,8 +338,11 @@ under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;
 it may reduce valid UTF-8 into malformed input. Original failures are retained.
 An oracle crash, invalid response, unsupported operation or timeout fails the
-run. Requests are limited to 16 MiB and responses to 128 MiB. Graphics file,
-temporary-file and shared-memory transports are disabled in the Zig oracle.
+run. Requests are limited to 32 MiB and responses to 128 MiB. Large writes use
+varied chunk sizes with bounded JSON overhead; scalar delivery still exercises
+each byte. This accommodates hexadecimal input around the 8 MiB OSC limit.
+Graphics file, temporary-file and shared-memory transports are disabled in the
+Zig oracle.
 
 `--unicode` compares the display widths of all 1,112,064 valid Unicode scalars
 in batches of 4,096 codepoints, plus rejected surrogate and out-of-range inputs.

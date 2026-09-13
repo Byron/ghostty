@@ -456,7 +456,8 @@ pub fn main(init: std.process.Init) !void {
         defer arena.deinit();
         const alloc = arena.allocator();
         var line: std.Io.Writer.Allocating = .init(alloc);
-        _ = try stdin.interface.streamDelimiterLimit(&line.writer, '\n', .limited(16 * 1024 * 1024));
+        // Allow the delimiter lookahead after a maximum-sized JSON payload.
+        _ = try stdin.interface.streamDelimiterLimit(&line.writer, '\n', .limited(32 * 1024 * 1024 + 1));
         _ = stdin.interface.discardDelimiterInclusive('\n') catch {};
         const parsed = std.json.parseFromSlice(Request, alloc, line.written(), .{ .allocate = .alloc_always }) catch {
             try std.json.Stringify.value(Response{ .id = "invalid", .ok = false, .err = "InvalidRequest" }, .{}, &stdout.interface);

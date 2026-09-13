@@ -362,7 +362,12 @@ impl PageList {
     }
 
     /// Safely widen a restored narrow page when an edit reaches outside it.
-    pub fn extend_page(&mut self, row: usize, columns: u16) -> std::ops::Range<usize> {
+    pub fn extend_page(
+        &mut self,
+        row: usize,
+        columns: u16,
+        spacer_head: bool,
+    ) -> std::ops::Range<usize> {
         let mut start = 0;
         let index = self
             .pages
@@ -385,7 +390,7 @@ impl PageList {
                 next_serial: self.next_serial,
                 identity: ListIdentity::default(),
             };
-            expanded.resize_columns(columns, &[true]);
+            expanded.resize_columns(columns, &[spacer_head]);
             self.next_serial = expanded.next_serial;
             for page in expanded.pages.into_iter().rev() {
                 self.pages.insert(index, page);

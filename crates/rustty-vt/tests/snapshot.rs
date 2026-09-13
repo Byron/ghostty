@@ -404,7 +404,7 @@ fn kitty_keyboard_ring_overflows_pops_and_resumes_after_restore() {
 }
 
 #[test]
-fn mixed_physical_widths_survive_safe_edits_and_grow_at_the_access_boundary() {
+fn mixed_physical_widths_survive_observation_and_grow_before_mutation() {
     let mut source = Terminal::new(4, 1, 10);
     source.feed(b"abcd");
     let narrow_page = records(&encode_to_vec(&source).unwrap())[2].clone();
@@ -431,7 +431,7 @@ fn mixed_physical_widths_survive_safe_edits_and_grow_at_the_access_boundary() {
     terminal.feed(b"");
     assert_eq!(terminal.screen().rows[0].cells.len(), 4);
     terminal.feed(b"mX");
-    assert_eq!(terminal.screen().rows[0].cells.len(), 4);
+    assert_eq!(terminal.screen().rows[0].cells.len(), 8);
     assert_eq!(text(&terminal.screen().rows), ["abcd", "X"]);
     assert!(!terminal.screen().rows[0].wrapped);
     assert_eq!(
@@ -490,6 +490,52 @@ fn mixed_physical_widths_survive_safe_edits_and_grow_at_the_access_boundary() {
 }
 
 #[test]
+fn narrow_restored_pages_support_direct_cursor_and_row_edits() {
+    let mut stream = records(&encode_to_vec(&Terminal::new(8, 2, 10)).unwrap());
+    let mut pages = Vec::new();
+    for value in [b"ABCD", b"EFGH"] {
+        let mut source = Terminal::new(4, 1, 10);
+        source.feed(value);
+        pages.push(records(&encode_to_vec(&source).unwrap())[2].clone());
+    }
+    stream.splice(2..3, pages);
+    stream[1].1[2..4].copy_from_slice(&2u16.to_le_bytes());
+    let bytes = frame(&stream);
+    for (input, expected) in [
+        (b"\x1b[8X".as_slice(), ["", "EFGH"]),
+        (b"\x1b[2K", ["", "EFGH"]),
+        (b"\x1b[L", ["", "ABCD"]),
+        (b"\x1b[M", ["EFGH", ""]),
+        (b"12345678Z", ["12345678", "ZFGH"]),
+    ] {
+        let mut terminal = decode(bytes.as_slice(), DecodeOptions::default()).unwrap();
+        assert_eq!(terminal.screen().rows[0].cells.len(), 4);
+        terminal.feed(input);
+        assert_eq!(text(&terminal.screen().rows), expected);
+        assert_eq!(terminal.screen().rows[0].cells.len(), 8);
+        let restored = decode(
+            encode_to_vec(&terminal).unwrap().as_slice(),
+            DecodeOptions::default(),
+        )
+        .unwrap();
+        same_terminal(&terminal, &restored);
+    }
+    let mut terminal = decode(bytes.as_slice(), DecodeOptions::default()).unwrap();
+    terminal.feed(b"\x1b[1;7H\x1b[B");
+    assert_eq!(
+        (terminal.screen().cursor.row, terminal.screen().cursor.col),
+        (1, 6)
+    );
+    assert!(
+        terminal
+            .screen()
+            .rows
+            .iter()
+            .all(|row| row.cells.len() == 8)
+    );
+}
+
+#[test]
 fn multirow_page_snapshots_keep_all_owned_resources() {
     let mut styles = Terminal::new(64, 4, 10);
     for index in 0..256 {
@@ -541,15 +587,15 @@ fn snapshot_rejects_empty_link_strings_before_resource_admission() {
 }
 
 #[test]
-fn index_scroll_copies_mixed_page_widths_without_resizing_pages() {
+fn index_scroll_widens_mixed_pages_before_moving_rows() {
     for (widths, expected) in [
         (
             [8, 4, 8],
-            ["AAAAAAAA", "CCCCBBBB", "DDDD", "EEEE", "FFFFFFFF", ""],
+            ["AAAAAAAA", "CCCC", "DDDD", "EEEEEEEE", "FFFFFFFF", ""],
         ),
         (
             [4, 8, 4],
-            ["AAAA", "CCCC", "DDDDDDDD", "EEEECCCC", "FFFF", ""],
+            ["AAAA", "CCCCCCCC", "DDDDDDDD", "EEEE", "FFFF", ""],
         ),
     ] {
         let mut stream = records(&encode_to_vec(&Terminal::new(8, 6, 10)).unwrap());
@@ -584,15 +630,12 @@ fn index_scroll_copies_mixed_page_widths_without_resizing_pages() {
                 .iter()
                 .map(|row| row.cells.len())
                 .collect::<Vec<_>>(),
-            widths
-                .into_iter()
-                .flat_map(|width| [usize::from(width); 2])
-                .collect::<Vec<_>>()
+            [8; 6]
         );
         assert!(!terminal.screen().rows[5].wrapped);
         if let Some(pin) = wide_pin {
-            // Native bounded scrolling keeps x even when the destination page
-            // is narrower; the pin remains live but has no readable cell there.
+            // The formerly narrow destination can now represent the tracked
+            // logical column without leaving the pin outside physical storage.
             let point = terminal.screen().resolve(pin).unwrap();
             assert_eq!(point.row, terminal.screen().rows[1].id);
             assert_eq!(point.col, 6);
@@ -603,7 +646,7 @@ fn index_scroll_copies_mixed_page_widths_without_resizing_pages() {
                     .unwrap()
                     .cells
                     .get(point.col)
-                    .is_none()
+                    .is_some()
             );
         }
 
@@ -613,9 +656,9 @@ fn index_scroll_copies_mixed_page_widths_without_resizing_pages() {
         assert_eq!(
             text(&history.screen().rows),
             if widths[0] == 8 {
-                ["BBBBBBBB", "CCCC", "", "DDDDFFFF", "EEEEEEEE", "FFFFFFFF"]
+                ["BBBBBBBB", "CCCC", "", "DDDD", "EEEEEEEE", "FFFFFFFF"]
             } else {
-                ["BBBB", "CCCCCCCC", "", "DDDD", "EEEE", "FFFF"]
+                ["BBBB", "CCCCCCCC", "", "DDDDDDDD", "EEEE", "FFFF"]
             }
         );
         assert_eq!(history.screen().history.len(), 1);
@@ -626,7 +669,7 @@ fn index_scroll_copies_mixed_page_widths_without_resizing_pages() {
             if widths[0] == 8 {
                 ["BBBBBBBB", "", "DDDD", "EEEEEEEE", "FFFFFFFF", ""]
             } else {
-                ["BBBB", "", "DDDDCCCC", "EEEE", "FFFF", ""]
+                ["BBBB", "", "DDDDDDDD", "EEEE", "FFFF", ""]
             }
         );
         assert_eq!(
@@ -636,7 +679,7 @@ fn index_scroll_copies_mixed_page_widths_without_resizing_pages() {
                 .iter()
                 .map(|row| row.cells.len())
                 .collect::<Vec<_>>(),
-            [widths[0], widths[1], widths[1], widths[2], widths[2], 8].map(usize::from)
+            [8; 6]
         );
     }
 }

@@ -262,6 +262,16 @@ def input_requests():
                       [{"kind": "paste", "data": text.encode().hex()} for text in
                        ("", "hello", "é界👩🏽‍💻", "a\nb\r\nc", "\x00\x08\x05\x04\x1b\x7f\x03\x1c\x15\x1a\x11\x13\x17\x16\x12\x0f")],
                       ["input.focus-paste"])
+        binary = [bytes([byte]) for byte in range(256)]
+        binary += [bytes(range(256)), b"\xc0\xaf\xe0\xa0\xed\xa0\x80\xf4\x90\x80\x80",
+                   b"before\x1b[201~after", b"\x9b201~", b"\xff\n\xfe", b"\r\n\r", b""]
+        binary += [b"\xff" * offset + b"\x1b[201~" + b"\xfe" * (6 - offset) for offset in range(7)]
+        for name, data in enumerate(binary):
+            yield request(f"paste-bytes/{enabled}/{name}", "\x1b[?2004h" if enabled else "",
+                          [{"kind": "paste", "data": data.hex()},
+                           {"kind": "paste_safe", "data": data.hex()},
+                           {"kind": "paste_safe", "data": data.hex(), "conservative": True}],
+                          ["input.focus-paste"])
 
 
 def parser_requests():

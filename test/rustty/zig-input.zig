@@ -12,6 +12,7 @@ pub const Event = struct {
     unshifted: u21 = 0,
     composing: bool = false,
     macos_option_as_alt: []const u8 = "true",
+    conservative: bool = false,
     focused: bool = true,
     button: ?[]const u8 = null,
     x: f32 = 0,
@@ -52,6 +53,10 @@ pub fn encode(alloc: std.mem.Allocator, terminal: *vt.Terminal, event: Event) ![
         if (terminal.modes.get(.focus_event)) try vt.input.encodeFocus(&writer.writer, if (event.focused) .gained else .lost);
     } else if (std.mem.eql(u8, event.kind, "paste")) {
         try vt.input.encodePasteWriter(&writer.writer, try unhex(alloc, event.data), .fromTerminal(terminal));
+    } else if (std.mem.eql(u8, event.kind, "paste_safe")) {
+        const bytes = try unhex(alloc, event.data);
+        const safe = if (event.conservative) vt.input.isSafePaste(bytes) else vt.input.isSafePasteWith(bytes, .fromTerminal(terminal));
+        try writer.writer.writeByte(@intFromBool(safe));
     } else return error.UnsupportedInput;
     return writer.written();
 }

@@ -273,19 +273,20 @@ impl Terminal {
         }
     }
 
-    /// Reports whether the app should request confirmation before a clipboard paste.
-    pub fn paste_is_safe(&self, text: &str) -> bool {
-        !text.contains("\x1b[201~") && (self.modes.dec(2004) || !text.contains('\n'))
+    /// Reports whether a clipboard paste is safe in the current terminal mode.
+    pub fn paste_is_safe(&self, text: impl AsRef<[u8]>) -> bool {
+        paste_is_safe(text, self.modes.dec(2004))
     }
 
     /// Low-level text insertion; callers enforce their clipboard confirmation policy.
-    pub fn encode_paste(&self, text: &str) -> Vec<u8> {
+    pub fn encode_paste(&self, text: impl AsRef<[u8]>) -> Vec<u8> {
+        let text = text.as_ref();
         let bracketed = self.modes.dec(2004);
         let mut output = Vec::with_capacity(text.len() + 12);
         if bracketed {
             output.extend_from_slice(b"\x1b[200~");
         }
-        for byte in text.bytes() {
+        for &byte in text {
             output.push(match byte {
                 0x00 | 0x08 | 0x05 | 0x04 | 0x1b | 0x7f | 0x03 | 0x1c | 0x15 | 0x1a | 0x11
                 | 0x13 | 0x17 | 0x16 | 0x12 | 0x0f => b' ',
@@ -382,6 +383,13 @@ impl Terminal {
             _ => Vec::new(),
         }
     }
+}
+
+/// Check clipboard bytes before encoding. Pass `false` to reject newlines
+/// regardless of terminal state, or the active bracketed-paste mode otherwise.
+pub fn paste_is_safe(text: impl AsRef<[u8]>, bracketed: bool) -> bool {
+    let text = text.as_ref();
+    (bracketed || !text.contains(&b'\n')) && !text.windows(6).any(|part| part == b"\x1b[201~")
 }
 
 fn single_char(text: &str) -> Option<char> {
@@ -766,6 +774,22 @@ fn kitty_key(event: &KeyEvent, flags: u8, options: KeyEncodeOptions) -> Vec<u8> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paste_preserves_binary_text_and_checks_safety_before_encoding() {
+        let mut terminal = Terminal::new(80, 24, 0);
+        let bytes = b"\xff\n\0\xfe";
+        assert!(!terminal.paste_is_safe(bytes));
+        assert_eq!(terminal.encode_paste(bytes), b"\xff\r \xfe");
+        terminal.feed(b"\x1b[?2004h");
+        assert!(terminal.paste_is_safe(bytes));
+        assert!(!paste_is_safe(bytes, false));
+        assert!(!terminal.paste_is_safe(b"\xff\x1b[201~\xfe"));
+        assert_eq!(
+            terminal.encode_paste(bytes),
+            b"\x1b[200~\xff\n \xfe\x1b[201~"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn option_text_and_terminal_alt_have_distinct_legacy_and_kitty_output() {

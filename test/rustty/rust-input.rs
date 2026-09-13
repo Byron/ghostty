@@ -17,6 +17,7 @@ pub struct Event {
     unshifted: u32,
     composing: bool,
     macos_option_as_alt: String,
+    conservative: bool,
     focused: bool,
     button: Option<String>,
     x: f32,
@@ -35,6 +36,7 @@ impl Default for Event {
             unshifted: 0,
             composing: false,
             macos_option_as_alt: "true".into(),
+            conservative: false,
             focused: true,
             button: None,
             x: 0.,
@@ -117,8 +119,14 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
         "focus" => Ok(terminal.encode_focus(event.focused)),
         "paste" => {
             let bytes = super::unhex(&event.data)?;
-            let text = std::str::from_utf8(&bytes).map_err(|_| "InvalidText")?;
-            Ok(terminal.encode_paste(text))
+            Ok(terminal.encode_paste(&bytes))
+        }
+        "paste_safe" => {
+            let bytes = super::unhex(&event.data)?;
+            Ok(vec![u8::from(rustty_vt::input::paste_is_safe(
+                &bytes,
+                !event.conservative && terminal.modes.dec(2004),
+            ))])
         }
         _ => Err("UnsupportedInput"),
     }

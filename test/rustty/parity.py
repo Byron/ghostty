@@ -13,6 +13,7 @@ import threading
 import snapshots
 import protocols
 import kitty_clipboard
+import host_queries
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -408,6 +409,8 @@ def main():
                 requests.extend((request, covers) for request, covers in protocols.clipboard_requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in kitty_clipboard.requests()
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in host_queries.requests()
                                 if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())

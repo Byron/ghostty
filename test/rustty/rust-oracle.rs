@@ -1,6 +1,6 @@
 //! Test-only NDJSON adapter for comparisons with the original Zig terminal.
 use rustty_vt::{
-    Color, Effect, EffectHandler, Screen, SemanticContent, Style, Terminal, clipboard,
+    Color, Effect, EffectHandler, Screen, SemanticContent, Style, Terminal, clipboard, query,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,6 +52,7 @@ struct Request {
     clipboard_read_enabled: bool,
     clipboard_write_enabled: bool,
     clipboard_write_limit: usize,
+    host: HostOptions,
 }
 
 impl Default for Request {
@@ -68,6 +69,7 @@ impl Default for Request {
             clipboard_read_enabled: true,
             clipboard_write_enabled: true,
             clipboard_write_limit: 64 * 1024 * 1024,
+            host: HostOptions::default(),
         }
     }
 }
@@ -90,6 +92,129 @@ struct Operation {
     clipboard_write_enabled: Option<bool>,
     #[serde(default)]
     clipboard_write_limit: Option<usize>,
+    #[serde(default)]
+    host: Option<HostOptions>,
+    #[serde(default)]
+    cell_size: Option<[u32; 2]>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HostScheme {
+    None,
+    Light,
+    Dark,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HostSize {
+    rows: u16,
+    columns: u16,
+    cell_width: u32,
+    cell_height: u32,
+    available: bool,
+}
+impl Default for HostSize {
+    fn default() -> Self {
+        Self {
+            rows: 24,
+            columns: 80,
+            cell_width: 9,
+            cell_height: 18,
+            available: true,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HostAttributes {
+    conformance_level: u16,
+    features: Vec<u16>,
+    device_type: u16,
+    firmware_version: u16,
+    rom_cartridge: u16,
+    unit_id: u32,
+}
+impl Default for HostAttributes {
+    fn default() -> Self {
+        Self {
+            conformance_level: 62,
+            features: vec![22],
+            device_type: 1,
+            firmware_version: 0,
+            rom_cartridge: 0,
+            unit_id: 0,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HostOptions {
+    color_scheme: Option<HostScheme>,
+    device_attributes: Option<HostAttributes>,
+    size: Option<HostSize>,
+    enquiry: Option<String>,
+    xtversion: Option<String>,
+    terminfo_name: Option<String>,
+    title_report: bool,
+    visible: bool,
+}
+impl Default for HostOptions {
+    fn default() -> Self {
+        Self {
+            color_scheme: None,
+            device_attributes: None,
+            size: None,
+            enquiry: None,
+            xtversion: None,
+            terminfo_name: None,
+            title_report: false,
+            visible: true,
+        }
+    }
+}
+
+struct DecodedHost {
+    color_scheme: Option<HostScheme>,
+    device_attributes: Option<query::DeviceAttributes>,
+    size: Option<HostSize>,
+    enquiry: Option<Vec<u8>>,
+    xtversion: Option<Vec<u8>>,
+    terminfo_name: Option<Vec<u8>>,
+    title_report: bool,
+    visible: bool,
+}
+impl DecodedHost {
+    fn new(options: &HostOptions) -> Result<Self, &'static str> {
+        Ok(Self {
+            color_scheme: options.color_scheme,
+            device_attributes: options.device_attributes.as_ref().map(|value| {
+                query::DeviceAttributes {
+                    conformance_level: value.conformance_level,
+                    features: value.features.clone(),
+                    device_type: value.device_type,
+                    firmware_version: value.firmware_version,
+                    rom_cartridge: value.rom_cartridge,
+                    unit_id: value.unit_id,
+                }
+            }),
+            size: options.size,
+            enquiry: options.enquiry.as_deref().map(unhex).transpose()?,
+            xtversion: options.xtversion.as_deref().map(unhex).transpose()?,
+            terminfo_name: options.terminfo_name.as_deref().map(unhex).transpose()?,
+            title_report: options.title_report,
+            visible: options.visible,
+        })
+    }
+
+    fn configure(&self, terminal: &mut Terminal) {
+        terminal.terminfo_name = self.terminfo_name.clone();
+        terminal.title_report = self.title_report;
+        terminal.visible = self.visible;
+    }
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -129,7 +254,6 @@ struct HostReply {
     remember: bool,
 }
 
-#[derive(Default)]
 struct Host {
     events: Vec<Value>,
     replies: std::collections::VecDeque<HostReply>,
@@ -137,15 +261,19 @@ struct Host {
     clipboard_read_enabled: bool,
     clipboard_write_enabled: bool,
     clipboard_write_limit: usize,
+    host: DecodedHost,
 }
 
 impl Host {
     fn new(request: &Request) -> Result<Self, &'static str> {
         let mut host = Self {
+            events: Vec::new(),
+            replies: std::collections::VecDeque::new(),
+            error: None,
             clipboard_read_enabled: request.clipboard_read_enabled,
             clipboard_write_enabled: request.clipboard_write_enabled,
             clipboard_write_limit: request.clipboard_write_limit,
-            ..Self::default()
+            host: DecodedHost::new(&request.host)?,
         };
         for reply in &request.clipboard_replies {
             let contents = reply
@@ -213,6 +341,50 @@ impl EffectHandler for Host {
         if let Err(error) = self.record(effect) {
             self.error = Some(error);
         }
+    }
+
+    fn color_scheme(&mut self) -> Option<query::ColorScheme> {
+        let scheme = self.host.color_scheme?;
+        self.events.push(event("query_color_scheme", String::new()));
+        match scheme {
+            HostScheme::None => None,
+            HostScheme::Light => Some(query::ColorScheme::Light),
+            HostScheme::Dark => Some(query::ColorScheme::Dark),
+        }
+    }
+
+    fn device_attributes(&mut self) -> Option<query::DeviceAttributes> {
+        let attributes = self.host.device_attributes.clone()?;
+        self.events
+            .push(event("query_device_attributes", String::new()));
+        Some(attributes)
+    }
+
+    fn size(&mut self) -> Option<query::Size> {
+        let size = self.host.size?;
+        self.events.push(event("query_size", String::new()));
+        size.available.then_some(query::Size {
+            rows: size.rows,
+            columns: size.columns,
+            cell_width: size.cell_width,
+            cell_height: size.cell_height,
+        })
+    }
+
+    fn enquiry(&mut self) -> Vec<u8> {
+        let Some(bytes) = &self.host.enquiry else {
+            return Vec::new();
+        };
+        self.events.push(event("query_enquiry", String::new()));
+        bytes.clone()
+    }
+
+    fn xtversion(&mut self) -> Vec<u8> {
+        let Some(bytes) = &self.host.xtversion else {
+            return Vec::new();
+        };
+        self.events.push(event("query_xtversion", String::new()));
+        bytes.clone()
     }
 
     fn clipboard_read_enabled(&self) -> bool {
@@ -371,6 +543,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     }
     let mut observations = Vec::new();
     let mut host = Host::new(request)?;
+    host.host.configure(&mut terminal);
     let mut snapshots = Vec::new();
     let mut snapshot_progress = Vec::new();
     let mut snapshot_decoder = None;
@@ -389,10 +562,20 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             }
             "resize" => {
                 dimensions(operation.cols, operation.rows)?;
-                terminal.resize(operation.cols, operation.rows);
+                for effect in terminal.resize_with_cell_size(
+                    operation.cols,
+                    operation.rows,
+                    operation.cell_size.map(|value| (value[0], value[1])),
+                ) {
+                    host.effect(effect);
+                }
             }
             "reset" => terminal.feed_with_handler(b"\x1bc", &mut host),
             "terminal_reset" => terminal.reset(),
+            "host_options" => {
+                host.host = DecodedHost::new(operation.host.as_ref().ok_or("MissingHostOptions")?)?;
+                host.host.configure(&mut terminal);
+            }
             "clipboard_options" => {
                 if let Some(value) = operation.clipboard_read_enabled {
                     host.clipboard_read_enabled = value;
@@ -428,6 +611,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 )
                 .map_err(|_| "InvalidSnapshot")?;
                 terminal.clipboard_write_limit = host.clipboard_write_limit;
+                host.host.configure(&mut terminal);
                 snapshot_decoder = None;
             }
             "restore_ready" => {
@@ -441,6 +625,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 );
                 terminal = decoder.ready().map_err(|_| "InvalidSnapshot")?;
                 terminal.clipboard_write_limit = host.clipboard_write_limit;
+                host.host.configure(&mut terminal);
                 snapshot_progress.push(json!({"stage":"ready", "offset":snapshot_offset.get(),
                     "history_rows":decoder.history_rows(), "screen":null, "rows":0, "remaining":0}));
                 snapshot_decoder = Some(decoder);

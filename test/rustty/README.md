@@ -110,6 +110,20 @@ the terminal state, while `reset` delivers RIS through the parser, so their
 different effects on clipboard grants are tested explicitly. One-time passwords
 from paste events and exhaustive allocation/resource limits remain uncovered.
 
+Host query fixtures provide a `host` object with optional `color_scheme`,
+`device_attributes`, `size`, `enquiry`, `xtversion` and `terminfo_name` values.
+The last three are hexadecimal byte strings. Callback invocation is recorded
+before its PTY response, including a color scheme of `none` or a size whose
+`available` is false. Missing callbacks stay absent. `title_report` and `visible`
+control the corresponding host settings. `host_options` replaces this object;
+`resize` accepts optional `cell_size: [width, height]` and compares mode 2048
+reports separately from size-query callbacks. Tests include unknown attributes,
+wide size multiplication, actual reference response limits, visibility and
+saved-mode effects, title reporting, raw terminfo names and reset persistence.
+These comparisons use `feed_with_handler` with the reference's absent callback
+defaults. The asynchronous `feed` API's configurable application defaults are
+covered by core tests rather than being substituted for these reference defaults.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;

@@ -1656,15 +1656,25 @@ impl Terminal {
                 };
             }
             ([b'#'], b'8') => {
+                let style = Style {
+                    foreground: self.screen().cursor.style.foreground,
+                    background: self.screen().cursor.style.background,
+                    ..Style::default()
+                };
+                self.screen_mut().cursor.style = style;
+                self.modes.set(true, 6, false);
                 self.reset_margins();
                 for row in &mut self.screen_mut().rows {
                     for cell in &mut row.cells {
                         *cell = Cell {
                             text: "E".into(),
+                            style,
                             ..Cell::default()
                         };
                     }
                     row.wrapped = false;
+                    row.wrap_continuation = false;
+                    row.semantic = SemanticContent::Output;
                     row.dirty = true;
                 }
                 self.cursor_position(1, 1);

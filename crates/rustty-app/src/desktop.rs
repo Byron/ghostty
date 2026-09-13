@@ -135,6 +135,8 @@ struct Host {
     deadline: Option<Instant>,
     search: Option<String>,
     search_index: usize,
+    focus_text_input: bool,
+    popup_open: bool,
     palette: bool,
     palette_query: String,
     confirm: Option<Action>,
@@ -146,6 +148,7 @@ impl Host {
     fn ui_input(&self) -> bool {
         self.search.is_some()
             || self.palette
+            || self.popup_open
             || self.confirm.is_some()
             || !self.clipboard_request.is_empty()
     }
@@ -652,7 +655,6 @@ impl App {
         if let Some(platform) = &self.platform {
             platform.configure_window(&window, quick, self.config())?;
         }
-        window.set_ime_allowed(true);
         let viewport = ViewportId::from_hash_of(id);
         pollster::block_on(self.painter.set_window(viewport, Some(window.clone())))?;
         let fonts =
@@ -705,6 +707,8 @@ impl App {
             deadline: None,
             search: None,
             search_index: 0,
+            focus_text_input: false,
+            popup_open: false,
             palette: false,
             palette_query: String::new(),
             confirm: None,
@@ -1424,6 +1428,7 @@ impl App {
             Action::ToggleCommandPalette => {
                 host.palette = !host.palette;
                 host.palette_query.clear();
+                host.focus_text_input = host.palette || host.search.is_some();
             }
             Action::CopyToClipboard => {
                 let text = focused.and_then(|id| {
@@ -1500,6 +1505,7 @@ impl App {
                 };
                 host.search = Some(text);
                 host.search_index = 0;
+                host.focus_text_input = true;
             }
             Action::EndSearch => host.search = None,
             Action::NavigateSearch { next } => {
@@ -1898,19 +1904,7 @@ impl App {
         }
         let mut raw = host.egui.take_egui_input(&host.window);
         raw.viewport_id = host.viewport;
-        if !host.ui_input() {
-            raw.events.retain(|e| {
-                !matches!(
-                    e,
-                    egui::Event::Key { .. }
-                        | egui::Event::Text(_)
-                        | egui::Event::Paste(_)
-                        | egui::Event::Copy
-                        | egui::Event::Cut
-                        | egui::Event::Ime(_)
-                )
-            });
-        }
+        input::filter_egui_events(&mut raw, host.ui_input());
         let context = self.context.clone();
         let now = Instant::now();
         let platform_accent = self
@@ -2096,17 +2090,29 @@ impl App {
                         }
                     });
                 });
+            // Cache this viewport's popup state for native events between frames.
+            host.popup_open = egui::Popup::is_any_open(ctx);
+            if host.ui_input() {
+                host.composing = false;
+                host.preedit.clear();
+                host.preedit_selection = None;
+            }
             if host.search.is_some() {
                 egui::Panel::bottom("search").show(root_ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Find");
-                        let response = ui.text_edit_singleline(host.search.as_mut().unwrap());
+                        let focus = !host.palette
+                            && !ui.is_sizing_pass()
+                            && std::mem::take(&mut host.focus_text_input);
+                        let response = input::text_edit(
+                            ui,
+                            host.search.as_mut().unwrap(),
+                            egui::Id::new(("search", host.id)),
+                            focus,
+                        );
                         if response.changed() {
                             host.search_index = 0;
                             self.search(host);
-                        }
-                        if !response.has_focus() && !ctx.egui_wants_keyboard_input() {
-                            response.request_focus();
                         }
                         if ui.button("Previous").clicked() {
                             commands.push(Action::NavigateSearch { next: false });
@@ -2153,6 +2159,7 @@ impl App {
                         .collect();
                     let mut composed = Frame::empty([size.width, size.height]);
                     let mut accessible = Vec::new();
+                    let mut terminal_ime_rect = None;
                     // An atlas eviction can happen halfway through a multi-pane frame.
                     // Rebuild against its new generation before handing a frame to WGPU.
                     for attempt in 0..2 {
@@ -2309,7 +2316,7 @@ impl App {
                                 ),
                             );
                             accessible.push((id, rect));
-                            if id == focused {
+                            if id == focused && !pane.exited {
                                 let cursor = &snapshot.screen.cursor;
                                 let [x, y, width, height] = ime_cursor.unwrap_or([
                                     padding[0] + cursor.col as f32 * metrics.cell_width as f32,
@@ -2317,13 +2324,10 @@ impl App {
                                     metrics.cell_width as f32,
                                     metrics.cell_height as f32,
                                 ]);
-                                host.window.set_ime_cursor_area(
-                                    LogicalPosition::new(
-                                        rect.left() + x / scale,
-                                        rect.top() + y / scale,
-                                    ),
-                                    LogicalSize::new(width / scale, height / scale),
-                                );
+                                terminal_ime_rect = Some(egui::Rect::from_min_size(
+                                    Pos2::new(rect.left() + x / scale, rect.top() + y / scale),
+                                    Vec2::new(width / scale, height / scale),
+                                ));
                             }
                         }
                         if !retry {
@@ -2367,8 +2371,8 @@ impl App {
                             node.add_action(egui::accesskit::Action::ScrollUp);
                             node.add_action(egui::accesskit::Action::ScrollDown);
                         });
-                        if id == focused && host.focused && !host.ui_input() {
-                            response.request_focus();
+                        if id == focused && host.focused {
+                            input::terminal_input(&response, terminal_ime_rect, host.ui_input());
                         }
                         if host.navigation_warning.is_some_and(|(pane, _)| pane == id) {
                             ui.painter().rect_stroke(
@@ -2533,10 +2537,14 @@ impl App {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
                     .show(ctx, |ui| {
-                        let response = ui.text_edit_singleline(&mut host.palette_query);
-                        if !ctx.egui_wants_keyboard_input() {
-                            response.request_focus();
-                        }
+                        let focus =
+                            !ui.is_sizing_pass() && std::mem::take(&mut host.focus_text_input);
+                        input::text_edit(
+                            ui,
+                            &mut host.palette_query,
+                            egui::Id::new(("palette", host.id)),
+                            focus,
+                        );
                         for (label, action) in palette_actions() {
                             if label
                                 .to_lowercase()
@@ -2545,10 +2553,12 @@ impl App {
                             {
                                 commands.push(action);
                                 host.palette = false;
+                                host.focus_text_input = host.search.is_some();
                             }
                         }
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             host.palette = false;
+                            host.focus_text_input = host.search.is_some();
                         }
                     });
             }

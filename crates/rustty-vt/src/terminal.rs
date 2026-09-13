@@ -463,7 +463,19 @@ impl Terminal {
         self.cursor_color = cursor;
         self.palette = palette;
         self.set_cursor_style(0);
+        self.set_mode(true, 25, self.modes.dec(25));
         self.changed();
+    }
+
+    /// Set a host-configurable mode's current value and reset default. Modes
+    /// with transition side effects require their semantic API instead.
+    pub fn set_default_mode(&mut self, private: bool, mode: u16, value: bool) -> bool {
+        if !Modes::default_configurable(private, mode) {
+            return false;
+        }
+        self.modes.set_default(private, mode, value);
+        self.set_mode(private, mode, value);
+        true
     }
 
     /// Update configured colors while preserving application overrides.
@@ -596,7 +608,14 @@ impl Terminal {
                 params,
                 colon_separators,
                 final_byte,
-            } => self.csi(intermediates, params, colon_separators, final_byte, effects),
+            } => self.csi(
+                intermediates,
+                params,
+                colon_separators,
+                final_byte,
+                effects,
+                clipboard_read_enabled,
+            ),
             Event::Osc {
                 data,
                 terminated_by_bell,
@@ -1230,10 +1249,14 @@ impl Terminal {
         }
         if private {
             match mode {
-                3 if self.modes.dec(40) => {
-                    self.resize(if value { 132 } else { 80 }, self.rows);
-                    self.erase_display(2, false);
-                    self.cursor_position(1, 1);
+                3 => {
+                    if self.modes.dec(40) {
+                        self.resize(if value { 132 } else { 80 }, self.rows);
+                        self.erase_display(2, false);
+                        self.cursor_position(1, 1);
+                    } else {
+                        self.modes.set(true, 3, false);
+                    }
                 }
                 6 => self.cursor_position(1, 1),
                 12 | 25 => {
@@ -1308,7 +1331,9 @@ impl Terminal {
         if mode == 1049 && enabled {
             self.erase_display(2, false);
         }
-        if switched {
+        // Mode 1049 restores the primary cursor on exit without copying the
+        // alternate cursor's appearance. Legacy modes copy in both directions.
+        if switched && (mode != 1049 || enabled) {
             self.screen_mut().cursor = old_cursor;
             self.end_hyperlink();
         }
@@ -1390,7 +1415,18 @@ impl Terminal {
         }
     }
 
-    fn csi(&mut self, i: &[u8], p: &[u16], sep: u32, byte: u8, effects: &mut Vec<Effect>) {
+    fn csi(
+        &mut self,
+        i: &[u8],
+        p: &[u16],
+        sep: u32,
+        byte: u8,
+        effects: &mut Vec<Effect>,
+        clipboard_read_enabled: bool,
+    ) {
+        if sep != 0 && byte != b'm' {
+            return;
+        }
         let n = p.first().copied().unwrap_or(0);
         let count = usize::from(n.max(1));
         let second = p.get(1).copied().unwrap_or(0);
@@ -1524,7 +1560,11 @@ impl Terminal {
                 }
             }
             ([], b'u') => self.restore_cursor(),
-            ([b' '], b'q') if n <= 6 => self.set_cursor_style(n),
+            ([b' '], b'q') => {
+                if p.len() <= 1 && n <= 6 {
+                    self.set_cursor_style(n);
+                }
+            }
             ([b'"'], b'q') if n <= 2 => {
                 let screen = self.screen_mut();
                 screen.cursor.protected = n == 1;
@@ -1533,25 +1573,20 @@ impl Terminal {
                     screen.metadata.protected_mode = 2;
                 }
             }
-            ([b'!'], b'p') => {
-                self.screen_mut().cursor.style = Style::default();
-                self.screen_mut().cursor.protected = false;
-                self.modes.reset();
-                self.reset_margins();
-                self.screen_mut().cursor.visible = true;
-            }
-            ([b'$'], b'p') | ([b'?', b'$'], b'p') => {
-                for &mode in p {
-                    effects.push(Effect::Write(
-                        format!(
-                            "\x1b[{}{};{}$y",
-                            if private { "?" } else { "" },
-                            mode,
-                            self.modes.report(private, mode)
-                        )
-                        .into_bytes(),
-                    ));
+            // The pinned libghostty stream ignores DECSTR and ANSI DECRQM.
+            ([b'!'] | [b'$'], b'p') => {}
+            ([b'?', b'$'], b'p') => {
+                if p.len() != 1 {
+                    return;
                 }
+                let report = if n == 5522 && !clipboard_read_enabled {
+                    0
+                } else {
+                    self.modes.report(true, n)
+                };
+                effects.push(Effect::Write(
+                    format!("\x1b[?{};{report}$y", n & 0x7fff).into_bytes(),
+                ));
             }
             ([], b'n') | ([b'?'], b'n') if p.len() == 1 => match (private, n) {
                 (false, 5) => effects.push(Effect::Write(b"\x1b[0n".to_vec())),

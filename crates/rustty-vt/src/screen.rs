@@ -254,6 +254,8 @@ pub(crate) struct SavedCursor {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
+    #[serde(skip)]
+    pub graphics: crate::graphics::Graphics,
     pub rows: Vec<Row>,
     pub history: VecDeque<Row>,
     pub cursor: Cursor,
@@ -274,6 +276,7 @@ pub struct Screen {
 impl Screen {
     pub(crate) fn new(cols: usize, rows: usize, scrollback_limit: usize) -> Self {
         Self {
+            graphics: crate::graphics::Graphics::default(),
             rows: (0..rows)
                 .map(|i| Row::new(i as u64, cols, Color::Default))
                 .collect(),
@@ -308,6 +311,7 @@ impl Screen {
         cursor.visible &= cursor.row < self.rows.len();
         cursor.row = cursor.row.min(self.rows.len() - 1);
         Self {
+            graphics: self.graphics.snapshot(),
             rows: self.viewport().cloned().collect(),
             history: VecDeque::new(),
             cursor,
@@ -415,6 +419,7 @@ impl Screen {
     }
 
     pub(crate) fn discard_row(&mut self, id: u64) {
+        self.graphics.discard_row(id);
         for point in self.tracked.values_mut() {
             if point.is_some_and(|p| p.row == id) {
                 *point = None;
@@ -556,6 +561,7 @@ impl Screen {
                 })
             });
             contents = output;
+            self.graphics.reflow(&map);
         } else if cols != old_cols {
             for row in &mut contents {
                 row.cells.resize(cols, Cell::default());

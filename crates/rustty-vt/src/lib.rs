@@ -14,6 +14,7 @@ pub mod paste;
 pub mod query;
 pub mod screen;
 pub mod search;
+pub mod selection;
 pub mod snapshot;
 mod terminal;
 mod terminfo;

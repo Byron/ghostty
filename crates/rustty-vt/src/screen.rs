@@ -938,9 +938,9 @@ impl Screen {
             let height = if height_first { rows } else { old_rows };
             let active_start = contents.len().saturating_sub(height);
             let old_wrapped = contents
-                [active_start..cursor_index.min(contents.len()).max(active_start)]
+                [active_start..(cursor_index + 1).min(contents.len()).max(active_start)]
                 .iter()
-                .filter(|r| r.wrapped)
+                .filter(|r| r.wrap_continuation)
                 .count();
             let mut map = HashMap::<GridPointKey, GridPoint>::new();
             let mut output = Vec::new();
@@ -1118,9 +1118,9 @@ impl Screen {
                 .position(|r| r.id == mapped_cursor.row)
                 .filter(|&i| i >= start)
             {
-                let wrapped = output[start..cursor_index]
+                let wrapped = output[start..=cursor_index]
                     .iter()
-                    .filter(|r| r.wrapped)
+                    .filter(|r| r.wrap_continuation)
                     .count();
                 let remaining = height.saturating_sub(cursor_y + 1);
                 let current = output.len() - cursor_index - 1;

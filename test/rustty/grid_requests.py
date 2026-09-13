@@ -108,6 +108,11 @@ def requests():
     for limit in (0, 1, 4):
         yield case(f"tracked/prune/{limit}", [history, grid("track", id=1, point=point(tag="screen")),
                    grid("limits", lines=limit), b"\r\nmore\r\nrows", observe], ["terminal.tracked"])
+    for lines, byte_limit in ((0, None), (1, None), (None, 1), (0, 1), (None, 0)):
+        yield case(f"limits/minimum/{lines}/{byte_limit}",
+                   [grid("limits", lines=lines, bytes=byte_limit), history, observe,
+                    {"op": "resize", "cols": 12, "rows": 6}, b"\r\nmore\r\nrows", observe],
+                   ["terminal.tracked", "terminal.resize"])
 
     for alternate in (False, True):
         for margin, setup in (("full", b""), ("vertical", b"\x1b[2;3r"),

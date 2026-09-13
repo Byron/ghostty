@@ -42,6 +42,7 @@ python3 test/rustty/parity.py --no-build --snapshots
 python3 test/rustty/parity.py --no-build --snapshot-wire
 python3 test/rustty/parity.py --no-build --protocols
 python3 test/rustty/parity.py --no-build --grid
+python3 test/rustty/parity.py --no-build --page-layout
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
@@ -110,6 +111,26 @@ These direct search cases use `kind=input` to avoid serializing hundreds of
 thousands of unrelated cells; their search endpoints and result order remain
 unmodified. A reference-process crash is reported as a failure and ends that
 run. The search coverage entry remains partial.
+
+`--page-layout` compares native page/resource offsets, table and bitmap
+capacities, column adjustment, and pooled versus exact allocation charge.
+`page_layout_requests.py` retains dimension/resource boundaries and deterministic
+mixed capacities. These requests compute layouts without allocating their backing
+pages, including cases near the native 32-bit page-offset limit. Both adapters
+impose nonzero dimensions and 32-bit page-offset limits, and report row-count
+overflow in place of native adjustment's checked-cast abort. The Zig
+adapter calls the real layout and adjustment functions; initial capacity uses
+their private caller's standard-adjustment/fallback policy. The Rust adapter
+compiles the private production calculator directly. Constants are observed from
+the native ABI and currently validated on macOS ARM64 only. Passing arithmetic
+cases does not establish page lifetime, resource retention, splitting, reflow or
+search parity; the coverage entry remains partial. `--thorough` includes this
+matrix.
+
+Production scrollback limits use these native dimension-dependent minimums,
+including a zero line limit. Only zero bytes disables normal scrollback. Row
+pruning and Rust allocation charges still differ from native page retention;
+minimum-limit comparisons do not establish full storage compatibility.
 
 Grid cases cover live writes, erasure, reflow, height changes, screen switches,
 resets, handle reuse and scrollback limits, including release of an inactive

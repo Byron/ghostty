@@ -20,6 +20,7 @@ import prompt_redraw
 import charsets
 import grid_requests
 import search_pages
+import page_layout_requests
 import host_queries
 import mode_defaults
 import color_protocols
@@ -417,6 +418,7 @@ def main():
     parser.add_argument("--snapshot-wire", action="store_true", help="compare snapshot fixtures, streaming, malformed input and mixed PAGE widths")
     parser.add_argument("--protocols", action="store_true", help="compare terminal protocol queries and host effects")
     parser.add_argument("--grid", action="store_true", help="compare selection, literal search and tracked grid references")
+    parser.add_argument("--page-layout", action="store_true", help="compare native page/resource layout arithmetic without backing allocations")
     parser.add_argument("--max-failures", type=int, default=20)
     parser.add_argument("--artifacts", type=Path, default=ARTIFACTS, help="isolated output directory for concurrent suites")
     parser.add_argument("--zig-bin", type=Path, default=ROOT / "zig-out/bin/vt-oracle")
@@ -457,6 +459,9 @@ def main():
                                 if not args.case or args.case in request["id"])
             if args.grid or args.thorough:
                 requests.extend((request, covers) for request, covers in grid_requests.requests()
+                                if not args.case or args.case in request["id"])
+            if args.page_layout or args.thorough:
+                requests.extend((request, covers) for request, covers in page_layout_requests.requests()
                                 if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, covers) for request, covers in search_pages.requests()

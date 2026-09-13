@@ -2,11 +2,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
+use crate::page_layout::PageCapacity;
+
 /// Independent logical storage budgets. `None` means unlimited.
 ///
 /// Bytes include active and history row storage, including cell, text, and
 /// hyperlink allocations. Active rows are always retained. Graphics use their
-/// own budget. Unlike Ghostty's page allocator, pruning here removes whole rows.
+/// own budget. Limits have Ghostty's minimum page-size floor; only an explicit
+/// zero byte limit disables history. Pruning currently removes individual rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrollbackLimits {
     pub bytes: Option<usize>,
@@ -674,7 +677,7 @@ impl Screen {
     }
 
     pub(crate) fn push_history(&mut self, row: Row) {
-        if self.limits.bytes == Some(0) || self.limits.lines == Some(0) {
+        if self.limits.bytes == Some(0) {
             self.discard_row(row.id);
             return;
         }
@@ -712,20 +715,41 @@ impl Screen {
         self.viewport_offset = 0;
     }
 
+    pub(crate) fn effective_limits(&self) -> ScrollbackLimits {
+        let capacity = PageCapacity::initial(self.columns as u16)
+            .expect("validated screen width has a native page capacity");
+        let minimum_lines = usize::from(capacity.rows);
+        let minimum_bytes = PageCapacity::STANDARD
+            .layout()
+            .expect("standard page layout is valid")
+            .allocation_bytes(false)
+            * (self.rows.len().max(1).div_ceil(minimum_lines) + 1);
+        ScrollbackLimits {
+            bytes: self.limits.bytes.map(|bytes| {
+                if bytes == 0 {
+                    0
+                } else {
+                    bytes.max(minimum_bytes)
+                }
+            }),
+            lines: self.limits.lines.map(|lines| lines.max(minimum_lines)),
+        }
+    }
+
     pub(crate) fn enforce_limits(&mut self) {
         if self.history.is_empty() {
             return;
         }
-        let byte_budget = self.limits.bytes.map(|bytes| {
+        let limits = self.effective_limits();
+        // ponytail: row storage is still charged here; page lifecycle and
+        // retained resource accounting are required for exact pruning parity.
+        let byte_budget = limits.bytes.map(|bytes| {
             let active = self.rows.iter().fold(0usize, |bytes, row| {
                 bytes.saturating_add(row.storage_bytes())
             });
             bytes.saturating_sub(active)
         });
-        while self
-            .limits
-            .lines
-            .is_some_and(|max| self.history.len() > max)
+        while limits.lines.is_some_and(|max| self.history.len() > max)
             || byte_budget.is_some_and(|max| self.history_bytes > max)
         {
             let row = self.history.pop_front().unwrap();

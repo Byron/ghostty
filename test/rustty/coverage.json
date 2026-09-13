@@ -102,6 +102,11 @@
       "remaining": "Literal byte matching, ASCII case folding, overlaps and formatter coordinates pass within one native page, including UTF-8 fragments, spaces, hard newlines and wraps. Multi-page ordering, duplicates and trailing-blank trimming still differ; retained thorough cases also expose a native search underflow. Incremental feed/tick, selected matches, viewport results and regex extension coverage remain."
     },
     {
+      "id": "terminal.page-layout",
+      "status": "partial",
+      "remaining": "Page/resource capacity and offset arithmetic, column adjustment and pooled/exact allocation charge are compared on macOS ARM64 without backing allocations. Page lifetime, splitting, retained resource entries, fragmentation, reflow inheritance and other platform ABIs remain."
+    },
+    {
       "id": "terminal.tracked",
       "status": "partial",
       "remaining": "Live coordinates/codepoints are compared through reflow, erasure, resets, handle reuse and screen switches. Owner isolation, reset lifetime, inactive release, line shifts and alternate/history pin motion pass; rebinding, exact pruning and snapshot restoration remain."

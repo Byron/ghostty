@@ -1236,13 +1236,12 @@ impl<R: Read> Decoder<R> {
                 {
                     let mut rows = self.decode_page(&payload)?;
                     let bytes = rows.iter().map(Row::storage_bytes).sum::<usize>();
-                    let allowed = screen.limits.bytes != Some(0)
-                        && screen
-                            .limits
+                    let limits = screen.effective_limits();
+                    let allowed = limits.bytes != Some(0)
+                        && limits
                             .lines
                             .is_none_or(|max| rows.len() + screen.history.len() <= max)
-                        && screen
-                            .limits
+                        && limits
                             .bytes
                             .is_none_or(|max| bytes.saturating_add(screen.storage_bytes()) <= max);
                     if allowed {

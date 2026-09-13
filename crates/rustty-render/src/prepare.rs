@@ -14,7 +14,11 @@ use std::{
 
 const PAGE_SIZE: u32 = 1024;
 const MAX_ATLAS_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_ATLAS_BYTES: u64 = 320 * 1024 * 1024;
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+#[path = "graphics.rs"]
+mod graphics;
 
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
@@ -93,6 +97,7 @@ struct Page {
     y: u32,
     row_height: u32,
     size: u32,
+    image: bool,
 }
 
 /// Builds frames on the host thread. Frame values themselves contain no native
@@ -101,6 +106,7 @@ pub struct Renderer {
     fonts: FontSystem,
     glyphs: HashMap<(FontId, u16), CachedGlyph>,
     sprites: HashMap<(char, u8), CachedGlyph>,
+    images: HashMap<graphics::TileKey, graphics::CachedTile>,
     pages: Vec<Page>,
     uploads: Vec<AtlasUpload>,
     generation: u64,
@@ -112,6 +118,7 @@ impl Renderer {
             fonts: FontSystem::new(config)?,
             glyphs: HashMap::new(),
             sprites: HashMap::new(),
+            images: HashMap::new(),
             pages: Vec::new(),
             uploads: Vec::new(),
             generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
@@ -128,6 +135,7 @@ impl Renderer {
     pub fn clear_cache(&mut self) {
         self.glyphs.clear();
         self.sprites.clear();
+        self.images.clear();
         self.pages.clear();
         self.uploads.clear();
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
@@ -138,13 +146,12 @@ impl Renderer {
         screen: &Screen,
         options: &RenderOptions,
     ) -> Result<Frame, RenderError> {
-        let had_cache = !self.pages.is_empty();
-        match self.prepare_once(screen, options) {
-            Err(RenderError::AtlasCapacity) if had_cache => {
+        match self.prepare_once(screen, options, false) {
+            Err(RenderError::AtlasCapacity) => {
                 // Rebuild the entire visible frame after eviction; a mid-frame
                 // reset would invalidate the atlas coordinates of earlier quads.
                 self.clear_cache();
-                self.prepare_once(screen, options)
+                self.prepare_once(screen, options, true)
             }
             result => result,
         }
@@ -154,6 +161,7 @@ impl Renderer {
         &mut self,
         screen: &Screen,
         options: &RenderOptions,
+        omit_excess_images: bool,
     ) -> Result<Frame, RenderError> {
         let metrics = self.metrics();
         let mut frame = Frame::empty(options.size);
@@ -162,6 +170,10 @@ impl Renderer {
             [0.0, 0.0, options.size[0] as f32, options.size[1] as f32],
             Color::rgb(options.background).opacity(options.background_opacity),
         ));
+        let [below_background, below_text, above_text] =
+            self.prepare_graphics(screen, options, omit_excess_images)?;
+        frame.quads.extend(below_background);
+        let mut foreground = Frame::empty(options.size);
         let viewport_start = screen.history.len().saturating_sub(screen.viewport_offset);
         let selection = screen.selection.and_then(|selection| {
             let start = screen
@@ -228,7 +240,7 @@ impl Renderer {
                 let fg = Color::rgb(fg).opacity(if cell.style.faint { 0.5 } else { 1.0 });
                 paints.push(fg);
             }
-            self.row_text(row, &paints, top, options, &mut frame)?;
+            self.row_text(row, &paints, top, options, &mut foreground)?;
             for (col, cell) in row.cells.iter().take(visible_cols).enumerate() {
                 if cell.width == 0 {
                     continue;
@@ -246,7 +258,7 @@ impl Renderer {
                 };
                 if !cell.style.invisible && (!cell.style.blink || options.blink_visible) {
                     decorations(
-                        &mut frame,
+                        &mut foreground,
                         &cell.style,
                         [x, top, width],
                         metrics,
@@ -267,17 +279,20 @@ impl Renderer {
                         [x, top, 1.0, h],
                         [x + w - 1.0, top, 1.0, h],
                     ] {
-                        frame.quads.push(Quad::solid(rect, color));
+                        foreground.quads.push(Quad::solid(rect, color));
                     }
                 } else {
                     let rect = match screen.cursor.shape {
                         CursorShape::Bar => [x, top, 2.0, h],
                         _ => [x, top + h - 2.0, w, 2.0],
                     };
-                    frame.quads.push(Quad::solid(rect, color));
+                    foreground.quads.push(Quad::solid(rect, color));
                 }
             }
         }
+        frame.quads.extend(below_text);
+        frame.quads.extend(foreground.quads);
+        frame.quads.extend(above_text);
         frame.atlas_uploads = self.uploads.clone();
         Ok(frame)
     }
@@ -294,7 +309,10 @@ impl Renderer {
         let mut col = 0;
         while col < paints.len() {
             let cell = &row.cells[col];
-            if cell.width == 0 || cell.style.invisible || cell.style.blink && !options.blink_visible
+            if cell.width == 0
+                || cell.style.invisible
+                || cell.style.blink && !options.blink_visible
+                || cell.text.starts_with(graphics::PLACEHOLDER)
             {
                 col += 1;
                 continue;
@@ -324,6 +342,7 @@ impl Renderer {
                 && row.cells[col].style == style
                 && paints[col] == color
                 && sprite_codepoint(&row.cells[col].text).is_none()
+                && !row.cells[col].text.starts_with(graphics::PLACEHOLDER)
             {
                 let cell = &row.cells[col];
                 if cell.width != 0 {
@@ -408,95 +427,120 @@ impl Renderer {
     }
 
     fn cache_bitmap(&mut self, bitmap: GlyphBitmap) -> Result<CachedGlyph, RenderError> {
+        let pixels: Vec<u8> = match bitmap.format {
+            BitmapFormat::Alpha => bitmap
+                .pixels
+                .iter()
+                .flat_map(|a| [255, 255, 255, *a])
+                .collect(),
+            BitmapFormat::Rgba => bitmap
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| {
+                    let unpremultiply = |v: u8| {
+                        if p[3] == 0 {
+                            0
+                        } else {
+                            ((u32::from(v) * 255 + u32::from(p[3]) / 2) / u32::from(p[3])).min(255)
+                                as u8
+                        }
+                    };
+                    [
+                        unpremultiply(p[0]),
+                        unpremultiply(p[1]),
+                        unpremultiply(p[2]),
+                        p[3],
+                    ]
+                })
+                .collect(),
+        };
+        let mut cached = self.cache_pixels([bitmap.width, bitmap.height], pixels.into(), false)?;
+        cached.bearing = [bitmap.bearing_x, bitmap.bearing_y];
+        cached.color = bitmap.format == BitmapFormat::Rgba;
+        Ok(cached)
+    }
+
+    fn cache_pixels(
+        &mut self,
+        dimensions: [u32; 2],
+        pixels: Arc<[u8]>,
+        image: bool,
+    ) -> Result<CachedGlyph, RenderError> {
+        let [width, height] = dimensions;
         let mut cached = CachedGlyph {
             atlas: 0,
             uv: [0.0; 4],
-            size: [bitmap.width, bitmap.height],
-            bearing: [bitmap.bearing_x, bitmap.bearing_y],
-            color: bitmap.format == BitmapFormat::Rgba,
+            size: dimensions,
+            bearing: [0, 0],
+            color: image,
         };
-        if bitmap.width > 0 && bitmap.height > 0 {
-            let required = (bitmap.width + 2)
-                .max(bitmap.height + 2)
-                .next_power_of_two()
-                .max(PAGE_SIZE);
-            let mut position = None;
-            for (index, page) in self.pages.iter_mut().enumerate() {
-                if let Some(origin) = reserve(page, bitmap.width + 2, bitmap.height + 2) {
-                    position = Some((index, origin));
-                    break;
-                }
-            }
-            let (page, origin) = if let Some(position) = position {
-                position
-            } else {
-                let bytes = self
-                    .pages
-                    .iter()
-                    .map(|p| u64::from(p.size).pow(2) * 4)
-                    .sum::<u64>();
-                if bytes + u64::from(required).pow(2) * 4 > MAX_ATLAS_BYTES {
-                    return Err(RenderError::AtlasCapacity);
-                }
-                let index = self.pages.len();
-                let mut page = Page {
-                    x: 0,
-                    y: 0,
-                    row_height: 0,
-                    size: required,
-                };
-                let origin = reserve(&mut page, bitmap.width + 2, bitmap.height + 2)
-                    .expect("new page fits glyph");
-                self.pages.push(page);
-                (index, origin)
-            };
-            let origin = [origin[0] + 1, origin[1] + 1];
-            let size = self.pages[page].size as f32;
-            cached.atlas = page;
-            cached.uv = [
-                origin[0] as f32 / size,
-                origin[1] as f32 / size,
-                (origin[0] + bitmap.width) as f32 / size,
-                (origin[1] + bitmap.height) as f32 / size,
-            ];
-            let pixels: Vec<u8> = match bitmap.format {
-                BitmapFormat::Alpha => bitmap
-                    .pixels
-                    .iter()
-                    .flat_map(|a| [255, 255, 255, *a])
-                    .collect(),
-                BitmapFormat::Rgba => bitmap
-                    .pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .flat_map(|p| {
-                        let unpremultiply = |v: u8| {
-                            if p[3] == 0 {
-                                0
-                            } else {
-                                ((u32::from(v) * 255 + u32::from(p[3]) / 2) / u32::from(p[3]))
-                                    .min(255) as u8
-                            }
-                        };
-                        [
-                            unpremultiply(p[0]),
-                            unpremultiply(p[1]),
-                            unpremultiply(p[2]),
-                            p[3],
-                        ]
-                    })
-                    .collect(),
-            };
-            self.uploads.push(AtlasUpload {
-                revision: self.uploads.len() as u64 + 1,
-                page,
-                page_size: self.pages[page].size,
-                origin,
-                size: cached.size,
-                pixels: Arc::from(pixels),
-            });
+        if width == 0 || height == 0 {
+            return Ok(cached);
         }
+        let required = (width + 2)
+            .max(height + 2)
+            .next_power_of_two()
+            .max(PAGE_SIZE);
+        let mut position = None;
+        for (index, page) in self
+            .pages
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, p)| p.image == image)
+        {
+            if let Some(origin) = reserve(page, width + 2, height + 2) {
+                position = Some((index, origin));
+                break;
+            }
+        }
+        let (page, origin) = if let Some(position) = position {
+            position
+        } else {
+            let bytes = self
+                .pages
+                .iter()
+                .filter(|p| p.image == image)
+                .map(|p| u64::from(p.size).pow(2) * 4)
+                .sum::<u64>();
+            let budget = if image {
+                MAX_IMAGE_ATLAS_BYTES
+            } else {
+                MAX_ATLAS_BYTES
+            };
+            if bytes + u64::from(required).pow(2) * 4 > budget {
+                return Err(RenderError::AtlasCapacity);
+            }
+            let index = self.pages.len();
+            let mut page = Page {
+                x: 0,
+                y: 0,
+                row_height: 0,
+                size: required,
+                image,
+            };
+            let origin = reserve(&mut page, width + 2, height + 2).expect("new page fits bitmap");
+            self.pages.push(page);
+            (index, origin)
+        };
+        let origin = [origin[0] + 1, origin[1] + 1];
+        let size = self.pages[page].size as f32;
+        cached.atlas = page;
+        cached.uv = [
+            origin[0] as f32 / size,
+            origin[1] as f32 / size,
+            (origin[0] + width) as f32 / size,
+            (origin[1] + height) as f32 / size,
+        ];
+        self.uploads.push(AtlasUpload {
+            revision: self.uploads.len() as u64 + 1,
+            page,
+            page_size: self.pages[page].size,
+            origin,
+            size: dimensions,
+            pixels,
+        });
         Ok(cached)
     }
 }

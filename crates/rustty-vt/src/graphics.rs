@@ -84,6 +84,10 @@ pub struct Placement {
     pub col: usize,
     pub columns: u32,
     pub rows: u32,
+    /// Requested c/r values, before inferring cells for cursor movement.
+    pub requested_size: [u32; 2],
+    /// Projected anchor in viewport snapshots, including roots above the viewport.
+    pub viewport_row: Option<i64>,
     pub z: i32,
     /// Pixel-space source rectangle, clipped to the image.
     pub source: [u32; 4],
@@ -126,10 +130,25 @@ impl Default for Graphics {
 }
 
 impl Graphics {
-    pub(crate) fn snapshot(&self) -> Self {
+    pub(crate) fn snapshot(&self, screen: &Screen) -> Self {
+        let mut placements = self.placements.clone();
+        if !placements.is_empty() {
+            let start = screen.history.len().saturating_sub(screen.viewport_offset) as i64;
+            let anchors: HashSet<_> = placements.iter().map(|p| p.row).collect();
+            let offsets: HashMap<_, _> = screen
+                .all_rows()
+                .enumerate()
+                .filter(|(_, row)| anchors.contains(&row.id))
+                .map(|(index, row)| (row.id, index as i64 - start))
+                .collect();
+            for placement in &mut placements {
+                placement.viewport_row =
+                    Some(offsets.get(&placement.row).copied().unwrap_or(i64::MIN));
+            }
+        }
         Self {
             images: self.images.clone(),
-            placements: self.placements.clone(),
+            placements,
             generation: self.generation,
             limit: self.limit,
             loading: None,
@@ -590,6 +609,8 @@ impl Terminal {
             col: cursor.col,
             columns,
             rows,
+            requested_size: [cmd.n(b'c'), cmd.n(b'r')],
+            viewport_row: None,
             z: cmd.signed(b'z'),
             source: [x, y, width, height],
             offset,

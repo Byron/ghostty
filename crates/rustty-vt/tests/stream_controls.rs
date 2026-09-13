@@ -131,3 +131,44 @@ fn relative_position_commands_use_absolute_position_margin_rules() {
         (5, 6)
     );
 }
+
+#[test]
+fn explicit_zero_scroll_up_preserves_the_direct_scroll_path() {
+    for alternate in [false, true] {
+        let mut terminal = Terminal::new(6, 4, 10);
+        if alternate {
+            terminal.feed(b"\x1b[?1049h");
+        }
+        terminal.feed(b"a\r\nb\r\nc\r\nd\x1b[2;6HX");
+        assert!(terminal.screen().cursor.pending_wrap);
+        let before = rustty_vt::snapshot::encode_to_vec(&terminal).unwrap();
+        terminal.feed(b"\x1b[0S\x1b[;S");
+        assert!(rustty_vt::snapshot::encode_to_vec(&terminal).unwrap() == before);
+        terminal.feed(b"\x1b[S");
+        assert_eq!(terminal.screen().rows[0].text(), "b    X");
+        assert!(terminal.screen().cursor.pending_wrap);
+    }
+}
+
+#[test]
+fn explicit_zero_scroll_up_preserves_partial_regions() {
+    for (alternate, margins) in [
+        (false, b"\x1b[2;3r".as_slice()),
+        (true, b"\x1b[1;3r".as_slice()),
+    ] {
+        let mut terminal = Terminal::new(6, 4, 10);
+        if alternate {
+            terminal.feed(b"\x1b[?1049h");
+        }
+        terminal.feed(b"a\r\nb\r\nc\r\nd");
+        terminal.feed(margins);
+        terminal.feed(b"\x1b[0S");
+        let rows: Vec<_> = terminal
+            .screen()
+            .rows
+            .iter()
+            .map(|row| row.text())
+            .collect();
+        assert_eq!(rows, ["a", "b", "c", "d"]);
+    }
+}

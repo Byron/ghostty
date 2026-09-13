@@ -149,10 +149,13 @@ impl Tree {
     }
     pub fn layout(&self, rect: Rect) -> Vec<(Id, Rect)> {
         let mut out = Vec::new();
-        self.layout_into(rect, &mut out);
+        self.layout_into(rect, &mut out, false);
         out
     }
-    fn layout_into(&self, rect: Rect, out: &mut Vec<(Id, Rect)>) {
+    fn layout_into(&self, rect: Rect, out: &mut Vec<(Id, Rect)>, include_splits: bool) {
+        if include_splits && matches!(self.kind, Node::Split { .. }) {
+            out.push((self.id, rect));
+        }
         match &self.kind {
             Node::Pane(pane) => out.push((*pane, rect)),
             Node::Split {
@@ -185,10 +188,44 @@ impl Tree {
                         },
                     ),
                 };
-                first.layout_into(a, out);
-                second.layout_into(b, out);
+                first.layout_into(a, out, include_splits);
+                second.layout_into(b, out, include_splits);
             }
         }
+    }
+    // Ghostty's spatial navigation uses top-left distances on a grid whose
+    // dimensions come from the split topology, including structural nodes.
+    fn spatial(&self) -> Vec<(Id, Rect)> {
+        fn dimensions(tree: &Tree) -> [f32; 2] {
+            match &tree.kind {
+                Node::Pane(_) => [1.0, 1.0],
+                Node::Split {
+                    axis,
+                    first,
+                    second,
+                    ..
+                } => {
+                    let a = dimensions(first);
+                    let b = dimensions(second);
+                    match axis {
+                        Axis::Horizontal => [a[0] + b[0], a[1].max(b[1])],
+                        Axis::Vertical => [a[0].max(b[0]), a[1] + b[1]],
+                    }
+                }
+            }
+        }
+        let [width, height] = dimensions(self);
+        let mut out = Vec::new();
+        self.layout_into(
+            Rect {
+                width,
+                height,
+                ..Rect::UNIT
+            },
+            &mut out,
+            true,
+        );
+        out
     }
     pub fn equalize(&mut self) {
         if let Node::Split {
@@ -240,9 +277,9 @@ impl Tree {
             else {
                 return None;
             };
-            let child = if first.contains(pane) {
+            let child = if first.node(pane).is_some() {
                 first
-            } else if second.contains(pane) {
+            } else if second.node(pane).is_some() {
                 second
             } else {
                 return None;
@@ -343,20 +380,6 @@ impl Tab {
         }
     }
     pub fn target(&self, from: Id, direction: Direction) -> Option<Id> {
-        let layout = self.root.layout(Rect::UNIT);
-        let index = layout.iter().position(|(id, _)| *id == from)?;
-        if matches!(direction, Direction::Previous | Direction::Next) {
-            return Some(
-                layout[(index
-                    + if direction == Direction::Next {
-                        1
-                    } else {
-                        layout.len() - 1
-                    })
-                    % layout.len()]
-                .0,
-            );
-        }
         let quadrant_only = matches!(
             direction,
             Direction::QuadrantLeft
@@ -364,32 +387,65 @@ impl Tab {
                 | Direction::QuadrantUp
                 | Direction::QuadrantDown
         );
-        let source_quadrant = self.root.quadrant(from);
-        let source = layout[index].1.center();
-        let mut targets = layout
-            .into_iter()
-            .filter_map(|(id, rect)| {
-                if id == from || quadrant_only && self.root.quadrant(id) == source_quadrant {
-                    return None;
-                }
-                let center = rect.center();
-                let (along, across) = match direction {
-                    Direction::Left | Direction::QuadrantLeft => {
-                        (source[0] - center[0], source[1] - center[1])
-                    }
-                    Direction::Right | Direction::QuadrantRight => {
-                        (center[0] - source[0], source[1] - center[1])
-                    }
-                    Direction::Up | Direction::QuadrantUp => {
-                        (source[1] - center[1], source[0] - center[0])
-                    }
-                    _ => (center[1] - source[1], source[0] - center[0]),
-                };
-                (along > 0.0001).then_some((id, across.abs() * 2.0 + along))
-            })
-            .collect::<Vec<_>>();
-        targets.sort_by(|a, b| a.1.total_cmp(&b.1));
-        targets.first().map(|(id, _)| *id)
+        let root = if quadrant_only {
+            &self.root
+        } else {
+            self.quadrant_zoom
+                .and_then(|id| self.root.node(id))
+                .unwrap_or(&self.root)
+        };
+        let panes = root.panes();
+        let index = panes.iter().position(|id| *id == from)?;
+        if matches!(direction, Direction::Previous | Direction::Next) {
+            return Some(
+                panes[(index
+                    + if direction == Direction::Next {
+                        1
+                    } else {
+                        panes.len() - 1
+                    })
+                    % panes.len()],
+            );
+        }
+        let slots = root.spatial();
+        let adjacent = |from: Id| -> Vec<Id> {
+            let Some((_, source)) = slots.iter().find(|(id, _)| *id == from) else {
+                return Vec::new();
+            };
+            let mut candidates = slots
+                .iter()
+                .filter(|(id, rect)| {
+                    *id != from
+                        && match direction {
+                            Direction::Left | Direction::QuadrantLeft => {
+                                rect.x + rect.width <= source.x
+                            }
+                            Direction::Right | Direction::QuadrantRight => {
+                                rect.x >= source.x + source.width
+                            }
+                            Direction::Up | Direction::QuadrantUp => {
+                                rect.y + rect.height <= source.y
+                            }
+                            _ => rect.y >= source.y + source.height,
+                        }
+                })
+                .collect::<Vec<_>>();
+            let distance = |rect: &Rect| (rect.x - source.x).powi(2) + (rect.y - source.y).powi(2);
+            candidates.sort_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)));
+            candidates.into_iter().map(|(id, _)| *id).collect()
+        };
+        let target_quadrant = if quadrant_only {
+            let current = root.quadrant(from)?;
+            let target = adjacent(current)
+                .into_iter()
+                .find(|id| root.quadrant(*id) == Some(*id))?;
+            Some(root.node(target)?)
+        } else {
+            None
+        };
+        adjacent(from).into_iter().find(|id| {
+            panes.contains(id) && target_quadrant.is_none_or(|quadrant| quadrant.contains(*id))
+        })
     }
     pub fn split(&mut self, new_pane: Id, split_id: Id, direction: Direction, directory: PathBuf) {
         self.root.split(self.focused, new_pane, split_id, direction);
@@ -602,6 +658,29 @@ mod tests {
         assert_eq!(tab.target(2, Direction::Left), None);
         assert!(tab.close(9));
         assert_eq!(tab.root.quadrant(2), Some(2));
+    }
+    #[test]
+    fn directional_navigation_uses_edges_and_stays_in_zoomed_quadrant() {
+        let mut tab = Tab::new(1, 2, PathBuf::from("/tmp"));
+        tab.split(3, 4, Direction::Right, PathBuf::from("/tmp"));
+        tab.split(5, 6, Direction::Down, PathBuf::from("/tmp"));
+        if let Node::Split { second, .. } = &mut tab.root.kind
+            && let Node::Split { ratio, .. } = &mut second.kind
+        {
+            *ratio = 0.1;
+        }
+        // A full-height pane moves to the topmost neighboring pane, and has
+        // nothing below it even if another pane has a lower center point.
+        assert_eq!(tab.target(2, Direction::Right), Some(3));
+        assert_eq!(tab.target(2, Direction::Down), None);
+        let mut tab = quadrants();
+        tab.focus(2);
+        tab.split(9, 10, Direction::Right, PathBuf::from("/tmp"));
+        tab.toggle_quadrant_zoom();
+        assert_eq!(tab.target(2, Direction::Right), Some(9));
+        assert_eq!(tab.target(9, Direction::Right), None);
+        assert_eq!(tab.target(9, Direction::Next), Some(2));
+        assert_eq!(tab.target(9, Direction::QuadrantRight), Some(3));
     }
     #[test]
     fn serialized_workspace_preserves_layout_focus_and_directories() {

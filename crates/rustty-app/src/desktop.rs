@@ -72,24 +72,12 @@ struct Pane {
 }
 impl Pane {
     fn write(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
+        QueuedInput {
+            session: &self.session,
+            queue: &mut self.input,
+            bytes: &mut self.input_bytes,
         }
-        if self.input.is_empty() {
-            match self.session.write(&bytes) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error),
-            }
-        }
-        if self.input_bytes.saturating_add(bytes.len()) > INPUT_BUDGET {
-            return Err(std::io::Error::other(
-                "Input queue is full. Wait for the command to read its input.",
-            ));
-        }
-        self.input_bytes += bytes.len();
-        self.input.push_back(bytes);
-        Ok(())
+        .enqueue(bytes)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         while let Some(bytes) = self.input.front() {
@@ -105,6 +93,44 @@ impl Pane {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+/// A successful write means the complete packet is accepted by the pane's ordered queue.
+struct QueuedInput<'a> {
+    session: &'a Session,
+    queue: &'a mut VecDeque<Vec<u8>>,
+    bytes: &'a mut usize,
+}
+impl QueuedInput<'_> {
+    fn enqueue(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.queue.is_empty() {
+            match self.session.write(&bytes) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if self.bytes.saturating_add(bytes.len()) > INPUT_BUDGET {
+            return Err(std::io::Error::other(
+                "Input queue is full. Wait for the command to read its input.",
+            ));
+        }
+        *self.bytes += bytes.len();
+        self.queue.push_back(bytes);
+        Ok(())
+    }
+}
+impl std::io::Write for QueuedInput<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.enqueue(bytes.to_vec())?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -848,6 +874,59 @@ impl App {
         self.write(paste.pane, bytes);
         host.repaint();
     }
+    fn paste_event(
+        &mut self,
+        window: Id,
+        pane: Id,
+        location: vt::clipboard::Location,
+    ) -> std::result::Result<bool, String> {
+        if !self.paste_target_exists(window, pane) {
+            return Ok(true);
+        }
+        let Some(platform) = &self.platform else {
+            return Ok(false);
+        };
+        if !self.panes[&pane]
+            .session
+            .terminal()
+            .map_err(|error| error.to_string())?
+            .modes
+            .dec(5522)
+        {
+            return Ok(false);
+        }
+        // Query only native types, outside the terminal lock. Lazy pasteboard
+        // providers must not be asked for payload bytes to announce a paste.
+        let request = paste_listing_request(location);
+        let vt::clipboard::ReadResult::Success(listing) = platform.clipboard_read(&request) else {
+            return Err("Could not list the clipboard's available formats.".into());
+        };
+        let Pane {
+            session,
+            input,
+            input_bytes,
+            ..
+        } = self.panes.get_mut(&pane).unwrap();
+        let mut terminal = session.terminal().map_err(|error| error.to_string())?;
+        let mut output = QueuedInput {
+            session,
+            queue: input,
+            bytes: input_bytes,
+        };
+        let emitted = emit_paste_event(
+            &mut terminal,
+            location,
+            &listing.available,
+            &mut Platform::secure_random,
+            &mut output,
+        )
+        .map_err(|error| error.to_string())?;
+        if emitted {
+            terminal.screen_mut().viewport_offset = 0;
+            terminal.screen_mut().selection = None;
+        }
+        Ok(emitted)
+    }
     fn focus_pane(&mut self, window: Id, pane: Id) {
         let previous = self.focused(window);
         if let Some(tab) = self.tab_mut(window) {
@@ -1552,20 +1631,33 @@ impl App {
                 host.egui.set_clipboard_text(text);
             }
             Action::PasteFromClipboard | Action::PasteFromSelection => {
-                let text = if action == Action::PasteFromSelection {
-                    self.selection_text()
-                } else {
-                    host.egui.clipboard_text()
-                };
-                if let (Some(id), Some(text)) = (focused, text) {
-                    self.paste(
-                        host,
-                        PendingPaste {
-                            pane: id,
-                            data: text.into_bytes(),
-                        },
-                        false,
-                    );
+                if let Some(id) = focused {
+                    let location = if action == Action::PasteFromSelection {
+                        vt::clipboard::Location::Selection
+                    } else {
+                        vt::clipboard::Location::Standard
+                    };
+                    match self.paste_event(host.id, id, location) {
+                        Ok(true) => {}
+                        Err(error) => self.errors.push(error),
+                        Ok(false) => {
+                            let text = if action == Action::PasteFromSelection {
+                                self.selection_text()
+                            } else {
+                                host.egui.clipboard_text()
+                            };
+                            if let Some(text) = text {
+                                self.paste(
+                                    host,
+                                    PendingPaste {
+                                        pane: id,
+                                        data: text.into_bytes(),
+                                    },
+                                    false,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             Action::SelectAll => {
@@ -3792,6 +3884,44 @@ fn paste_needs_confirmation(config: &Config, terminal: &vt::Terminal, data: &[u8
         )
 }
 
+fn paste_listing_request(location: vt::clipboard::Location) -> vt::clipboard::Read {
+    let mut request = vt::clipboard::Read::osc52(location, vt::clipboard::Terminator::St);
+    request.mimes.clear();
+    request.list = true;
+    request
+}
+
+fn emit_paste_event(
+    terminal: &mut vt::Terminal,
+    location: vt::clipboard::Location,
+    mimes: &[Vec<u8>],
+    random: &mut vt::paste::SecureRandom<'_>,
+    output: &mut dyn std::io::Write,
+) -> std::result::Result<bool, vt::paste::Error> {
+    // Mode can change while native formats are queried. Return to text capture
+    // instead of reading a native payload while holding the terminal lock.
+    if !terminal.modes.dec(5522) {
+        return Ok(false);
+    }
+    let mut read = |_: &[u8]| {
+        Err(std::io::Error::other(
+            "paste events must not read clipboard payloads",
+        ))
+    };
+    terminal.paste(
+        vt::paste::Request {
+            source: vt::paste::Source::Clipboard(location),
+            contents: vt::paste::Contents::Reader {
+                mimes,
+                read: &mut read,
+            },
+            allow_unsafe: false,
+        },
+        Some(random),
+        output,
+    )
+}
+
 fn hold_after_exit(config: &Config, runtime: Duration) -> bool {
     config.wait_after_command
         || runtime.as_millis() <= u128::from(config.abnormal_command_exit_runtime)
@@ -4081,6 +4211,85 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn kitty_paste_lists_without_payload_reads_and_grants_still_respect_explicit_denial() {
+        use base64::Engine;
+        for location in [
+            vt::clipboard::Location::Standard,
+            vt::clipboard::Location::Selection,
+        ] {
+            let request = paste_listing_request(location);
+            assert!(request.list && request.mimes.is_empty());
+            assert_eq!(request.location, location);
+            let mimes = [b"text/plain".to_vec(), b"image/png".to_vec()];
+            let mut terminal = vt::Terminal::new(20, 2, 0);
+            let mut output = Vec::new();
+            assert!(
+                !emit_paste_event(
+                    &mut terminal,
+                    location,
+                    &mimes,
+                    &mut |_| panic!("text fallback must not generate a grant"),
+                    &mut output
+                )
+                .unwrap()
+            );
+            assert!(output.is_empty());
+            terminal.feed(b"\x1b[?5522;2004h");
+            let mut random = |bytes: &mut [u8]| {
+                bytes.fill(0);
+                Ok(())
+            };
+            // The host's event reader fails if called: success requires MIME-only handling.
+            assert!(
+                emit_paste_event(&mut terminal, location, &mimes, &mut random, &mut output)
+                    .unwrap()
+            );
+            let event = String::from_utf8(output).unwrap();
+            assert!(event.starts_with("\x1b]5522;type=read:status=OK"));
+            assert_eq!(
+                event.contains(":loc=primary"),
+                location == vt::clipboard::Location::Selection
+            );
+            let password = base64::engine::general_purpose::STANDARD.encode([b'2'; 22]);
+            let request =
+                format!("\x1b]5522;type=read:name=cHJvZ3JhbQ==:pw={password};dGV4dC9wbGFpbg==\x07");
+            let read = terminal
+                .feed(request.as_bytes())
+                .into_iter()
+                .find_map(|effect| match effect {
+                    vt::Effect::ClipboardRead(read) => Some(read),
+                    _ => None,
+                })
+                .expect("follow-up clipboard read");
+            assert!(read.granted);
+            let mut config = Config::default();
+            let effect = vt::Effect::ClipboardRead(read);
+            assert_eq!(
+                clipboard_policy(&config, &effect),
+                config::ClipboardAccess::Allow
+            );
+            config.clipboard_read = config::ClipboardAccess::Deny;
+            assert_eq!(
+                clipboard_policy(&config, &effect),
+                config::ClipboardAccess::Deny
+            );
+            terminal.feed(b"\x1b[?5522l");
+            let mut output = Vec::new();
+            assert!(
+                !emit_paste_event(
+                    &mut terminal,
+                    location,
+                    &mimes,
+                    &mut |_| panic!("mode changed while native types were listed"),
+                    &mut output
+                )
+                .unwrap()
+            );
+            assert!(output.is_empty());
         }
     }
 

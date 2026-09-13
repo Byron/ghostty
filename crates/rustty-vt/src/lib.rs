@@ -1,10 +1,13 @@
 //! Headless terminal state and protocol handling.
 
+pub mod input;
 pub mod modes;
 pub mod screen;
+pub mod search;
 mod terminal;
 pub mod unicode;
 
+pub use input::{Key, KeyAction, KeyEvent, Modifiers, MouseAction, MouseButton, MouseEvent};
 pub use screen::{
     Cell, Color, Cursor, CursorShape, GridPoint, Row, Screen, Selection, SemanticContent, Style,
     TrackedPoint, Underline,

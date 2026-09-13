@@ -133,6 +133,16 @@ impl Terminal {
         &self.parser
     }
 
+    pub fn primary_screen(&self) -> &Screen {
+        &self.primary
+    }
+    pub fn alternate_screen(&self) -> Option<&Screen> {
+        self.alternate.as_ref()
+    }
+    pub fn tabstops(&self) -> &[bool] {
+        &self.tabstops
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut parser = std::mem::take(&mut self.parser);

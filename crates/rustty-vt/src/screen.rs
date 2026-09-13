@@ -301,6 +301,29 @@ impl Screen {
         self.all_rows().skip(start).take(self.rows.len())
     }
 
+    /// Copy only visible rows so shaping and GPU preparation need no session lock.
+    pub fn snapshot_viewport(&self) -> Self {
+        let mut cursor = self.cursor.clone();
+        cursor.row = cursor.row.saturating_add(self.viewport_offset);
+        cursor.visible &= cursor.row < self.rows.len();
+        cursor.row = cursor.row.min(self.rows.len() - 1);
+        Self {
+            rows: self.viewport().cloned().collect(),
+            history: VecDeque::new(),
+            cursor,
+            selection: self.selection,
+            viewport_offset: 0,
+            kitty_keyboard: self.kitty_keyboard.clone(),
+            saved_cursor: None,
+            charset: self.charset.clone(),
+            iso_protection: self.iso_protection,
+            scrollback_limit: 0,
+            next_row: self.next_row,
+            tracked: HashMap::new(),
+            next_track: 0,
+        }
+    }
+
     pub fn scroll_viewport(&mut self, rows: isize) {
         self.viewport_offset = self
             .viewport_offset

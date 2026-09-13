@@ -275,6 +275,7 @@ pub struct Config {
     pub undo_timeout: Duration,
     pub quit_after_last_window_closed: bool,
     pub bell_features: BellFeatures,
+    pub progress_style: bool,
     pub notify_on_command_finish: NotifyOnCommandFinish,
     pub notify_on_command_finish_action: NotifyActions,
     pub notify_on_command_finish_after: Duration,
@@ -358,6 +359,7 @@ impl Default for Config {
             undo_timeout: Duration::from_secs(5),
             quit_after_last_window_closed: false,
             bell_features: BellFeatures::default(),
+            progress_style: true,
             notify_on_command_finish: NotifyOnCommandFinish::Never,
             notify_on_command_finish_action: NotifyActions::default(),
             notify_on_command_finish_after: Duration::from_secs(5),
@@ -523,6 +525,7 @@ impl Config {
                 set!(quit_after_last_window_closed, parse_bool(value)?)
             }
             "bell-features" => set!(bell_features, parse_bell_features(value)?),
+            "progress-style" => set!(progress_style, parse_bool(value)?),
             "notify-on-command-finish" => set!(
                 notify_on_command_finish,
                 NotifyOnCommandFinish::parse(value)?

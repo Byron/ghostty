@@ -576,6 +576,7 @@ fn current_local_workflow_settings_and_actions_are_supported() {
     home.local(
         r#"
 bell-features = no-system,no-audio,attention
+progress-style = false
 notify-on-command-finish-action = notify
 window-save-state = always
 copy-on-select = clipboard
@@ -621,6 +622,7 @@ keybind = cmd+shift+f=toggle_quadrant_zoom
     assert_eq!(config.quadrant_peek_opacity, 0.6);
     assert!(config.bell_features.attention && config.notify_on_command_finish_action.notify);
     assert!(!config.bell_features.audio && !config.bell_features.system);
+    assert!(!config.progress_style);
     assert_eq!(action(&config, "ctrl+tab"), None);
     assert_eq!(
         action(&config, "super+j"),

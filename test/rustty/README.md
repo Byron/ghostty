@@ -79,6 +79,14 @@ callbacks. `Terminal::shell_command_events` explicitly enables Rustty's
 sessions enable it. The oracle uses the native default and still rejects
 unexpected effects. VT and session tests verify the opted-in event ordering.
 
+`--protocols --case protocol/semantic` compares all native OSC 133 actions,
+prompt kinds, option precedence, capture limits, line transitions and screen
+clears. `observe_semantic` adds live redraw policy, click behavior, EOL-clear
+state and visible/history row markers to observations. Snapshot cases restore
+those values through both encodings, including `redraw=last` and `cl=w`.
+These observations read terminal state directly and remain optional for other
+protocol cases.
+
 `--snapshots` exports one snapshot from each implementation, restores each
 encoding in both implementations, and resumes terminal input. It compares
 the restored state and effects with uninterrupted execution as well as with

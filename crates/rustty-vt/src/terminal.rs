@@ -256,6 +256,14 @@ impl Terminal {
         self.changed();
     }
 
+    pub fn shell_prompt_redraw(&self) -> PromptRedraw {
+        match self.metadata.shell_redraw {
+            1 => PromptRedraw::None,
+            2 => PromptRedraw::Last,
+            _ => PromptRedraw::All,
+        }
+    }
+
     /// Feed input with runtime `query_defaults` and return deferred host effects.
     /// Query replies use the current terminal geometry. For fully headless or
     /// readonly hosts, use `feed_with_handler` and opt into the needed callbacks.
@@ -940,11 +948,19 @@ impl Terminal {
 
     fn print_wrap(&mut self) {
         let y = self.screen().cursor.row;
+        let semantic = self.screen().cursor.semantic;
+        let clear_eol = self.screen().metadata.cursor_clear_eol;
         let mark_wrap = self.screen().cursor.col == usize::from(self.cols) - 1;
         if mark_wrap {
             self.screen_mut().rows[y].wrapped = true;
         }
         self.index();
+        let screen = self.screen_mut();
+        screen.cursor.semantic = semantic;
+        screen.metadata.cursor_clear_eol = clear_eol;
+        if semantic == SemanticContent::Prompt {
+            screen.rows[screen.cursor.row].semantic = SemanticContent::Input;
+        }
         if mark_wrap {
             let y = self.screen().cursor.row;
             self.screen_mut().rows[y].wrap_continuation = true;
@@ -1080,6 +1096,15 @@ impl Terminal {
         }
         self.clamp_cursor();
         self.screen_mut().cursor.pending_wrap = false;
+        let screen = self.screen_mut();
+        if screen.cursor.semantic != SemanticContent::Output {
+            if screen.metadata.cursor_clear_eol {
+                screen.cursor.semantic = SemanticContent::Output;
+                screen.metadata.cursor_clear_eol = false;
+            } else {
+                screen.rows[screen.cursor.row].semantic = SemanticContent::Input;
+            }
+        }
         self.changed();
     }
 
@@ -1267,6 +1292,15 @@ impl Terminal {
                 (0, cursor.row)
             }
             2 => {
+                if !self.alternate_active
+                    && self
+                        .screen()
+                        .rows
+                        .last()
+                        .is_some_and(|row| row.semantic != SemanticContent::Output)
+                {
+                    self.scroll_clear();
+                }
                 self.screen_mut().clear_visible_images();
                 (0, rows)
             }
@@ -1283,7 +1317,11 @@ impl Terminal {
         };
         for row in &mut self.screen_mut().rows[start..end] {
             row.erase(0, row.cells.len(), cursor.style.background, protected);
-            row.wrapped = false;
+            if !protected {
+                row.wrapped = false;
+                row.wrap_continuation = false;
+                row.semantic = SemanticContent::Output;
+            }
         }
         self.screen_mut().cursor.pending_wrap = false;
         self.changed();
@@ -1427,6 +1465,7 @@ impl Terminal {
             self.erase_display(2, false);
         }
         let old_cursor = self.screen().cursor.clone();
+        let clear_eol = self.screen().metadata.cursor_clear_eol;
         let charset = self.screen().charset.clone();
         self.end_hyperlink();
         let switched = self.alternate_active != enabled;
@@ -1447,6 +1486,7 @@ impl Terminal {
         // alternate cursor's appearance. Legacy modes copy in both directions.
         if switched && (mode != 1049 || enabled) {
             self.screen_mut().cursor = old_cursor;
+            self.screen_mut().metadata.cursor_clear_eol = clear_eol;
             self.end_hyperlink();
         }
         if mode == 1049 && !enabled {
@@ -1848,10 +1888,9 @@ impl Terminal {
         match number {
             // These fixed captures append a NUL before dispatch.
             0 | 2 | 7 | 8 | 777 | 1337 if !has_separator || data.len() >= 2048 => return,
-            9 if !has_separator || data.len() > 2048 => return,
+            9 | 133 if !has_separator || data.len() > 2048 => return,
             _ => {}
         }
-        let text = String::from_utf8_lossy(data);
         match number {
             0 | 2 => {
                 // The stream validates the full title before the host handler
@@ -1983,45 +2022,114 @@ impl Terminal {
                 clipboard_read_enabled,
                 effects,
             ),
-            133 => match text.split(';').next().unwrap_or("") {
-                "A" => {
-                    let row = self.screen().cursor.row;
-                    self.screen_mut().cursor.semantic = SemanticContent::Prompt;
-                    self.screen_mut().rows[row].semantic = SemanticContent::Prompt;
-                }
-                "B" => self.screen_mut().cursor.semantic = SemanticContent::Input,
-                "C" => {
-                    self.screen_mut().cursor.semantic = SemanticContent::Output;
-                    if self.shell_command_events {
-                        effects.push(Effect::CommandStart);
-                    }
-                }
-                "D" if self.shell_command_events => effects.push(Effect::CommandEnd {
-                    exit_code: text.split(';').nth(1).and_then(|v| v.parse().ok()),
-                }),
-                _ => {}
-            },
+            133 => self.osc133(data, effects),
             1 | 22 => {}
             _ => effects.push(Effect::UnknownSequence(format!("OSC {number}"))),
         }
     }
 
+    fn semantic_fresh_line(&mut self) {
+        let col = self.screen().cursor.col;
+        let left = if col < self.margins.left {
+            0
+        } else {
+            self.margins.left
+        };
+        if col != left {
+            self.carriage_return();
+            self.index();
+        }
+    }
+
+    fn semantic_prompt(&mut self, continuation: bool) {
+        let screen = self.screen_mut();
+        screen.cursor.semantic = SemanticContent::Prompt;
+        screen.metadata.cursor_clear_eol = false;
+        screen.rows[screen.cursor.row].semantic = if continuation {
+            SemanticContent::Input
+        } else {
+            SemanticContent::Prompt
+        };
+    }
+
+    fn osc133(&mut self, data: &[u8], effects: &mut Vec<Effect>) {
+        let Some(&action) = data.first() else { return };
+        if data.len() > 1 && (action == b'L' || data[1] != b';') {
+            return;
+        }
+        let options = data.get(2..).unwrap_or_default();
+        // The first matching key wins, even when its value is invalid.
+        let option = |prefix| {
+            options
+                .split(|&byte| byte == b';')
+                .find_map(|part| part.strip_prefix(prefix))
+        };
+        match action {
+            b'L' => self.semantic_fresh_line(),
+            b'A' | b'N' | b'P' => {
+                if action != b'P' {
+                    self.semantic_fresh_line();
+                }
+                self.semantic_prompt(matches!(option(b"k=".as_slice()), Some(b"c" | b"s")));
+                if action != b'P' {
+                    if let Some(redraw) = match option(b"redraw=") {
+                        Some(b"0") => Some(1),
+                        Some(b"1") => Some(0),
+                        Some(b"last") => Some(2),
+                        _ => None,
+                    } {
+                        self.metadata.shell_redraw = redraw;
+                    }
+                    let click = match option(b"click_events=") {
+                        Some(b"1") => Some([1, 0]),
+                        Some(b"2") => Some([1, 1]),
+                        _ => match option(b"cl=") {
+                            Some(b"line") => Some([2, 0]),
+                            Some(b"m") => Some([2, 1]),
+                            Some(b"v") => Some([2, 2]),
+                            Some(b"w") => Some([2, 3]),
+                            _ => None,
+                        },
+                    };
+                    if let Some(click) = click {
+                        self.screen_mut().metadata.semantic_click = click;
+                    }
+                }
+            }
+            b'B' | b'I' => {
+                let screen = self.screen_mut();
+                screen.cursor.semantic = SemanticContent::Input;
+                screen.metadata.cursor_clear_eol = action == b'I';
+            }
+            b'C' | b'D' => {
+                let screen = self.screen_mut();
+                screen.cursor.semantic = SemanticContent::Output;
+                screen.metadata.cursor_clear_eol = false;
+                if action == b'C' && screen.cursor.col == 0 {
+                    screen.rows[screen.cursor.row].semantic = SemanticContent::Output;
+                }
+                if self.shell_command_events {
+                    effects.push(if action == b'C' {
+                        Effect::CommandStart
+                    } else {
+                        Effect::CommandEnd {
+                            exit_code: options
+                                .split(|&byte| byte == b';')
+                                .next()
+                                .and_then(|value| std::str::from_utf8(value).ok())
+                                .and_then(|value| value.parse().ok()),
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn osc9(&mut self, data: &[u8], effects: &mut Vec<Effect>) {
         if data.starts_with(b"12") {
-            let col = self.screen().cursor.col;
-            let left = if col < self.margins.left {
-                0
-            } else {
-                self.margins.left
-            };
-            if col != left {
-                self.carriage_return();
-                self.index();
-            }
-            let screen = self.screen_mut();
-            screen.cursor.semantic = SemanticContent::Prompt;
-            screen.metadata.cursor_clear_eol = false;
-            screen.rows[screen.cursor.row].semantic = SemanticContent::Prompt;
+            self.semantic_fresh_line();
+            self.semantic_prompt(false);
             return;
         }
         if let Some(progress) = data.strip_prefix(b"4;")

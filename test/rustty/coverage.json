@@ -19,7 +19,7 @@
     {
       "id": "terminal.reset",
       "status": "partial",
-      "remaining": "Mode/cursor defaults, saved bits, color persistence, RIS and direct resets are compared; graphics and other reset state still need complete coverage."
+      "remaining": "Mode/cursor defaults, saved bits, color persistence, RIS, and direct-reset continuation through UTF-8/ESC/CSI/OSC/DCS/APC including capture limits are compared; graphics and other reset state still need complete coverage."
     },
     {
       "id": "terminal.observe",

@@ -481,7 +481,17 @@ impl Terminal {
         }
     }
 
+    /// Reset terminal state while preserving the input stream's pending bytes.
+    /// A host reset does not cancel a partially received escape sequence.
     pub fn reset(&mut self) {
+        let input = (
+            std::mem::take(&mut self.parser),
+            std::mem::take(&mut self.dcs),
+            std::mem::take(&mut self.dcs_header),
+            std::mem::take(&mut self.apc),
+            self.apc_glyph_limit,
+            self.string_overflow,
+        );
         let limits = self.primary.limits;
         let primary_identity = self.primary.metadata.identity;
         let reflow_generation = self.primary.metadata.reflow_generation;
@@ -511,6 +521,14 @@ impl Terminal {
         let mut modes = self.modes.clone();
         modes.reset();
         *self = Self::with_limits(self.cols, self.rows, limits);
+        (
+            self.parser,
+            self.dcs,
+            self.dcs_header,
+            self.apc,
+            self.apc_glyph_limit,
+            self.string_overflow,
+        ) = input;
         // RIS resets the existing primary screen. A streaming restore may
         // still deliver older history into that same screen afterward.
         self.primary.metadata.identity = primary_identity;

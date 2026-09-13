@@ -630,6 +630,8 @@ pub struct LoadedConfig {
     pub diagnostics: Vec<Diagnostic>,
     /// Use only for an explicit create/edit action. Loading never creates files.
     pub own_config_path: PathBuf,
+    /// Settings opens the selected root file, preserving Ghostty fallback.
+    pub edit_config_path: PathBuf,
 }
 
 /// Explicit paths make configuration loading independent of process-global
@@ -673,17 +675,19 @@ impl ConfigLoader {
     pub fn load_with_args(&self, args: &[String]) -> LoadedConfig {
         let own_app = self.home.join("Library/Application Support/com.rustty.app");
         let own = candidates(&self.xdg_config_home.join("rustty"), &own_app, "rustty");
+        let own_config_path = own
+            .iter()
+            .rev()
+            .find(|p| present(p))
+            .cloned()
+            .unwrap_or_else(|| own_app.join("config.rustty"));
         let mut result = LoadedConfig {
             config: Config::default(),
             family: ConfigFamily::Defaults,
             sources: vec![],
             diagnostics: vec![],
-            own_config_path: own
-                .iter()
-                .rev()
-                .find(|p| present(p))
-                .cloned()
-                .unwrap_or_else(|| own_app.join("config.rustty")),
+            edit_config_path: own_config_path.clone(),
+            own_config_path,
         };
         let mut entries = Vec::new();
         let mut includes = VecDeque::new();
@@ -766,6 +770,9 @@ impl ConfigLoader {
             }
             paths
         };
+        if let Some(path) = roots.iter().rev().find(|p| present(p)) {
+            result.edit_config_path = path.clone();
+        }
         for path in roots {
             self.read_entries(
                 &path,

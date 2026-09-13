@@ -364,9 +364,10 @@ pub fn run() -> Result<()> {
     let mut loaded = load_config(&mut config_loader, &args, Platform::system_theme());
     if show_config {
         println!(
-            "Configuration: {:?}\nOwn settings: {}",
+            "Configuration: {:?}\nOwn settings: {}\nEdit settings: {}",
             loaded.family,
-            loaded.own_config_path.display()
+            loaded.own_config_path.display(),
+            loaded.edit_config_path.display()
         );
         for source in &loaded.sources {
             println!("  {}", source.display());
@@ -1810,7 +1811,7 @@ impl App {
             }
             Action::OpenConfig => {
                 if let Some(platform) = &self.platform
-                    && let Err(error) = platform.open_config(&self.loaded.own_config_path)
+                    && let Err(error) = platform.open_config(&self.loaded.edit_config_path)
                 {
                     self.errors.push(error);
                 }

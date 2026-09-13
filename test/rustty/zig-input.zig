@@ -11,6 +11,7 @@ pub const Event = struct {
     consumed_modifiers: u16 = 0,
     unshifted: u21 = 0,
     composing: bool = false,
+    macos_option_as_alt: []const u8 = "true",
     focused: bool = true,
     button: ?[]const u8 = null,
     x: f32 = 0,
@@ -24,8 +25,7 @@ pub fn encode(alloc: std.mem.Allocator, terminal: *vt.Terminal, event: Event) ![
         const bytes = try unhex(alloc, event.data);
         if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidText;
         var options: vt.input.KeyEncodeOptions = .fromTerminal(terminal);
-        // This harness supplies terminal Alt events, not platform Option text.
-        options.macos_option_as_alt = .true;
+        options.macos_option_as_alt = std.meta.stringToEnum(@TypeOf(options.macos_option_as_alt), event.macos_option_as_alt) orelse return error.InvalidOptionAsAlt;
         try vt.input.encodeKey(&writer.writer, .{
             .key = std.meta.stringToEnum(vt.input.Key, event.key) orelse return error.InvalidKey,
             .action = std.meta.stringToEnum(vt.input.KeyAction, event.action) orelse return error.InvalidAction,

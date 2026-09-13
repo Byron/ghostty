@@ -32,6 +32,7 @@ use winit::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, Ime, Modifiers, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    keyboard::PhysicalKey,
     platform::macos::WindowAttributesExtMacOS,
     window::{CursorIcon, Fullscreen, Theme, Window, WindowId},
 };
@@ -129,6 +130,7 @@ struct Host {
     content: Rect,
     divider_drag: Option<(Id, Axis, Rect)>,
     modifiers: Modifiers,
+    consumed_keys: HashSet<PhysicalKey>,
     sequence: Vec<usize>,
     sequence_len: usize,
     composing: bool,
@@ -748,6 +750,7 @@ impl App {
             content: Rect::UNIT,
             divider_drag: None,
             modifiers: Modifiers::default(),
+            consumed_keys: HashSet::new(),
             sequence: Vec::new(),
             sequence_len: 0,
             composing: false,
@@ -1923,7 +1926,13 @@ impl App {
         host: &mut Host,
         key: &winit::event::KeyEvent,
     ) {
-        if host.ui_input() {
+        let ui_input = host.ui_input();
+        if input::key_is_consumed(
+            &mut host.consumed_keys,
+            key.physical_key,
+            key.state,
+            ui_input,
+        ) {
             return;
         }
         if key.state == ElementState::Pressed && !host.composing {
@@ -1975,6 +1984,9 @@ impl App {
                     }
                 }
                 if binding.flags.consumed && (!binding.flags.performable || performed) {
+                    if host.ui_input() {
+                        host.consumed_keys.insert(key.physical_key);
+                    }
                     return;
                 }
             } else if !matched.is_empty() {
@@ -1990,6 +2002,7 @@ impl App {
             return;
         };
         if self.panes.get(&id).is_some_and(|p| p.exited) && key.state == ElementState::Pressed {
+            host.consumed_keys.insert(key.physical_key);
             self.action(event_loop, host, Action::CloseSurface, true);
             return;
         }
@@ -3422,6 +3435,7 @@ impl ApplicationHandler<Event> for App {
                 } else {
                     host.peek = None;
                     host.modifiers = Modifiers::default();
+                    host.consumed_keys.clear();
                     host.divider_drag = None;
                     host.composing = false;
                     host.preedit.clear();

@@ -108,6 +108,16 @@ impl Pane {
     }
 }
 
+struct PendingPaste {
+    pane: Id,
+    data: Vec<u8>,
+}
+
+enum Confirmation {
+    Close(Action),
+    Paste(PendingPaste),
+}
+
 struct Host {
     id: Id,
     viewport: ViewportId,
@@ -139,7 +149,7 @@ struct Host {
     popup_open: bool,
     palette: bool,
     palette_query: String,
-    confirm: Option<Action>,
+    confirm: Option<Confirmation>,
     clipboard_request: VecDeque<(Id, vt::Effect)>,
     capture: bool,
     frames: u64,
@@ -804,6 +814,37 @@ impl App {
             self.errors.push(error.to_string());
         }
     }
+    fn paste_target_exists(&self, window: Id, pane: Id) -> bool {
+        self.index(window)
+            .is_some_and(|index| window_contains_pane(&self.workspace.windows[index], pane))
+            && self
+                .panes
+                .get(&pane)
+                .is_some_and(|pane| !pane.exited && !pane.session.has_exited())
+    }
+    fn paste(&mut self, host: &mut Host, paste: PendingPaste, approved: bool) {
+        if paste.data.is_empty() || !self.paste_target_exists(host.id, paste.pane) {
+            return;
+        }
+        let Some(pane) = self.panes.get(&paste.pane) else {
+            return;
+        };
+        let Ok(mut terminal) = pane.session.terminal() else {
+            return;
+        };
+        if !approved && paste_needs_confirmation(self.config(), &terminal, &paste.data) {
+            host.confirm = Some(Confirmation::Paste(paste));
+            host.repaint();
+            return;
+        }
+        // Encode the captured data with the destination's current paste mode.
+        let bytes = terminal.encode_paste(&paste.data);
+        terminal.screen_mut().viewport_offset = 0;
+        terminal.screen_mut().selection = None;
+        drop(terminal);
+        self.write(paste.pane, bytes);
+        host.repaint();
+    }
     fn focus_pane(&mut self, window: Id, pane: Id) {
         let previous = self.focused(window);
         if let Some(tab) = self.tab_mut(window) {
@@ -1256,7 +1297,7 @@ impl App {
                 })
             });
             if needs_confirmation {
-                host.confirm = Some(action);
+                host.confirm = Some(Confirmation::Close(action));
                 host.repaint();
                 return true;
             }
@@ -1514,12 +1555,14 @@ impl App {
                     host.egui.clipboard_text()
                 };
                 if let (Some(id), Some(text)) = (focused, text) {
-                    let bytes = self.panes.get(&id).and_then(|pane| {
-                        pane.session.terminal().ok().map(|t| t.encode_paste(&text))
-                    });
-                    if let Some(bytes) = bytes {
-                        self.write(id, bytes);
-                    }
+                    self.paste(
+                        host,
+                        PendingPaste {
+                            pane: id,
+                            data: text.into_bytes(),
+                        },
+                        false,
+                    );
                 }
             }
             Action::SelectAll => {
@@ -1990,6 +2033,11 @@ impl App {
         };
         let config = self.config().clone();
         let state = self.workspace.windows[index].clone();
+        if let Some(Confirmation::Paste(paste)) = &host.confirm
+            && !self.paste_target_exists(host.id, paste.pane)
+        {
+            host.confirm = None;
+        }
         let active = &state.tabs[state.active_tab];
         let focused = active.focused;
         let header_height = if active.panes.len() > 1 { 18.0 } else { 0.0 };
@@ -2658,23 +2706,73 @@ impl App {
                         }
                     });
             }
-            if let Some(action) = host.confirm.clone() {
-                egui::Window::new("Close running commands?")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        ui.label("Closing this terminal will stop its running commands.");
-                        ui.horizontal(|ui| {
-                            if ui.button("Cancel").clicked() {
-                                host.confirm = None;
+            let mut confirmed = None;
+            if let Some(confirmation) = &host.confirm {
+                let is_paste = matches!(confirmation, Confirmation::Paste(_));
+                egui::Window::new(if is_paste {
+                    "Paste potentially unsafe text?"
+                } else {
+                    "Close running commands?"
+                })
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    match confirmation {
+                        Confirmation::Close(_) => {
+                            ui.label("Closing this terminal will stop its running commands.");
+                        }
+                        Confirmation::Paste(paste) => {
+                            if let Some(pane) = self.panes.get(&paste.pane) {
+                                ui.label(format!("Terminal: {}", pane.title));
                             }
-                            if ui.button("Close").clicked() {
-                                host.confirm = None;
-                                self.action(event_loop, host, action, true);
-                            }
-                        });
+                            ui.label(
+                                "This paste may run commands. Review the text before continuing.",
+                            );
+                            egui::ScrollArea::vertical()
+                                .max_height(160.0)
+                                .show(ui, |ui| {
+                                    let shown = paste.data.len().min(4096);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(String::from_utf8_lossy(
+                                                &paste.data[..shown],
+                                            ))
+                                            .monospace(),
+                                        )
+                                        .wrap(),
+                                    );
+                                    if shown < paste.data.len() {
+                                        ui.label("… preview truncated");
+                                    }
+                                });
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked()
+                            || ui.input(|input| input.key_pressed(egui::Key::Escape))
+                        {
+                            confirmed = Some(false);
+                        }
+                        if ui
+                            .button(if is_paste { "Paste" } else { "Close" })
+                            .clicked()
+                        {
+                            confirmed = Some(true);
+                        }
                     });
+                });
+            }
+            if let Some(approved) = confirmed
+                && let Some(confirmation) = host.confirm.take()
+                && approved
+            {
+                match confirmation {
+                    Confirmation::Close(action) => {
+                        self.action(event_loop, host, action, true);
+                    }
+                    Confirmation::Paste(paste) => self.paste(host, paste, true),
+                }
             }
             if let Some((pane, request)) = host.clipboard_request.front() {
                 let write = matches!(request, vt::Effect::ClipboardWrite(_));
@@ -3668,6 +3766,18 @@ fn clipboard_policy(config: &Config, request: &vt::Effect) -> config::ClipboardA
     }
 }
 
+fn window_contains_pane(window: &WindowState, pane: Id) -> bool {
+    window.tabs.iter().any(|tab| tab.panes.contains_key(&pane))
+}
+
+fn paste_needs_confirmation(config: &Config, terminal: &vt::Terminal, data: &[u8]) -> bool {
+    config.clipboard_paste_protection
+        && !vt::input::paste_is_safe(
+            data,
+            config.clipboard_paste_bracketed_safe && terminal.modes.dec(2004),
+        )
+}
+
 fn hold_after_exit(config: &Config, runtime: Duration) -> bool {
     config.wait_after_command
         || runtime.as_millis() <= u128::from(config.abnormal_command_exit_runtime)
@@ -3925,6 +4035,62 @@ mod tests {
             clipboard_policy(&config, &vt::Effect::ClipboardWrite(write)),
             Deny
         );
+    }
+
+    #[test]
+    fn paste_confirmation_follows_protection_bracketed_trust_and_payload() {
+        for bracketed in [false, true] {
+            let mut terminal = vt::Terminal::new(20, 2, 0);
+            if bracketed {
+                terminal.feed(b"\x1b[?2004h");
+            }
+            for protection in [false, true] {
+                for trust_brackets in [false, true] {
+                    let mut config = Config::default();
+                    config.clipboard_paste_protection = protection;
+                    config.clipboard_paste_bracketed_safe = trust_brackets;
+                    for data in [
+                        b"".as_slice(),
+                        b"plain text",
+                        b"one\rtwo",
+                        "日誌".as_bytes(),
+                    ] {
+                        assert!(!paste_needs_confirmation(&config, &terminal, data));
+                    }
+                    assert_eq!(
+                        paste_needs_confirmation(&config, &terminal, b"one\ntwo"),
+                        protection && !(bracketed && trust_brackets)
+                    );
+                    assert_eq!(
+                        paste_needs_confirmation(&config, &terminal, b"one\x1b[201~two"),
+                        protection
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_paste_keeps_its_destination_when_tabs_change_and_rejects_closed_panes() {
+        let paste = PendingPaste {
+            pane: 1,
+            data: b"one\ntwo".to_vec(),
+        };
+        let mut window = WindowState {
+            id: 100,
+            tabs: vec![
+                Tab::new(10, 1, PathBuf::from("/tmp")),
+                Tab::new(20, 2, PathBuf::from("/tmp")),
+            ],
+            active_tab: 0,
+            frame: [0.0, 0.0, 800.0, 600.0],
+            quick: false,
+        };
+        assert!(window_contains_pane(&window, paste.pane));
+        window.active_tab = 1;
+        assert!(window_contains_pane(&window, paste.pane));
+        window.tabs.remove(0);
+        assert!(!window_contains_pane(&window, paste.pane));
     }
     #[test]
     fn shell_exit_policy_holds_fast_failures_and_respects_wait_setting() {

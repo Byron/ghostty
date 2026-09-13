@@ -1120,14 +1120,15 @@ impl Terminal {
     }
 
     fn reverse_index(&mut self) {
-        if self.screen().cursor.row == self.margins.top {
+        let cursor = &self.screen().cursor;
+        if cursor.row == self.margins.top
+            && cursor.col >= self.margins.left
+            && cursor.col <= self.margins.right
+        {
             self.scroll_down(1);
         } else {
-            self.screen_mut().cursor.row = self.screen().cursor.row.saturating_sub(1);
+            self.cursor_vertical(1, false);
         }
-        self.clamp_cursor();
-        self.screen_mut().cursor.pending_wrap = false;
-        self.changed();
     }
 
     fn scroll_up(&mut self, count: usize, history: bool) {

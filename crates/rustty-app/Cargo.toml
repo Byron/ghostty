@@ -6,3 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 description = "The Rustty desktop terminal application."
+
+[dependencies]
+rustty.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -4,6 +4,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Read, Write};
 
+#[path = "rust-input.rs"]
+mod input;
+
 const CAPABILITIES: &[&str] = &[
     "terminal.write",
     "terminal.resize",
@@ -18,6 +21,9 @@ const CAPABILITIES: &[&str] = &[
     "effects.pwd",
     "effects.bell",
     "unicode.width",
+    "input.key",
+    "input.mouse",
+    "input.focus-paste",
 ];
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -57,6 +63,8 @@ struct Operation {
     cols: u16,
     #[serde(default)]
     rows: u16,
+    #[serde(default)]
+    input: Option<input::Event>,
 }
 
 fn main() -> io::Result<()> {
@@ -109,7 +117,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             result["widths"] = json!(widths);
             return Ok(result);
         }
-        "terminal" => {}
+        "terminal" | "input" => {}
         _ => return Err("UnsupportedKind"),
     }
     dimensions(request.cols, request.rows)?;
@@ -139,6 +147,12 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 observations.push(observe(&terminal));
                 Vec::new()
             }
+            "input" => {
+                let bytes =
+                    input::encode(&terminal, operation.input.as_ref().ok_or("MissingInput")?)?;
+                events.push(json!({"kind":"input","data":hex(&bytes)}));
+                Vec::new()
+            }
             _ => return Err("UnsupportedOperation"),
         };
         for effect in effects {
@@ -162,7 +176,9 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
             events.push(json!({"kind":kind,"data":data}));
         }
     }
-    observations.push(observe(&terminal));
+    if request.kind == "terminal" {
+        observations.push(observe(&terminal));
+    }
     result["observations"] = json!(observations);
     result["events"] = json!(events);
     Ok(result)

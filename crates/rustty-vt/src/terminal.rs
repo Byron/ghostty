@@ -1,5 +1,6 @@
 use crate::clipboard;
 use crate::modes::Modes;
+use crate::query::{self, Query};
 use crate::screen::*;
 use crate::unicode::{self, properties};
 use base64::Engine;
@@ -14,10 +15,20 @@ pub enum Effect {
     Bell,
     ClipboardRead(clipboard::Read),
     ClipboardWrite(clipboard::Write),
-    Notification { title: Vec<u8>, body: Vec<u8> },
+    /// Serviced by built-in query defaults or the synchronous host callbacks.
+    Query(Query),
+    Notification {
+        title: Vec<u8>,
+        body: Vec<u8>,
+    },
     CommandStart,
-    CommandEnd { exit_code: Option<i32> },
-    Progress { state: u8, value: Option<u8> },
+    CommandEnd {
+        exit_code: Option<i32>,
+    },
+    Progress {
+        state: u8,
+        value: Option<u8>,
+    },
     UnknownSequence(String),
 }
 
@@ -26,6 +37,22 @@ pub enum Effect {
 /// twice. OSC 52 writes need no acknowledgement; unanswered reads return empty.
 pub trait EffectHandler {
     fn effect(&mut self, effect: Effect);
+
+    fn color_scheme(&mut self) -> Option<query::ColorScheme> {
+        None
+    }
+    fn device_attributes(&mut self) -> Option<query::DeviceAttributes> {
+        None
+    }
+    fn enquiry(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+    fn size(&mut self) -> Option<query::Size> {
+        None
+    }
+    fn xtversion(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
 
     fn clipboard_read_enabled(&self) -> bool {
         true
@@ -67,7 +94,12 @@ pub struct Terminal {
     pub cursor_color: Option<[u8; 3]>,
     /// Host's actual TERM name, used for XTGETTCAP TN. Unset or names longer
     /// than 128 bytes leave TN unanswered. This host setting is not persisted.
-    pub terminfo_name: Option<String>,
+    pub terminfo_name: Option<Vec<u8>>,
+    pub query_defaults: query::Defaults,
+    /// Allow CSI 21 t to report the raw title. Disabled by default.
+    pub title_report: bool,
+    /// Externally owned view visibility, retained through reset.
+    pub visible: bool,
     /// Maximum total decoded bytes in a Kitty clipboard write transaction.
     /// A transfer retains the value that was configured when it began.
     pub clipboard_write_limit: usize,
@@ -126,6 +158,9 @@ impl Terminal {
             background: [0; 3],
             cursor_color: None,
             terminfo_name: None,
+            query_defaults: query::Defaults::default(),
+            title_report: false,
+            visible: true,
             clipboard_write_limit: 64 * 1024 * 1024,
             clipboard: clipboard::kitty::State::default(),
             title: String::new(),
@@ -180,10 +215,26 @@ impl Terminal {
         &self.tabstops
     }
 
+    /// Feed input with runtime `query_defaults` and return deferred host effects.
+    /// Query replies use the current terminal geometry. For fully headless or
+    /// readonly hosts, use `feed_with_handler` and opt into the needed callbacks.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let mut pending = Vec::new();
         let mut parser = std::mem::take(&mut self.parser);
-        parser.advance(bytes, |event| self.handle(event, &mut effects, true, true));
+        parser.advance(bytes, |event| {
+            self.handle(event, &mut pending, true, true);
+            for effect in pending.drain(..) {
+                match effect {
+                    Effect::Query(query) => {
+                        if let Some(reply) = self.query_defaults.reply(query, self.query_size()) {
+                            effects.push(Effect::Write(reply));
+                        }
+                    }
+                    effect => effects.push(effect),
+                }
+            }
+        });
         self.parser = parser;
         // Active rows can grow allocations without scrolling (graphemes and
         // hyperlinks), so reconcile the byte budget after the complete update.
@@ -191,8 +242,8 @@ impl Terminal {
         effects
     }
 
-    /// Feed bytes while servicing clipboard requests before the next parser
-    /// event. The generated read reply is delivered through `handler.effect`.
+    /// Feed bytes while servicing host queries and clipboard requests before
+    /// the next parser event. Replies are delivered through `handler.effect`.
     /// Hosts that need deferred consent can use `feed` and `Read::reply` instead.
     pub fn feed_with_handler(&mut self, bytes: &[u8], handler: &mut impl EffectHandler) {
         let mut effects = Vec::new();
@@ -219,6 +270,22 @@ impl Terminal {
                             if let Some(reply) = self.reply_clipboard_write(request, result) {
                                 handler.effect(Effect::Write(reply));
                             }
+                        }
+                    }
+                    Effect::Query(query) => {
+                        let reply = match query {
+                            Query::ColorScheme => {
+                                handler.color_scheme().map(query::ColorScheme::encode)
+                            }
+                            Query::DeviceAttributes(kind) => {
+                                handler.device_attributes().map(|a| a.encode(kind))
+                            }
+                            Query::Enquiry => query::enquiry(&handler.enquiry()),
+                            Query::Size(style) => handler.size().map(|s| s.encode(style)),
+                            Query::Xtversion => query::xtversion(&handler.xtversion()),
+                        };
+                        if let Some(reply) = reply {
+                            handler.effect(Effect::Write(reply));
                         }
                     }
                     effect => handler.effect(effect),
@@ -306,11 +373,58 @@ impl Terminal {
         self.height_px = height;
     }
 
+    /// Current complete cell geometry for the built-in query responder.
+    pub fn query_size(&self) -> query::Size {
+        query::Size {
+            rows: self.rows,
+            columns: self.cols,
+            cell_width: self.width_px / u32::from(self.cols),
+            cell_height: self.height_px / u32::from(self.rows),
+        }
+    }
+
+    /// Resize with optional cell pixel geometry. Supplying complete geometry
+    /// emits the mode-2048 report when enabled, even if grid dimensions match.
+    pub fn resize_with_cell_size(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_size: Option<(u32, u32)>,
+    ) -> Vec<Effect> {
+        if cols == 0 || rows == 0 {
+            return Vec::new();
+        }
+        self.resize(cols, rows);
+        let Some((cell_width, cell_height)) = cell_size else {
+            return Vec::new();
+        };
+        self.set_pixel_size(
+            u32::from(cols).saturating_mul(cell_width),
+            u32::from(rows).saturating_mul(cell_height),
+        );
+        if self.modes.dec(2048) {
+            vec![Effect::Write(
+                query::Size {
+                    rows,
+                    columns: cols,
+                    cell_width,
+                    cell_height,
+                }
+                .encode(query::SizeStyle::InBand),
+            )]
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn reset(&mut self) {
         let limits = self.primary.limits;
         let primary_identity = self.primary.metadata.identity;
         let reflow_generation = self.primary.metadata.reflow_generation;
         let terminfo_name = self.terminfo_name.take();
+        let query_defaults = self.query_defaults.clone();
+        let title_report = self.title_report;
+        let visible = self.visible;
         let clipboard = std::mem::take(&mut self.clipboard);
         let clipboard_write_limit = self.clipboard_write_limit;
         let (foreground, background, cursor, palette) = (
@@ -335,6 +449,9 @@ impl Terminal {
         self.primary.metadata.identity = primary_identity;
         self.primary.metadata.reflow_generation = reflow_generation;
         self.terminfo_name = terminfo_name;
+        self.query_defaults = query_defaults;
+        self.title_report = title_report;
+        self.visible = visible;
         self.clipboard = clipboard;
         self.clipboard_write_limit = clipboard_write_limit;
         self.width_px = width_px;
@@ -455,7 +572,7 @@ impl Terminal {
         match event {
             Event::Print(cp) => self.print(cp),
             Event::Execute(byte) => match byte {
-                0x05 => {}
+                0x05 => effects.push(Effect::Query(Query::Enquiry)),
                 0x07 => effects.push(Effect::Bell),
                 0x08 => self.cursor_left(1),
                 0x09 => self.tab(1, false),
@@ -1150,6 +1267,23 @@ impl Terminal {
         self.changed();
     }
 
+    fn set_stream_mode(
+        &mut self,
+        private: bool,
+        mode: u16,
+        value: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.set_mode(private, mode, value);
+        if private && value {
+            match mode {
+                2048 => effects.push(Effect::Query(Query::Size(query::SizeStyle::InBand))),
+                2033 => effects.push(Effect::Write(query::visibility(self.visible))),
+                _ => {}
+            }
+        }
+    }
+
     fn switch_screen(&mut self, mode: u16, enabled: bool) {
         if mode == 1049 && enabled {
             self.save_cursor();
@@ -1194,6 +1328,9 @@ impl Terminal {
                 self.carriage_return();
             }
             ([], b'M') => self.reverse_index(),
+            ([], b'Z') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Primary,
+            ))),
             ([], b'H') => {
                 let col = self.screen().cursor.col;
                 self.tabstops[col] = true;
@@ -1340,7 +1477,7 @@ impl Terminal {
             ([b'>'], b'n') => self.modify_other_keys = false,
             ([], b'h' | b'l') | ([b'?'], b'h' | b'l') => {
                 for &mode in p {
-                    self.set_mode(private, mode, byte == b'h');
+                    self.set_stream_mode(private, mode, byte == b'h', effects);
                 }
             }
             ([b'?'], b's') => {
@@ -1351,7 +1488,7 @@ impl Terminal {
             ([b'?'], b'r') => {
                 for &mode in p {
                     let value = self.modes.restore(true, mode);
-                    self.set_mode(true, mode, value);
+                    self.set_stream_mode(true, mode, value, effects);
                 }
             }
             ([], b'r') => {
@@ -1416,9 +1553,9 @@ impl Terminal {
                     ));
                 }
             }
-            ([], b'n') | ([b'?'], b'n') => match n {
-                5 => effects.push(Effect::Write(b"\x1b[0n".to_vec())),
-                6 => {
+            ([], b'n') | ([b'?'], b'n') if p.len() == 1 => match (private, n) {
+                (false, 5) => effects.push(Effect::Write(b"\x1b[0n".to_vec())),
+                (false, 6) => {
                     let cur = &self.screen().cursor;
                     let row = cur.row.saturating_sub(if self.modes.dec(6) {
                         self.margins.top
@@ -1430,16 +1567,22 @@ impl Terminal {
                     } else {
                         0
                     }) + 1;
-                    effects.push(Effect::Write(
-                        format!("\x1b[{}{row};{col}R", if private { "?" } else { "" }).into_bytes(),
-                    ));
+                    effects.push(Effect::Write(format!("\x1b[{row};{col}R").into_bytes()));
                 }
+                (true, 996) => effects.push(Effect::Query(Query::ColorScheme)),
+                (true, 998) => effects.push(Effect::Write(query::visibility(self.visible))),
                 _ => {}
             },
-            ([], b'c') if n == 0 => effects.push(Effect::Write(b"\x1b[?62;22c".to_vec())),
-            ([b'>'], b'c') => effects.push(Effect::Write(b"\x1b[>1;10;0c".to_vec())),
-            ([b'='], b'c') => effects.push(Effect::Write(b"\x1bP!|00000000\x1b\\".to_vec())),
-            ([b'>'], b'q') => effects.push(Effect::Write(b"\x1bP>|rustty 0.1.0\x1b\\".to_vec())),
+            ([], b'c') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Primary,
+            ))),
+            ([b'>'], b'c') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Secondary,
+            ))),
+            ([b'='], b'c') => effects.push(Effect::Query(Query::DeviceAttributes(
+                query::AttributeKind::Tertiary,
+            ))),
+            ([b'>'], b'q') => effects.push(Effect::Query(Query::Xtversion)),
             ([b'?'], b'u') => effects.push(Effect::Write(
                 format!("\x1b[?{}u", self.screen().kitty_keyboard.current()).into_bytes(),
             )),
@@ -1455,20 +1598,26 @@ impl Terminal {
             ([b'$'], b'}') => self.status_display = n == 1,
             ([b'$'], b'~') => {}
             ([], b't') => match n {
-                14 => effects.push(Effect::Write(
-                    format!("\x1b[4;{};{}t", self.height_px, self.width_px).into_bytes(),
-                )),
-                16 => effects.push(Effect::Write(
-                    format!(
-                        "\x1b[6;{};{}t",
-                        self.height_px / u32::from(self.rows),
-                        self.width_px / u32::from(self.cols)
-                    )
-                    .into_bytes(),
-                )),
-                18 => effects.push(Effect::Write(
-                    format!("\x1b[8;{};{}t", self.rows, self.cols).into_bytes(),
-                )),
+                14 if p.len() == 1 => {
+                    effects.push(Effect::Query(Query::Size(query::SizeStyle::TextPixels)))
+                }
+                16 if p.len() == 1 => {
+                    effects.push(Effect::Query(Query::Size(query::SizeStyle::CellPixels)))
+                }
+                18 if p.len() == 1 => {
+                    effects.push(Effect::Query(Query::Size(query::SizeStyle::Cells)))
+                }
+                21 if p.len() == 1 && self.title_report => {
+                    let mut reply = b"\x1b]l".to_vec();
+                    reply.extend_from_slice(
+                        self.metadata
+                            .title_raw
+                            .as_deref()
+                            .unwrap_or(self.title.as_bytes()),
+                    );
+                    reply.extend_from_slice(b"\x1b\\");
+                    effects.push(Effect::Write(reply));
+                }
                 22 | 23 => {}
                 _ => {}
             },
@@ -1755,8 +1904,7 @@ impl Terminal {
                     else {
                         continue;
                     };
-                    name.as_bytes()
-                        .iter()
+                    name.iter()
                         .map(|byte| format!("{byte:02X}"))
                         .collect::<String>()
                 } else {

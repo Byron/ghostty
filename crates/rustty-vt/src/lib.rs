@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod graphics;
 pub mod input;
 pub mod modes;
+pub mod query;
 pub mod screen;
 pub mod search;
 pub mod snapshot;

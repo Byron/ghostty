@@ -89,12 +89,7 @@ impl Context {
             "untrack" => {
                 if let Some(index) = self.handles.iter().position(|handle| handle.id == op.id) {
                     let handle = &self.handles[index];
-                    if handle.alternate != terminal.is_alternate_screen() {
-                        // The current Rust API exposes mutation only for the
-                        // active screen. Keep this limitation observable.
-                        return Err("UnsupportedInactiveUntrack");
-                    }
-                    terminal.screen_mut().untrack(handle.point);
+                    terminal.untrack(handle.point);
                     self.handles.remove(index);
                 } else {
                     status = "invalid";

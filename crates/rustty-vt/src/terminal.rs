@@ -218,6 +218,15 @@ impl Terminal {
     pub fn alternate_screen(&self) -> Option<&Screen> {
         self.alternate.as_ref()
     }
+
+    /// Release a tracked cell even when its screen is inactive or was reset.
+    pub fn untrack(&mut self, point: TrackedPoint) {
+        self.primary.untrack(point);
+        if let Some(screen) = &mut self.alternate {
+            screen.untrack(point);
+        }
+    }
+
     pub fn tabstops(&self) -> &[bool] {
         &self.tabstops
     }

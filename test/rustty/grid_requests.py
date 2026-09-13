@@ -93,6 +93,18 @@ def requests():
                grid("track", id=2, point=point(1)), observe, grid("untrack", id=2)], ["terminal.tracked"])
     yield case("tracked/untrack-inactive", [b"AB", grid("track", id=1), b"\x1b[?47h",
                grid("untrack", id=1)], ["terminal.tracked"])
+    for alternate in (False, True):
+        prefix = b"\x1b[?47h" if alternate else b""
+        switch = b"\x1b[?47l" if alternate else b"\x1b[?47h"
+        yield case(f"tracked/lifetime/inactive/{alternate}",
+                   [prefix + b"A", grid("track", id=1), switch + b"B",
+                    grid("track", id=2), grid("untrack", id=1), observe,
+                    grid("untrack", id=2)], ["terminal.tracked"])
+        for reset in ({"op": "terminal_reset"}, {"op": "reset"}):
+            yield case(f"tracked/lifetime/reset/{alternate}/{reset['op']}",
+                       [prefix + b"A", grid("track", id=1), reset, prefix + b"BC",
+                        grid("track", id=2, point=point(1)), grid("untrack", id=1),
+                        observe, grid("untrack", id=2)], ["terminal.tracked", "terminal.reset"])
     for limit in (0, 1, 4):
         yield case(f"tracked/prune/{limit}", [history, grid("track", id=1, point=point(tag="screen")),
                    grid("limits", lines=limit), b"\r\nmore\r\nrows", observe], ["terminal.tracked"])

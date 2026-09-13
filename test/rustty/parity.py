@@ -84,7 +84,7 @@ def difference(left, right, path="response"):
 def variants(request, exhaustive=False):
     """Delivery boundaries change; operation/observation ordering never changes."""
     yield request
-    if request.get("kind", "terminal") not in ("terminal", "input"):
+    if request.get("kind", "terminal") not in ("terminal", "input", "parser"):
         return
     for name, chunks in (("scalar", [1]), ("chunks", [2, 7, 1, 13, 4])):
         operations = []
@@ -207,6 +207,34 @@ def input_requests():
                       ["input.focus-paste"])
 
 
+def parser_requests():
+    cases = {
+        "utf8": "aé界👩🏽‍💻\x7f".encode(),
+        "malformed": b"\xc0\xaf\xe0\xa0\x1b[0m\xed\xa0\x80\xf4\x90\x80\x80\xf0\x9f",
+        "controls": bytes(range(32)) + b"\xc2\x9b\x1b[\x07\x18m",
+        "csi": b"\x1b[38:2::1:2:3m\x1b[1:2H\x1b[6553599;0m\x1b[?25$p",
+        "csi-overflow": b"\x1b[" + b"1;" * 30 + b"m\x1b[1234567890m",
+        "escape": b"\x1b(0\x1b#8\x1b %A\x1b    !x",
+        "osc": b"\x1b]2;title\x07\x1b]not-a-command\x1b\\\x1b]52;c;YWJj\x9c",
+        "osc-cancel": b"\x1b]2;unfinished\x18tail\x1b]2;other\x1a",
+        "dcs": b"\x1bP1;2$qpayload\x1b\\\x1bP>|version\x9c",
+        "apc": b"\x1b_Ga=T;dGVzdA==\x1b\\\x1bXignored\x1b\\",
+    }
+    for name, data in cases.items():
+        yield ({"id": "parser/" + name, "kind": "parser", "operations": [
+            {"op": "write", "data": data.hex()}, {"op": "observe"},
+            {"op": "write", "data": b"\x1b[0m".hex()}, {"op": "reset"},
+        ]}, ["parser.raw-events"])
+    for directory in ("parser-initial", "parser-cmin"):
+        paths = sorted((ROOT / "test/fuzz-libghostty/corpus" / directory).glob("*"))
+        if not paths:
+            raise RuntimeError(f"required corpus is missing: {directory}")
+        for path in paths:
+            if path.is_file():
+                yield ({"id": f"parser/corpus/{directory}/{path.name}", "kind": "parser",
+                        "operations": [{"op": "write", "data": path.read_bytes().hex()}]}, ["parser.raw-events"])
+
+
 def save_failure(request, left, right, reason):
     digest = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()[:16]
     directory = ARTIFACTS / "failures" / digest
@@ -302,6 +330,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generated", type=int, default=0)
     parser.add_argument("--input", action="store_true", help="compare keyboard, mouse, focus and paste encoding")
+    parser.add_argument("--parser", action="store_true", help="compare raw parser events and inherited parser corpus")
     parser.add_argument("--max-failures", type=int, default=20)
     parser.add_argument("--artifacts", type=Path, default=ARTIFACTS, help="isolated output directory for concurrent suites")
     parser.add_argument("--zig-bin", type=Path, default=ROOT / "zig-out/bin/vt-oracle")
@@ -337,6 +366,9 @@ def main():
             if args.input or args.thorough:
                 requests.extend((request, covers) for request, covers in input_requests()
                                 if not args.case or args.case in request["id"])
+            if args.parser or args.thorough:
+                requests.extend((request, covers) for request, covers in parser_requests()
+                                if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, []) for request in corpus_requests())
             requests.extend((request, []) for request in generated_requests(args.seed, args.generated or (100 if args.thorough else 0)))
@@ -360,6 +392,8 @@ def main():
                     reason = str(error)
                     aborted = True
                 checked += 1
+                if checked % 100 == 0:
+                    print(f"Checked {checked} comparisons ({request['id']})", flush=True)
                 if reason:
                     success = False
                     failures += 1

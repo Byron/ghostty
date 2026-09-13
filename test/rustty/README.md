@@ -34,6 +34,7 @@ Use deterministic generated cases and saved failures to diagnose differences:
 ```sh
 python3 test/rustty/parity.py --no-build --generated 100 --seed 0
 python3 test/rustty/parity.py --no-build --input
+python3 test/rustty/parity.py --no-build --parser
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
@@ -46,6 +47,14 @@ result even when it is empty; a dropped key cannot disappear from the event
 list. Mouse coordinates use 8-by-16-pixel cells. `--artifacts`, `--zig-bin` and
 `--rust-bin` select isolated output and adapter paths for concurrent work.
 
+`--parser` compares raw UTF-8/ANSI events, parser state and all inherited
+`parser-initial` and `parser-cmin` fixtures. Unlike stream fixtures, parser
+fixtures contain no delivery-selector byte. The Zig adapter uses the original
+parser and UTF-8 decoder. For OSC it captures bytes at the parser's transition
+boundary because Zig exposes validated commands while Rust exposes raw OSC
+payloads. This comparison therefore does **not** validate OSC command parsing,
+effects or command-specific limits; those need terminal/protocol cases.
+
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes
 while retaining a successful state comparison with the same mismatching field;
@@ -54,13 +63,14 @@ An oracle crash, invalid response, unsupported operation or timeout fails the
 run. Requests are limited to 16 MiB and responses to 128 MiB. Graphics file,
 temporary-file and shared-memory transports are disabled in the Zig oracle.
 
-`--thorough` additionally exercises all split points for short writes, the
-inherited stream corpus and generated operations. The corpus's first byte is
-its original delivery selector, so it is removed from the terminal input.
+`--thorough` additionally exercises input and parser cases, all split points
+for short writes, the inherited stream corpus and generated operations. The
+stream corpus's first byte is its original delivery selector, so it is removed
+from the terminal input.
 Missing corpus directories are errors. A thorough run also requires every
 entry in `coverage.json` to be complete, exposed by both adapters and covered
 by a passing case in that run. The coverage manifest intentionally remains
-partial while parser events, advanced protocol state, input encoding, graphics,
+partial while validated OSC, advanced protocol state, input encoding, graphics,
 clipboard, drag-and-drop and snapshot interoperability are being implemented.
 **A thorough run must currently fail.** Do not change a coverage entry to
 complete merely because one happy-path example passes.

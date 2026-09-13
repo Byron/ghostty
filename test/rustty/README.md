@@ -93,6 +93,15 @@ those values through both encodings, including `redraw=last` and `cl=w`.
 These observations read terminal state directly and remain optional for other
 protocol cases.
 
+`--protocols --case protocol/graphics` uses the real Wuffs PNG callback with
+its original bounded allocator and compares stored image IDs, dimensions and
+RGBA pixels on both screens. Native RGB storage is expanded only at the
+observation boundary. The matrix includes PNG color depths, palette/transparency,
+Adam7, raw/zlib uploads, truncation, checksum corruption and dimension precedence.
+Wuffs decoder storage has an alignment correction for arena allocators; it does
+not change terminal protocol behavior. Placements, animation, transports, custom
+glyphs and complete graphics resource-limit coverage remain separate work.
+
 `--snapshots` exports one snapshot from each implementation, restores each
 encoding in both implementations, and resumes terminal input. It compares
 the restored state and effects with uninterrupted execution as well as with

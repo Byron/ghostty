@@ -30,9 +30,8 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize},
-    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, Modifiers, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    keyboard::ModifiersState,
     platform::macos::WindowAttributesExtMacOS,
     window::{CursorIcon, Fullscreen, Theme, Window, WindowId},
 };
@@ -119,7 +118,7 @@ struct Host {
     accessibility: BTreeMap<Id, TerminalText>,
     content: Rect,
     divider_drag: Option<(Id, Axis, Rect)>,
-    modifiers: ModifiersState,
+    modifiers: Modifiers,
     sequence: Vec<usize>,
     sequence_len: usize,
     composing: bool,
@@ -738,7 +737,7 @@ impl App {
             accessibility: BTreeMap::new(),
             content: Rect::UNIT,
             divider_drag: None,
-            modifiers: ModifiersState::empty(),
+            modifiers: Modifiers::default(),
             sequence: Vec::new(),
             sequence_len: 0,
             composing: false,
@@ -1324,7 +1323,7 @@ impl App {
                     if host.peek.is_none()
                         && let Some(tab) = self.tab_mut(host.id)
                     {
-                        host.peek = tab.begin_peek(input::modifiers(host.modifiers));
+                        host.peek = tab.begin_peek(input::modifiers(host.modifiers.state()));
                     }
                     if let Some(peek) = &mut host.peek {
                         peek.navigation_used = true;
@@ -1898,7 +1897,9 @@ impl App {
                         && binding
                             .trigger
                             .get(host.sequence_len)
-                            .is_some_and(|trigger| input::matches(trigger, key, host.modifiers))
+                            .is_some_and(|trigger| {
+                                input::matches(trigger, key, host.modifiers.state())
+                            })
                 })
                 .collect::<Vec<_>>();
             let complete = matched
@@ -1951,12 +1952,19 @@ impl App {
         }
         let bytes = self.panes.get(&id).and_then(|pane| {
             let mut terminal = pane.session.terminal().ok()?;
-            let event = input::terminal_key(key, host.modifiers, host.composing)?;
+            let options = vt::KeyEncodeOptions {
+                macos_option_as_alt: input::option_as_alt(
+                    self.config().macos_option_as_alt,
+                    host.modifiers.lalt_state(),
+                    host.modifiers.ralt_state(),
+                ),
+            };
+            let event = input::terminal_key(key, host.modifiers, host.composing, options)?;
             if event.action != vt::KeyAction::Release {
                 terminal.screen_mut().viewport_offset = 0;
                 terminal.screen_mut().selection = None;
             }
-            Some(terminal.encode_key(&event))
+            Some(terminal.encode_key_with_options(&event, options))
         });
         if let Some(bytes) = bytes {
             self.write(id, bytes);
@@ -2920,9 +2928,9 @@ impl App {
             row,
             x: f64::from(position.x),
             y: f64::from(position.y),
-            modifiers: input::terminal_modifiers(host.modifiers),
+            modifiers: input::terminal_modifiers(host.modifiers.state()),
         };
-        if terminal.mouse_mode != 0 && !host.modifiers.shift_key() {
+        if terminal.mouse_mode != 0 && !host.modifiers.state().shift_key() {
             let bytes = terminal.encode_mouse(event);
             drop(terminal);
             self.write(id, bytes);
@@ -2936,7 +2944,7 @@ impl App {
             .map(|r| vt::GridPoint { row: r.id, col });
         if let Some(point) = point {
             if action == vt::MouseAction::Press && button == Some(vt::MouseButton::Left) {
-                if host.modifiers.super_key() && config.link_url {
+                if host.modifiers.state().super_key() && config.link_url {
                     let links = pane.links.links(&screen.snapshot_viewport());
                     if let Some(link) = links.iter().find(|link| link.contains(screen, point))
                         && let Some(platform) = &self.platform
@@ -2955,7 +2963,7 @@ impl App {
                     screen.selection = Some(vt::Selection {
                         start,
                         end: point,
-                        rectangular: host.modifiers.alt_key(),
+                        rectangular: host.modifiers.state().alt_key(),
                     });
                 }
             } else if action == vt::MouseAction::Release {
@@ -3315,7 +3323,7 @@ impl ApplicationHandler<Event> for App {
                     }
                 } else {
                     host.peek = None;
-                    host.modifiers = ModifiersState::empty();
+                    host.modifiers = Modifiers::default();
                     host.divider_drag = None;
                     host.composing = false;
                     host.preedit.clear();
@@ -3358,8 +3366,8 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                host.modifiers = modifiers.state();
-                let current = input::modifiers(host.modifiers);
+                host.modifiers = modifiers;
+                let current = input::modifiers(host.modifiers.state());
                 if let Some(peek) = host.peek
                     && !input::chord_held(peek.chord, current)
                 {
@@ -3476,7 +3484,7 @@ impl ApplicationHandler<Event> for App {
                         .get(&id)
                         .and_then(|p| p.session.terminal().ok().map(|t| t.mouse_mode != 0))
                         .unwrap_or(false);
-                    if mouse && !host.modifiers.shift_key() {
+                    if mouse && !host.modifiers.state().shift_key() {
                         for _ in 0..lines.abs().ceil().min(128.0) as usize {
                             self.mouse(
                                 &mut host,

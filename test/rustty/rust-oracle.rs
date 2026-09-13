@@ -49,6 +49,9 @@ struct Request {
     operations: Vec<Operation>,
     codepoints: Vec<u32>,
     clipboard_replies: Vec<ClipboardReply>,
+    clipboard_read_enabled: bool,
+    clipboard_write_enabled: bool,
+    clipboard_write_limit: usize,
 }
 
 impl Default for Request {
@@ -62,6 +65,9 @@ impl Default for Request {
             operations: Vec::new(),
             codepoints: Vec::new(),
             clipboard_replies: Vec::new(),
+            clipboard_read_enabled: true,
+            clipboard_write_enabled: true,
+            clipboard_write_limit: 64 * 1024 * 1024,
         }
     }
 }
@@ -78,6 +84,12 @@ struct Operation {
     rows: u16,
     #[serde(default)]
     input: Option<input::Event>,
+    #[serde(default)]
+    clipboard_read_enabled: Option<bool>,
+    #[serde(default)]
+    clipboard_write_enabled: Option<bool>,
+    #[serde(default)]
+    clipboard_write_limit: Option<usize>,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -113,6 +125,8 @@ struct ClipboardContent {
 struct HostReply {
     status: ClipboardStatus,
     contents: Vec<clipboard::Content>,
+    available: Vec<Vec<u8>>,
+    remember: bool,
 }
 
 #[derive(Default)]
@@ -120,31 +134,40 @@ struct Host {
     events: Vec<Value>,
     replies: std::collections::VecDeque<HostReply>,
     error: Option<&'static str>,
+    clipboard_read_enabled: bool,
+    clipboard_write_enabled: bool,
+    clipboard_write_limit: usize,
 }
 
 impl Host {
-    fn new(replies: &[ClipboardReply]) -> Result<Self, &'static str> {
-        let mut host = Self::default();
-        for reply in replies {
+    fn new(request: &Request) -> Result<Self, &'static str> {
+        let mut host = Self {
+            clipboard_read_enabled: request.clipboard_read_enabled,
+            clipboard_write_enabled: request.clipboard_write_enabled,
+            clipboard_write_limit: request.clipboard_write_limit,
+            ..Self::default()
+        };
+        for reply in &request.clipboard_replies {
             let contents = reply
                 .contents
                 .iter()
                 .map(|content| {
                     Ok(clipboard::Content {
                         mime: unhex(&content.mime)?,
-                        data: unhex(&content.data)?,
+                        data: unhex(&content.data)?.into(),
                     })
                 })
                 .collect::<Result<Vec<_>, &'static str>>()?;
-            // OSC 52 has no available-types list or session grants. Validate
-            // the shared fixture fields, but leave their handling to the core.
-            for mime in &reply.available {
-                unhex(mime)?;
-            }
-            let _ = reply.remember;
+            let available = reply
+                .available
+                .iter()
+                .map(|mime| unhex(mime))
+                .collect::<Result<Vec<_>, _>>()?;
             host.replies.push_back(HostReply {
                 status: reply.status,
                 contents,
+                available,
+                remember: reply.remember,
             });
         }
         Ok(host)
@@ -192,23 +215,57 @@ impl EffectHandler for Host {
         }
     }
 
-    fn clipboard_read(&mut self, request: &clipboard::Read) -> Vec<clipboard::Content> {
-        let mut observed = clipboard_event("clipboard_read", request.location);
-        observed["clipboard"]["mimes"] = json!([hex(b"text/plain")]);
+    fn clipboard_read_enabled(&self) -> bool {
+        self.clipboard_read_enabled
+    }
+
+    fn clipboard_write_enabled(&self) -> bool {
+        self.clipboard_write_enabled
+    }
+
+    fn clipboard_read(&mut self, request: &clipboard::Read) -> clipboard::ReadResult {
+        let mut observed = clipboard_event(
+            "clipboard_read",
+            request.location,
+            &request.name,
+            request.granted,
+            request.can_remember,
+        );
+        observed["clipboard"]["mimes"] = json!(
+            request
+                .mimes
+                .iter()
+                .map(|mime| hex(mime))
+                .collect::<Vec<_>>()
+        );
+        observed["clipboard"]["list"] = json!(request.list);
         self.events.push(observed);
         let reply = self.replies.pop_front().unwrap_or_default();
         match reply.status {
-            ClipboardStatus::Success => reply.contents,
+            ClipboardStatus::Success => clipboard::ReadResult::Success(clipboard::ReadSuccess {
+                contents: reply.contents,
+                available: reply.available,
+                remember: reply.remember,
+            }),
             ClipboardStatus::InvalidData => {
                 self.error = Some("UnsupportedClipboardReadStatus");
-                Vec::new()
+                clipboard::ReadResult::Denied
             }
-            _ => Vec::new(),
+            ClipboardStatus::Denied | ClipboardStatus::None => clipboard::ReadResult::Denied,
+            ClipboardStatus::Unsupported => clipboard::ReadResult::Unsupported,
+            ClipboardStatus::Busy => clipboard::ReadResult::Busy,
+            ClipboardStatus::IoError => clipboard::ReadResult::IoError,
         }
     }
 
-    fn clipboard_write(&mut self, request: &clipboard::Write) {
-        let mut observed = clipboard_event("clipboard_write", request.location);
+    fn clipboard_write(&mut self, request: &clipboard::Write) -> clipboard::WriteResult {
+        let mut observed = clipboard_event(
+            "clipboard_write",
+            request.location,
+            &request.name,
+            request.granted,
+            request.can_remember,
+        );
         observed["clipboard"]["contents"] = json!(
             request
                 .contents
@@ -217,12 +274,27 @@ impl EffectHandler for Host {
                 .collect::<Vec<_>>()
         );
         self.events.push(observed);
-        // OSC 52 does not acknowledge writes; every host decision is silent.
-        self.replies.pop_front();
+        let reply = self.replies.pop_front().unwrap_or_default();
+        match reply.status {
+            ClipboardStatus::Success => clipboard::WriteResult::Success {
+                remember: reply.remember,
+            },
+            ClipboardStatus::Denied | ClipboardStatus::None => clipboard::WriteResult::Denied,
+            ClipboardStatus::Unsupported => clipboard::WriteResult::Unsupported,
+            ClipboardStatus::Busy => clipboard::WriteResult::Busy,
+            ClipboardStatus::InvalidData => clipboard::WriteResult::InvalidData,
+            ClipboardStatus::IoError => clipboard::WriteResult::IoError,
+        }
     }
 }
 
-fn clipboard_event(kind: &str, location: clipboard::Location) -> Value {
+fn clipboard_event(
+    kind: &str,
+    location: clipboard::Location,
+    name: &[u8],
+    granted: bool,
+    can_remember: bool,
+) -> Value {
     let mut observed = event(kind, String::new());
     let location = match location {
         clipboard::Location::Standard => "standard",
@@ -230,7 +302,7 @@ fn clipboard_event(kind: &str, location: clipboard::Location) -> Value {
         clipboard::Location::Primary => "primary",
     };
     observed["clipboard"] = json!({"location":location,"contents":[],"mimes":[],
-        "list":false,"name":"","granted":false,"can_remember":false});
+        "list":false,"name":hex(name),"granted":granted,"can_remember":can_remember});
     observed
 }
 
@@ -293,11 +365,12 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     }
     dimensions(request.cols, request.rows)?;
     let mut terminal = Terminal::new(request.cols, request.rows, usize::MAX);
+    terminal.clipboard_write_limit = request.clipboard_write_limit;
     if request.kind == "input" {
         terminal.set_pixel_size(u32::from(request.cols) * 8, u32::from(request.rows) * 16);
     }
     let mut observations = Vec::new();
-    let mut host = Host::new(&request.clipboard_replies)?;
+    let mut host = Host::new(request)?;
     let mut snapshots = Vec::new();
     let mut snapshot_progress = Vec::new();
     let mut snapshot_decoder = None;
@@ -319,6 +392,19 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 terminal.resize(operation.cols, operation.rows);
             }
             "reset" => terminal.feed_with_handler(b"\x1bc", &mut host),
+            "terminal_reset" => terminal.reset(),
+            "clipboard_options" => {
+                if let Some(value) = operation.clipboard_read_enabled {
+                    host.clipboard_read_enabled = value;
+                }
+                if let Some(value) = operation.clipboard_write_enabled {
+                    host.clipboard_write_enabled = value;
+                }
+                if let Some(value) = operation.clipboard_write_limit {
+                    host.clipboard_write_limit = value;
+                    terminal.clipboard_write_limit = value;
+                }
+            }
             "observe" => {
                 observations.push(observe(&terminal));
             }
@@ -341,6 +427,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     rustty_vt::snapshot::DecodeOptions::default(),
                 )
                 .map_err(|_| "InvalidSnapshot")?;
+                terminal.clipboard_write_limit = host.clipboard_write_limit;
                 snapshot_decoder = None;
             }
             "restore_ready" => {
@@ -353,6 +440,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     rustty_vt::snapshot::DecodeOptions::default(),
                 );
                 terminal = decoder.ready().map_err(|_| "InvalidSnapshot")?;
+                terminal.clipboard_write_limit = host.clipboard_write_limit;
                 snapshot_progress.push(json!({"stage":"ready", "offset":snapshot_offset.get(),
                     "history_rows":decoder.history_rows(), "screen":null, "rows":0, "remaining":0}));
                 snapshot_decoder = Some(decoder);

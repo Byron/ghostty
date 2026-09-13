@@ -124,7 +124,7 @@
     {
       "id": "clipboard",
       "status": "partial",
-      "remaining": "OSC 52 reads/writes, binary data, MIME selection, terminators, malformed input and synchronous host decisions are compared; absent callbacks, OSC 1337/5522, grants, limits and paste events remain."
+      "remaining": "OSC 52/5522 metadata, binary reads/writes, MIME filtering, streamed base64, aliases, statuses, callback absence, configured limits and session grants are compared; OSC 1337, one-time paste grants, allocation failures and complete capture/size limits remain."
     },
     {
       "id": "drag-and-drop",

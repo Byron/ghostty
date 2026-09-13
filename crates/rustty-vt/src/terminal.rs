@@ -1466,6 +1466,7 @@ impl Terminal {
         }
         let old_cursor = self.screen().cursor.clone();
         let clear_eol = self.screen().metadata.cursor_clear_eol;
+        let hyperlink_implicit_id = self.screen().metadata.hyperlink_implicit_id;
         let charset = self.screen().charset.clone();
         self.end_hyperlink();
         let switched = self.alternate_active != enabled;
@@ -1487,6 +1488,7 @@ impl Terminal {
         if switched && (mode != 1049 || enabled) {
             self.screen_mut().cursor = old_cursor;
             self.screen_mut().metadata.cursor_clear_eol = clear_eol;
+            self.screen_mut().metadata.hyperlink_implicit_id = hyperlink_implicit_id;
             self.end_hyperlink();
         }
         if mode == 1049 && !enabled {

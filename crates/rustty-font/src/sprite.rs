@@ -4,11 +4,13 @@
 use crate::{BitmapFormat, FontError, FontMetrics, GlyphBitmap};
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
+mod legacy;
 mod tables;
 
 /// These codepoints must fill the cell, independently of the selected font.
 pub fn contains(cp: char) -> bool {
-    matches!(cp as u32,
+    legacy::contains(cp as u32)
+        || matches!(cp as u32,
         0x2500..=0x259f | 0x25e2..=0x25e5 | 0x25f8..=0x25fa | 0x25ff |
         0x2800..=0x28ff | 0xe0b0..=0xe0bf | 0xe0d2 | 0xe0d4 |
         0xf5d0..=0xf60d | 0x1fb00..=0x1fb3b | 0x1cd00..=0x1cde5)
@@ -62,7 +64,7 @@ pub fn rasterize(
         cp @ 0x25e2..=0x25e5 => c.corner_triangle([3, 2, 0, 1][(cp - 0x25e2) as usize], 255, false),
         cp @ 0x25f8..=0x25fa => c.corner_triangle((cp - 0x25f8) as usize, 255, true),
         0x25ff => c.corner_triangle(3, 255, true),
-        _ => unreachable!("contains and the rasterizer must agree"),
+        _ => c.legacy(cp as u32),
     }
     Ok(Some(GlyphBitmap {
         width,
@@ -704,12 +706,13 @@ mod tests {
         for cp in (0x2500..=0x28ff)
             .chain(0xe0b0..=0xe0d4)
             .chain(0xf5d0..=0xf60d)
-            .chain(0x1fb00..=0x1fb3b)
-            .chain(0x1cd00..=0x1cde5)
+            .chain(0x1fb00..=0x1fbef)
+            .chain(0x1cc00..=0x1ceaf)
         {
             let cp = char::from_u32(cp).unwrap();
             if contains(cp) {
                 assert!(rasterize(cp, metrics(11, 21, 2.0), 1).unwrap().is_some());
+                assert!(rasterize(cp, metrics(1, 1, 1.0), 1).unwrap().is_some());
             }
         }
         assert!(rasterize('A', metrics(11, 21, 2.0), 1).unwrap().is_none());

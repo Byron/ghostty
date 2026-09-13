@@ -139,6 +139,7 @@ impl Row {
             if self.cells[col].width == 0 && (col == 0 || self.cells[col - 1].width != 2)
                 || self.cells[col].width == 2
                     && (col + 1 == self.cells.len() || self.cells[col + 1].width != 0)
+                || self.cells[col].spacer_head && col + 1 != self.cells.len()
             {
                 self.cells[col] = Cell::blank(background);
             }
@@ -418,6 +419,34 @@ impl Screen {
         Row::new(id, cols, background)
     }
 
+    pub(crate) fn split_cell_boundary(&mut self, col: usize) {
+        let y = self.cursor.row;
+        let cols = self.rows[y].cells.len();
+        let background = self.cursor.style.background;
+        if col == cols {
+            if self.rows[y].wrapped && self.rows[y].cells[cols - 1].spacer_head {
+                self.rows[y].erase(cols - 1, cols, background, false);
+            }
+            return;
+        }
+        if col <= 1 && self.rows[y].cells[0].width == 2 {
+            let previous = if y > 0 {
+                self.rows.get_mut(y - 1)
+            } else {
+                self.history.back_mut()
+            };
+            if let Some(previous) = previous
+                && previous.wrapped
+                && previous.cells[cols - 1].spacer_head
+            {
+                previous.erase(cols - 1, cols, background, false);
+            }
+        }
+        if col > 0 && self.rows[y].cells[col - 1].width == 2 {
+            self.rows[y].erase(col - 1, col + 1, background, false);
+        }
+    }
+
     pub(crate) fn discard_row(&mut self, id: u64) {
         self.graphics.discard_row(id);
         for point in self.tracked.values_mut() {
@@ -451,60 +480,114 @@ impl Screen {
 
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
         let old_cols = self.rows[0].cells.len();
+        let old_rows = self.rows.len();
+        let cursor_y = self.cursor.row;
         let old_cursor = GridPoint {
             row: self.rows[self.cursor.row].id,
             col: self.cursor.col,
         };
+        let mut saved_point = self.saved_cursor.as_ref().and_then(|saved| {
+            self.rows.get(saved.cursor.row).map(|row| GridPoint {
+                row: row.id,
+                col: saved.cursor.col,
+            })
+        });
         let mut contents: Vec<Row> = self.history.drain(..).chain(self.rows.drain(..)).collect();
         let cursor_index = contents
             .iter()
             .position(|r| r.id == old_cursor.row)
             .unwrap();
-        while contents.len() > rows
-            && contents.len() > cursor_index + 1
-            && contents.last().is_some_and(|r| r.used() == 0 && !r.wrapped)
-        {
-            contents.pop();
+        // Narrowing uses the new height while wrapping; widening unwraps
+        // first, before changing the height. This preserves the active boundary.
+        let height_first = !reflow || cols <= old_cols;
+        if height_first {
+            self.resize_height(
+                &mut contents,
+                old_cols,
+                old_rows,
+                rows,
+                old_cursor,
+                saved_point,
+            );
         }
         let mut mapped_cursor = old_cursor;
         if cols != old_cols && reflow {
+            let height = if height_first { rows } else { old_rows };
+            let active_start = contents.len().saturating_sub(height);
+            let old_wrapped = contents
+                [active_start..cursor_index.min(contents.len()).max(active_start)]
+                .iter()
+                .filter(|r| r.wrapped)
+                .count();
             let mut map = HashMap::<GridPointKey, GridPoint>::new();
             let mut output = Vec::new();
             let mut line = self.blank_row(cols, Color::Default);
             let mut x: usize = 0;
+            let mut pin_x: usize = 0;
             for old in &contents {
-                let used = if old.wrapped {
+                let mut used = if old.wrapped {
                     old.cells.len()
                 } else {
-                    old.used().max(if old.id == old_cursor.row {
-                        old_cursor.col + 1
-                    } else {
-                        0
-                    })
+                    old.used()
                 };
+                // Non-cursor pins in trailing blanks clamp to the remaining
+                // destination width. The live cursor alone preserves all blanks.
+                let mut keep_pin = |point: &mut GridPoint| {
+                    if point.row == old.id {
+                        if point.col >= used {
+                            point.col = point.col.min(cols - 1 - pin_x);
+                        }
+                        used = used.max(point.col + 1);
+                    }
+                };
+                if let Some(point) = &mut saved_point {
+                    keep_pin(point);
+                }
+                for point in self.tracked.values_mut().flatten() {
+                    keep_pin(point);
+                }
+                if let Some(selection) = &mut self.selection {
+                    keep_pin(&mut selection.start);
+                    keep_pin(&mut selection.end);
+                }
+                if old.id == old_cursor.row {
+                    used = used.max(old_cursor.col + 1);
+                }
+                if old.semantic != SemanticContent::Output {
+                    used = used.max(1);
+                }
+                let mut wide_tail = None;
                 for (old_col, cell) in old.cells.iter().take(used).enumerate() {
                     if cell.width == 0 {
-                        let p = map
-                            .get(&(old.id, old_col - 1))
-                            .copied()
-                            .unwrap_or(GridPoint {
-                                row: line.id,
-                                col: x.saturating_sub(1),
-                            });
                         map.insert(
                             (old.id, old_col),
-                            GridPoint {
-                                col: (p.col + 1).min(cols - 1),
-                                ..p
-                            },
+                            wide_tail.unwrap_or(GridPoint {
+                                row: line.id,
+                                col: x.saturating_sub(1),
+                            }),
                         );
                         continue;
                     }
                     if cell.spacer_head {
+                        map.insert(
+                            (old.id, old_col),
+                            GridPoint {
+                                row: line.id,
+                                col: x.min(cols - 1),
+                            },
+                        );
                         continue;
                     }
                     let width = usize::from(cell.width).min(cols);
+                    let mut spacer = None;
                     if x + width > cols {
+                        if width == 2 && x < cols {
+                            line.cells[x].spacer_head = true;
+                            spacer = Some(GridPoint {
+                                row: line.id,
+                                col: x,
+                            });
+                        }
                         line.wrapped = true;
                         output.push(line);
                         line = self.blank_row(cols, Color::Default);
@@ -512,12 +595,15 @@ impl Screen {
                     }
                     map.insert(
                         (old.id, old_col),
-                        GridPoint {
+                        spacer.unwrap_or(GridPoint {
                             row: line.id,
                             col: x,
-                        },
+                        }),
                     );
                     let mut cell = cell.clone();
+                    if cols == 1 && cell.width == 2 {
+                        cell.text.clear();
+                    }
                     cell.width = width as u8;
                     line.cells[x] = cell.clone();
                     if width == 2 {
@@ -525,6 +611,10 @@ impl Screen {
                         cell.width = 0;
                         line.cells[x + 1] = cell;
                     }
+                    wide_tail = Some(GridPoint {
+                        row: line.id,
+                        col: (x + 1).min(cols - 1),
+                    });
                     x += width;
                 }
                 // Empty rows and tracked blank columns still need a stable mapping.
@@ -536,6 +626,9 @@ impl Screen {
                             col: (x + old_col - used).min(cols - 1),
                         },
                     );
+                }
+                if used > 0 {
+                    pin_x = x.min(cols - 1);
                 }
                 if !old.wrapped {
                     line.semantic = old.semantic;
@@ -550,6 +643,7 @@ impl Screen {
             if let Some(p) = map.get(&(old_cursor.row, old_cursor.col)) {
                 mapped_cursor = *p;
             }
+            saved_point = saved_point.and_then(|p| map.get(&(p.row, p.col)).copied());
             for point in self.tracked.values_mut() {
                 *point = point.and_then(|p| map.get(&(p.row, p.col)).copied());
             }
@@ -560,20 +654,71 @@ impl Screen {
                     rectangular: s.rectangular,
                 })
             });
+            // Reflow uses blank rows below the content before pushing live text
+            // into history. Cursor and tracked references keep their blank rows.
+            while output.len() > 1
+                && output.last().is_some_and(|r| {
+                    r.id != mapped_cursor.row
+                        && !saved_point.is_some_and(|p| p.row == r.id)
+                        && !self
+                            .tracked
+                            .values()
+                            .any(|p| p.is_some_and(|p| p.row == r.id))
+                        && r.used() == 0
+                        && r.semantic == SemanticContent::Output
+                })
+            {
+                output.pop();
+            }
+            while output.len() < height {
+                output.push(self.blank_row(cols, Color::Default));
+            }
+            let start = output.len() - height;
+            if let Some(cursor_index) = output
+                .iter()
+                .position(|r| r.id == mapped_cursor.row)
+                .filter(|&i| i >= start)
+            {
+                let wrapped = output[start..cursor_index]
+                    .iter()
+                    .filter(|r| r.wrapped)
+                    .count();
+                let remaining = height.saturating_sub(cursor_y + 1);
+                let current = output.len() - cursor_index - 1;
+                let grow = remaining
+                    .saturating_sub(wrapped.saturating_sub(old_wrapped))
+                    .saturating_sub(current);
+                for _ in 0..grow {
+                    output.push(self.blank_row(cols, Color::Default));
+                }
+            }
             contents = output;
             self.graphics.reflow(&map);
         } else if cols != old_cols {
             for row in &mut contents {
                 row.cells.resize(cols, Cell::default());
                 row.repair_wide(Color::Default);
-                row.wrapped = false;
+                if cols > old_cols {
+                    row.wrapped = false;
+                }
             }
             mapped_cursor.col = mapped_cursor.col.min(cols - 1);
+        }
+        if !height_first {
+            self.resize_height(
+                &mut contents,
+                cols,
+                old_rows,
+                rows,
+                mapped_cursor,
+                saved_point,
+            );
         }
         while contents.len() < rows {
             contents.push(self.blank_row(cols, Color::Default));
         }
         let start = contents.len() - rows;
+        let cursor_index = contents.iter().position(|r| r.id == mapped_cursor.row);
         self.cursor.row = contents
             .iter()
             .position(|r| r.id == mapped_cursor.row)
@@ -581,15 +726,65 @@ impl Screen {
             .saturating_sub(start)
             .min(rows - 1);
         self.cursor.col = mapped_cursor.col.min(cols - 1);
-        self.cursor.pending_wrap &= self.cursor.col == cols - 1;
+        if cursor_index.is_none_or(|i| i < start) {
+            self.cursor.col = 0;
+        }
+        if let Some(saved) = &mut self.saved_cursor {
+            if let Some((index, point)) = saved_point
+                .and_then(|p| contents.iter().position(|r| r.id == p.row).map(|i| (i, p)))
+                .filter(|(index, _)| *index >= start)
+            {
+                saved.cursor.row = index - start;
+                saved.cursor.col = point.col.min(cols - 1);
+                if saved.cursor.pending_wrap && saved.cursor.col != cols - 1 {
+                    saved.cursor.pending_wrap = false;
+                    saved.cursor.col += 1;
+                }
+            } else {
+                saved.cursor.row = 0;
+                saved.cursor.col = 0;
+                saved.cursor.pending_wrap = false;
+            }
+        }
         self.rows = contents.split_off(start);
         for row in contents {
             self.push_history(row);
         }
         self.viewport_offset = self.viewport_offset.min(self.history.len());
-        if let Some(saved) = &mut self.saved_cursor {
-            saved.cursor.row = saved.cursor.row.min(rows - 1);
-            saved.cursor.col = saved.cursor.col.min(cols - 1);
+    }
+
+    fn resize_height(
+        &mut self,
+        contents: &mut Vec<Row>,
+        cols: usize,
+        old_rows: usize,
+        rows: usize,
+        cursor: GridPoint,
+        saved: Option<GridPoint>,
+    ) {
+        let mut trim = old_rows.saturating_sub(rows);
+        while trim > 0
+            && contents.len() > rows
+            && contents.last().is_some_and(|r| {
+                r.id != cursor.row
+                    && !saved.is_some_and(|p| p.row == r.id)
+                    && !self
+                        .tracked
+                        .values()
+                        .any(|p| p.is_some_and(|p| p.row == r.id))
+                    && r.cells.iter().all(|c| c.text.is_empty())
+            })
+        {
+            contents.pop();
+            trim -= 1;
+        }
+        if rows > old_rows && self.cursor.row < old_rows - 1 {
+            for _ in 0..rows - old_rows {
+                contents.push(self.blank_row(cols, Color::Default));
+            }
+        }
+        while contents.len() < rows {
+            contents.push(self.blank_row(cols, Color::Default));
         }
     }
 }

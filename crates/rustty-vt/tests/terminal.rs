@@ -138,6 +138,64 @@ fn reflow_preserves_text_selection_and_reference() {
 }
 
 #[test]
+fn resize_reflows_cursor_blanks_and_keeps_wide_padding_at_the_edge() {
+    let mut t = Terminal::new(12, 4, 100);
+    t.feed(b"\t");
+    t.resize(4, 2);
+    assert_eq!((t.screen().cursor.col, t.screen().cursor.row), (0, 1));
+
+    let mut t = Terminal::new(12, 4, 100);
+    t.feed("abc界".as_bytes());
+    t.resize(4, 4);
+    assert!(t.screen().rows[0].cells[3].spacer_head);
+    assert_eq!(t.screen().rows[1].cells[0].text, "界");
+    t.resize(1, 4);
+    assert!(t.screen().all_rows().all(|r| r.cells[0].text != "界"));
+    invariant(&t);
+}
+
+#[test]
+fn resize_unwraps_before_growing_the_active_area() {
+    let mut t = Terminal::new(12, 4, 100);
+    t.feed(b"\nabcdefghijklmnopq\x1b[H");
+    t.resize(8, 3);
+    t.resize(26, 5);
+    assert_eq!(lines(&t), ["abcdefghijklmnopq", "", "", "", ""]);
+    assert_eq!((t.screen().cursor.col, t.screen().cursor.row), (0, 0));
+}
+
+#[test]
+fn resize_remaps_saved_cursor_separately_from_the_live_cursor() {
+    let mut t = Terminal::new(12, 4, 100);
+    t.feed(b"abcdefghi\n\x1b[?1049h");
+    t.resize(17, 4);
+    assert_eq!(t.primary_screen().cursor.col, 9);
+    t.feed(b"\x1b[?1049l");
+    // Ghostty clamps saved positions in blank columns using the preceding
+    // reflow row's remaining width; the live cursor preserves its blanks.
+    assert_eq!((t.screen().cursor.col, t.screen().cursor.row), (7, 1));
+}
+
+#[test]
+fn insertion_preserves_soft_wrap_and_edits_remove_stale_wide_padding() {
+    let mut t = Terminal::new(4, 3, 100);
+    t.feed(b"abcdef\x1b[H\x1b[@");
+    assert!(t.screen().rows[0].wrapped);
+    assert!(!t.screen().cursor.pending_wrap);
+
+    let mut t = Terminal::new(4, 3, 100);
+    t.feed("abc界\x1b[2;1HX".as_bytes());
+    assert!(!t.screen().rows[0].cells[3].spacer_head);
+    let mut t = Terminal::new(4, 3, 100);
+    t.feed("abc界\x1b[H\x1b[P".as_bytes());
+    assert!(t.screen().rows[0].cells.iter().all(|c| !c.spacer_head));
+    let mut t = Terminal::new(4, 3, 100);
+    t.feed("abc界\x1b[2;1H\x1b[2P".as_bytes());
+    assert!(!t.screen().rows[0].cells[3].spacer_head);
+    invariant(&t);
+}
+
+#[test]
 fn effects_and_terminal_replies_are_ordered() {
     let mut t = Terminal::new(80, 24, 100);
     let e = t.feed(

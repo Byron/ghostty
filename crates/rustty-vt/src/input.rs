@@ -134,16 +134,17 @@ pub enum MouseButton {
     Extra(u8),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MouseEvent {
     pub action: MouseAction,
     pub button: Option<MouseButton>,
     /// Zero-based cell coordinates.
     pub col: usize,
     pub row: usize,
-    /// Zero-based pixel coordinates for SGR-pixel mode.
-    pub x: u32,
-    pub y: u32,
+    /// Terminal-space pixels. Preserve negative and fractional positions for
+    /// viewport tests; SGR-pixel reporting rounds them only when encoding.
+    pub x: f64,
+    pub y: f64,
     pub modifiers: Modifiers,
 }
 
@@ -257,28 +258,47 @@ impl Terminal {
 
     pub fn encode_mouse(&self, event: MouseEvent) -> Vec<u8> {
         let mode = self.mouse_mode;
-        if mode == 0
-            || mode == 9 && event.action != MouseAction::Press
-            || event.action == MouseAction::Move
-                && (mode == 1000 || mode == 1002 && event.button.is_none())
+        if !event.x.is_finite()
+            || !event.y.is_finite()
+            || mode == 0
+            || mode == 9
+                && (event.action != MouseAction::Press
+                    || !matches!(
+                        event.button,
+                        Some(MouseButton::Left | MouseButton::Middle | MouseButton::Right)
+                    ))
+            || mode == 1000 && event.action == MouseAction::Move
+            || mode == 1002 && event.button.is_none()
         {
             return Vec::new();
         }
-        let mut code: u16 = match event.button {
-            Some(MouseButton::Left) => 0,
-            Some(MouseButton::Middle) => 1,
-            Some(MouseButton::Right) => 2,
-            Some(MouseButton::WheelUp) => 64,
-            Some(MouseButton::WheelDown) => 65,
-            Some(MouseButton::WheelLeft) => 66,
-            Some(MouseButton::WheelRight) => 67,
-            Some(MouseButton::Extra(n)) => 128 + u16::from(n.min(127)),
-            None => 3,
-        };
-        let release = event.action == MouseAction::Release;
-        if release && !matches!(self.mouse_format, 1006 | 1016) {
-            code = 3;
+        let outside = event.x < 0.0
+            || event.y < 0.0
+            || self.width_px != 0 && event.x > f64::from(self.width_px)
+            || self.height_px != 0 && event.y > f64::from(self.height_px);
+        if event.action != MouseAction::Release
+            && outside
+            && (!matches!(mode, 1002 | 1003) || event.button.is_none())
+        {
+            return Vec::new();
         }
+        let release = event.action == MouseAction::Release;
+        let mut code: u16 = if release && !matches!(self.mouse_format, 1006 | 1016) {
+            3
+        } else {
+            match event.button {
+                Some(MouseButton::Left) => 0,
+                Some(MouseButton::Middle) => 1,
+                Some(MouseButton::Right) => 2,
+                Some(MouseButton::WheelUp) => 64,
+                Some(MouseButton::WheelDown) => 65,
+                Some(MouseButton::WheelLeft) => 66,
+                Some(MouseButton::WheelRight) => 67,
+                Some(MouseButton::Extra(n @ 0..=1)) => 128 + u16::from(n),
+                Some(MouseButton::Extra(_)) => return Vec::new(),
+                None => 3,
+            }
+        };
         if event.action == MouseAction::Move {
             code += 32;
         }
@@ -288,9 +308,12 @@ impl Terminal {
                 + u16::from(event.modifiers.control) * 16;
         }
         let (x, y) = if self.mouse_format == 1016 {
-            (event.x as usize + 1, event.y as usize + 1)
+            (event.x.round() as i32, event.y.round() as i32)
         } else {
-            (event.col.saturating_add(1), event.row.saturating_add(1))
+            (
+                event.col.min(usize::from(self.cols) - 1) as i32 + 1,
+                event.row.min(usize::from(self.rows) - 1) as i32 + 1,
+            )
         };
         match self.mouse_format {
             1006 | 1016 => {
@@ -299,7 +322,8 @@ impl Terminal {
             1015 => format!("\x1b[{};{x};{y}M", code + 32).into_bytes(),
             1005 if x <= 2015 && y <= 2015 => {
                 let mut output = b"\x1b[M".to_vec();
-                for n in [code as u32 + 32, x as u32 + 32, y as u32 + 32] {
+                output.push((code + 32) as u8);
+                for n in [x as u32 + 32, y as u32 + 32] {
                     output.extend_from_slice(char::from_u32(n).unwrap().to_string().as_bytes());
                 }
                 output
@@ -728,8 +752,8 @@ mod tests {
             button: Some(MouseButton::Left),
             col: 3,
             row: 4,
-            x: 30,
-            y: 40,
+            x: 30.0,
+            y: 40.0,
             modifiers: Modifiers::default(),
         };
         assert!(t.encode_mouse(e).is_empty());
@@ -740,7 +764,36 @@ mod tests {
         e.action = MouseAction::Move;
         assert!(t.encode_mouse(e).is_empty());
         t.feed(b"\x1b[?1003h\x1b[?1016h");
-        assert_eq!(t.encode_mouse(e), b"\x1b[<32;31;41M");
+        assert_eq!(t.encode_mouse(e), b"\x1b[<32;30;40M");
         assert_eq!(t.encode_focus(false), b"\x1b[O");
+    }
+    #[test]
+    fn mouse_drag_bounds_pixel_rounding_and_extra_buttons() {
+        let mut t = Terminal::new(80, 24, 10);
+        t.set_pixel_size(640, 384);
+        t.feed(b"\x1b[?1000h\x1b[?1016h");
+        let mut event = MouseEvent {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            col: 0,
+            row: 0,
+            x: -0.25,
+            y: 0.0,
+            modifiers: Modifiers::default(),
+        };
+        assert!(t.encode_mouse(event).is_empty());
+        event.action = MouseAction::Release;
+        event.x = -1.5;
+        event.y = 400.25;
+        assert_eq!(t.encode_mouse(event), b"\x1b[<0;-2;400m");
+        t.feed(b"\x1b[?1003h\x1b[?1005h");
+        event.action = MouseAction::Press;
+        event.button = Some(MouseButton::Extra(0));
+        event.x = 0.0;
+        event.y = 0.0;
+        assert_eq!(t.encode_mouse(event), [0x1b, b'[', b'M', 160, 33, 33]);
+        t.feed(b"\x1b[?9h");
+        event.button = Some(MouseButton::WheelUp);
+        assert!(t.encode_mouse(event).is_empty());
     }
 }

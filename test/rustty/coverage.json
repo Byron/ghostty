@@ -133,8 +133,8 @@
     },
     {
       "id": "input.mouse",
-      "status": "pending",
-      "remaining": "All mouse modes/formats and coordinate limits."
+      "status": "partial",
+      "remaining": "All mouse modes/formats, buttons and viewport/pixel cases pass; retained motion deduplication, renderer padding and full coordinate-limit cases remain."
     },
     {
       "id": "input.focus-paste",

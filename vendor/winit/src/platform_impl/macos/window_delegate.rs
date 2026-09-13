@@ -1,3 +1,4 @@
+// Rustty modification: construct and focus NSPanel owners without application activation.
 #![allow(clippy::unnecessary_cast)]
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -14,7 +15,7 @@ use objc2_app_kit::{
     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
     NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard,
-    NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
+    NSRequestUserAttentionType, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
     NSWindowFullScreenButton, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
     NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
@@ -31,7 +32,7 @@ use super::cursor::cursor_from_icon;
 use super::monitor::{self, flip_window_screen_coordinates, get_display_id};
 use super::observer::RunLoop;
 use super::view::WinitView;
-use super::window::WinitWindow;
+use super::window::{WinitPanel, WinitWindow};
 use super::{ffi, Fullscreen, MonitorHandle, OsError, WindowId};
 use crate::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 use crate::error::{ExternalError, NotSupportedError, OsError as RootOsError};
@@ -44,6 +45,7 @@ use crate::window::{
 
 #[derive(Clone, Debug)]
 pub struct PlatformSpecificWindowAttributes {
+    pub nonactivating_panel: bool,
     pub movable_by_window_background: bool,
     pub titlebar_transparent: bool,
     pub title_hidden: bool,
@@ -62,6 +64,7 @@ impl Default for PlatformSpecificWindowAttributes {
     #[inline]
     fn default() -> Self {
         Self {
+            nonactivating_panel: false,
             movable_by_window_background: false,
             titlebar_transparent: false,
             title_hidden: false,
@@ -83,7 +86,8 @@ pub(crate) struct State {
     /// Strong reference to the global application state.
     app_delegate: Retained<ApplicationDelegate>,
 
-    window: Retained<WinitWindow>,
+    window: Retained<NSWindow>,
+    nonactivating_panel: bool,
 
     // During `windowDidResize`, we use this to only send Moved if the position changed.
     //
@@ -494,7 +498,7 @@ fn new_window(
     app_delegate: &ApplicationDelegate,
     attrs: &WindowAttributes,
     mtm: MainThreadMarker,
-) -> Option<Retained<WinitWindow>> {
+) -> Option<Retained<NSWindow>> {
     autoreleasepool(|_| {
         let screen = match attrs.fullscreen.clone().map(Into::into) {
             Some(Fullscreen::Borderless(Some(monitor)))
@@ -566,16 +570,32 @@ fn new_window(
             masks |= NSWindowStyleMask::FullSizeContentView;
         }
 
-        let window: Option<Retained<WinitWindow>> = unsafe {
-            msg_send_id![
-                super(mtm.alloc().set_ivars(())),
-                initWithContentRect: frame,
-                styleMask: masks,
-                backing: NSBackingStoreType::NSBackingStoreBuffered,
-                defer: false,
-            ]
+        let window = if attrs.platform_specific.nonactivating_panel {
+            // AppKit establishes nonactivation at initialization. The panel must
+            // own its view from birth; changing a live window's class is unsound.
+            masks |= NSWindowStyleMask::NonactivatingPanel;
+            let panel: Option<Retained<WinitPanel>> = unsafe {
+                msg_send_id![
+                    super(mtm.alloc().set_ivars(())),
+                    initWithContentRect: frame,
+                    styleMask: masks,
+                    backing: NSBackingStoreType::NSBackingStoreBuffered,
+                    defer: false,
+                ]
+            };
+            Retained::into_super(Retained::into_super(panel?))
+        } else {
+            let window: Option<Retained<WinitWindow>> = unsafe {
+                msg_send_id![
+                    super(mtm.alloc().set_ivars(())),
+                    initWithContentRect: frame,
+                    styleMask: masks,
+                    backing: NSBackingStoreType::NSBackingStoreBuffered,
+                    defer: false,
+                ]
+            };
+            Retained::into_super(window?)
         };
-        let window = window?;
 
         // It is very important for correct memory management that we
         // disable the extra release that would otherwise happen when
@@ -720,6 +740,7 @@ impl WindowDelegate {
         let delegate = mtm.alloc().set_ivars(State {
             app_delegate: app_delegate.retain(),
             window: window.retain(),
+            nonactivating_panel: attrs.platform_specific.nonactivating_panel,
             previous_position: Cell::new(flip_window_screen_coordinates(window.frame())),
             previous_scale_factor: Cell::new(scale_factor),
             resize_increments: Cell::new(resize_increments),
@@ -802,22 +823,22 @@ impl WindowDelegate {
 
     #[track_caller]
     pub(super) fn view(&self) -> Retained<WinitView> {
-        // SAFETY: The view inside WinitWindow is always `WinitView`
+        // SAFETY: Both WinitWindow and WinitPanel are created with a WinitView.
         unsafe { Retained::cast(self.window().contentView().unwrap()) }
     }
 
     #[track_caller]
-    pub(super) fn window(&self) -> &WinitWindow {
+    pub(super) fn window(&self) -> &NSWindow {
         &self.ivars().window
     }
 
     #[track_caller]
     pub(crate) fn id(&self) -> WindowId {
-        self.window().id()
+        WindowId::from_ns_window(self.window())
     }
 
     pub(crate) fn queue_event(&self, event: WindowEvent) {
-        self.ivars().app_delegate.maybe_queue_window_event(self.window().id(), event);
+        self.ivars().app_delegate.maybe_queue_window_event(self.id(), event);
     }
 
     fn handle_scale_factor_changed(&self, scale_factor: CGFloat) {
@@ -829,7 +850,7 @@ impl WindowDelegate {
 
         let suggested_size = content_size.to_physical(scale_factor);
         let new_inner_size = Arc::new(Mutex::new(suggested_size));
-        app_delegate.handle_window_event(window.id(), WindowEvent::ScaleFactorChanged {
+        app_delegate.handle_window_event(self.id(), WindowEvent::ScaleFactorChanged {
             scale_factor,
             inner_size_writer: InnerSizeWriter::new(Arc::downgrade(&new_inner_size)),
         });
@@ -841,7 +862,7 @@ impl WindowDelegate {
             let size = NSSize::new(logical_size.width, logical_size.height);
             window.setContentSize(size);
         }
-        app_delegate.handle_window_event(window.id(), WindowEvent::Resized(physical_size));
+        app_delegate.handle_window_event(self.id(), WindowEvent::Resized(physical_size));
     }
 
     fn emit_move_event(&self) {
@@ -856,7 +877,12 @@ impl WindowDelegate {
         self.queue_event(WindowEvent::Moved(position));
     }
 
-    fn set_style_mask(&self, mask: NSWindowStyleMask) {
+    fn set_style_mask(&self, mut mask: NSWindowStyleMask) {
+        // Zoom/fullscreen may temporarily replace the entire mask. Preserve the
+        // activation choice AppKit recorded when the native panel was created.
+        if self.ivars().nonactivating_panel {
+            mask |= NSWindowStyleMask::NonactivatingPanel;
+        }
         self.window().setStyleMask(mask);
         // If we don't do this, key handling will break
         // (at least until the window is clicked again/etc.)
@@ -914,7 +940,7 @@ impl WindowDelegate {
     }
 
     pub fn request_redraw(&self) {
-        self.ivars().app_delegate.queue_redraw(self.window().id());
+        self.ivars().app_delegate.queue_redraw(self.id());
     }
 
     #[inline]
@@ -1410,7 +1436,7 @@ impl WindowDelegate {
 
         self.ivars().fullscreen.replace(fullscreen.clone());
 
-        fn toggle_fullscreen(window: &WinitWindow) {
+        fn toggle_fullscreen(window: &NSWindow) {
             // Window level must be restored from `CGShieldingWindowLevel()
             // + 1` back to normal in order for `toggleFullScreen` to do
             // anything
@@ -1576,8 +1602,10 @@ impl WindowDelegate {
         let is_visible = self.window().isVisible();
 
         if !is_minimized && is_visible {
-            #[allow(deprecated)]
-            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            if !self.ivars().nonactivating_panel {
+                #[allow(deprecated)]
+                NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            }
             self.window().makeKeyAndOrderFront(None);
         }
     }
@@ -1628,7 +1656,7 @@ impl WindowDelegate {
     #[inline]
     pub fn raw_window_handle_rwh_04(&self) -> rwh_04::RawWindowHandle {
         let mut window_handle = rwh_04::AppKitHandle::empty();
-        window_handle.ns_window = self.window() as *const WinitWindow as *mut _;
+        window_handle.ns_window = self.window() as *const NSWindow as *mut _;
         window_handle.ns_view = Retained::as_ptr(&self.view()) as *mut _;
         rwh_04::RawWindowHandle::AppKit(window_handle)
     }
@@ -1637,7 +1665,7 @@ impl WindowDelegate {
     #[inline]
     pub fn raw_window_handle_rwh_05(&self) -> rwh_05::RawWindowHandle {
         let mut window_handle = rwh_05::AppKitWindowHandle::empty();
-        window_handle.ns_window = self.window() as *const WinitWindow as *mut _;
+        window_handle.ns_window = self.window() as *const NSWindow as *mut _;
         window_handle.ns_view = Retained::as_ptr(&self.view()) as *mut _;
         rwh_05::RawWindowHandle::AppKit(window_handle)
     }

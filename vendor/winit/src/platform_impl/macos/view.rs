@@ -1,3 +1,4 @@
+// Rustty modification: keep the original NSWindow/NSPanel as the weak view owner.
 #![allow(clippy::unnecessary_cast)]
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -8,7 +9,7 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{declare_class, msg_send_id, mutability, sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSCursor, NSEvent, NSEventPhase, NSResponder, NSTextInputClient,
-    NSTrackingRectTag, NSView, NSViewFrameDidChangeNotification,
+    NSTrackingRectTag, NSView, NSViewFrameDidChangeNotification, NSWindow,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
@@ -22,7 +23,7 @@ use super::event::{
     code_to_key, code_to_location, create_key_event, event_mods, lalt_pressed, ralt_pressed,
     scancode_to_physicalkey, KeyEventExtra,
 };
-use super::window::WinitWindow;
+use super::window::WindowId;
 use super::DEVICE_ID;
 use crate::dpi::{LogicalPosition, LogicalSize};
 use crate::event::{
@@ -135,7 +136,7 @@ pub struct ViewState {
     accepts_first_mouse: bool,
 
     // Weak reference because the window keeps a strong reference to the view
-    _ns_window: WeakId<WinitWindow>,
+    _ns_window: WeakId<NSWindow>,
 
     /// The state of the `Option` as `Alt`.
     option_as_alt: Cell<OptionAsAlt>,
@@ -205,7 +206,7 @@ declare_class!(
 
             // It's a workaround for https://github.com/rust-windowing/winit/issues/2640, don't replace with `self.window_id()`.
             if let Some(window) = self.ivars()._ns_window.load() {
-                self.ivars().app_delegate.handle_redraw(window.id());
+                self.ivars().app_delegate.handle_redraw(WindowId::from_ns_window(&window));
             }
 
             // This is a direct subclass of NSView, no need to call superclass' drawRect:
@@ -786,7 +787,7 @@ declare_class!(
 impl WinitView {
     pub(super) fn new(
         app_delegate: &ApplicationDelegate,
-        window: &WinitWindow,
+        window: &NSWindow,
         accepts_first_mouse: bool,
         option_as_alt: OptionAsAlt,
     ) -> Retained<Self> {
@@ -826,7 +827,7 @@ impl WinitView {
         this
     }
 
-    fn window(&self) -> Retained<WinitWindow> {
+    fn window(&self) -> Retained<NSWindow> {
         // TODO: Simply use `window` property on `NSView`.
         // That only returns a window _after_ the view has been attached though!
         // (which is incompatible with `frameDidChange:`)
@@ -836,7 +837,9 @@ impl WinitView {
     }
 
     fn queue_event(&self, event: WindowEvent) {
-        self.ivars().app_delegate.maybe_queue_window_event(self.window().id(), event);
+        self.ivars()
+            .app_delegate
+            .maybe_queue_window_event(WindowId::from_ns_window(&self.window()), event);
     }
 
     fn scale_factor(&self) -> f64 {

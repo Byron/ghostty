@@ -257,8 +257,7 @@ impl Platform {
             native.setTabbingMode(NSWindowTabbingMode::Disallowed);
             native.setRestorable(false);
             native.setAnimationBehavior(NSWindowAnimationBehavior::None);
-            // Native auto-hide would bypass the host's visibility state. Winit
-            // owns an NSWindow: NSPanel's NonactivatingPanel style is invalid here.
+            // Native auto-hide would bypass the host's visibility state.
             native.setHidesOnDeactivate(false);
         }
         Ok(())
@@ -294,8 +293,8 @@ impl Platform {
     }
 
     /// Select the screen on each reveal, retaining the user's resized dimensions.
-    /// Winit's NSWindow must activate the app; nonactivating NSPanel behavior needs
-    /// a different window owner, not an Objective-C class or style-mask replacement.
+    /// Winit created this window as a nonactivating NSPanel, so focusing it leaves
+    /// the previously active application in control of the menu bar and its windows.
     pub fn show_quick(&self, window: &Window, config: &Config) -> Result<(), String> {
         let native = native_window(window)?;
         self.configure_window(window, true, config)?;

@@ -18,3 +18,12 @@ without modifying a developer's Cargo cache or depending on an external fork.
 The initial vendoring commit preserves every published file byte for byte.
 Cargo's local `.cargo-ok` marker is not part of the source package. Keep native
 behavior changes separate from that baseline to make the local patch reviewable.
+
+Local patch: macOS `WindowAttributesExtMacOS::with_nonactivating_panel` constructs
+a real `NSPanel` while retaining Winit's existing view/delegate ownership. Its
+nonactivating style survives Winit's later style updates, and focusing the panel
+does not activate the application. Ordinary windows keep their existing behavior.
+The modified source files and manifests carry Rustty modification notices.
+
+Native regression check (main thread, hidden windows; macOS desktop required):
+`cargo test -p rustty-app --test native_panel --offline -- --ignored`.

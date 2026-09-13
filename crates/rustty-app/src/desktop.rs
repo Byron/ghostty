@@ -727,6 +727,7 @@ impl App {
         let attributes = Window::default_attributes()
             .with_title("Rustty")
             .with_decorations(!quick)
+            .with_nonactivating_panel(quick)
             .with_visible(false)
             .with_inner_size(LogicalSize::new(frame[2].max(320.0), frame[3].max(180.0)))
             .with_position(LogicalPosition::new(frame[0], frame[1]))

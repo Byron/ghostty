@@ -1,3 +1,4 @@
+// Rustty modification: opt-in construction of nonactivating NSPanel windows.
 //! # macOS / AppKit
 //!
 //! Winit has an OS requirement of macOS 10.11 or higher (same as Rust
@@ -278,6 +279,14 @@ pub enum ActivationPolicy {
 /// - `with_titlebar_buttons_hidden`
 /// - `with_fullsize_content_view`
 pub trait WindowAttributesExtMacOS {
+    /// Creates an `NSPanel` with the `NonactivatingPanel` style instead of an `NSWindow`.
+    ///
+    /// The panel can become key and main without activating the application, including
+    /// when [`Window::focus_window`] is called. This choice is fixed at construction;
+    /// later decoration and fullscreen changes preserve its nonactivating style.
+    ///
+    /// The default is `false`.
+    fn with_nonactivating_panel(self, nonactivating_panel: bool) -> Self;
     /// Enables click-and-drag behavior for the entire window, not just the titlebar.
     fn with_movable_by_window_background(self, movable_by_window_background: bool) -> Self;
     /// Makes the titlebar transparent and allows the content to appear behind it.
@@ -307,6 +316,12 @@ pub trait WindowAttributesExtMacOS {
 }
 
 impl WindowAttributesExtMacOS for WindowAttributes {
+    #[inline]
+    fn with_nonactivating_panel(mut self, nonactivating_panel: bool) -> Self {
+        self.platform_specific.nonactivating_panel = nonactivating_panel;
+        self
+    }
+
     #[inline]
     fn with_movable_by_window_background(mut self, movable_by_window_background: bool) -> Self {
         self.platform_specific.movable_by_window_background = movable_by_window_background;

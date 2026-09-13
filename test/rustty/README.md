@@ -33,10 +33,18 @@ Use deterministic generated cases and saved failures to diagnose differences:
 
 ```sh
 python3 test/rustty/parity.py --no-build --generated 100 --seed 0
+python3 test/rustty/parity.py --no-build --input
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
 ```
+
+`--input` adds matrices for legacy/Kitty keyboard modes, modifiers and key
+actions, consumed text modifiers, IME, mouse formats, focus and paste. Use
+`--case input/key` to select keyboard cases. Input cases compare each encoded
+result even when it is empty; a dropped key cannot disappear from the event
+list. Mouse coordinates use 8-by-16-pixel cells. `--artifacts`, `--zig-bin` and
+`--rust-bin` select isolated output and adapter paths for concurrent work.
 
 Each failure saves its request, both full responses and the first difference
 under `target/parity/failures/`. Minimization removes operations and bytes

@@ -41,17 +41,10 @@ impl Default for Event {
 }
 
 pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static str> {
-    let mods = Modifiers {
-        shift: event.modifiers & 1 != 0,
-        control: event.modifiers & 2 != 0,
-        alt: event.modifiers & 4 != 0,
-        super_key: event.modifiers & 8 != 0,
-        caps_lock: event.modifiers & 16 != 0,
-        num_lock: event.modifiers & 32 != 0,
-    };
+    let mods = modifiers(event.modifiers);
     match event.kind.as_str() {
         "key" => {
-            if event.consumed_modifiers != 0 || event.modifiers & !63 != 0 {
+            if event.modifiers & !63 != 0 || event.consumed_modifiers & !63 != 0 {
                 return Err("UnsupportedModifiers");
             }
             let text = String::from_utf8(super::unhex(&event.data)?).map_err(|_| "InvalidText")?;
@@ -66,6 +59,7 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
                 key,
                 text: (!text.is_empty()).then_some(text),
                 modifiers: mods,
+                consumed_modifiers: modifiers(event.consumed_modifiers),
                 action,
                 unshifted: (event.unshifted != 0)
                     .then(|| char::from_u32(event.unshifted))
@@ -111,6 +105,17 @@ pub fn encode(terminal: &Terminal, event: &Event) -> Result<Vec<u8>, &'static st
             Ok(terminal.encode_paste(text))
         }
         _ => Err("UnsupportedInput"),
+    }
+}
+
+fn modifiers(bits: u16) -> Modifiers {
+    Modifiers {
+        shift: bits & 1 != 0,
+        control: bits & 2 != 0,
+        alt: bits & 4 != 0,
+        super_key: bits & 8 != 0,
+        caps_lock: bits & 16 != 0,
+        num_lock: bits & 32 != 0,
     }
 }
 

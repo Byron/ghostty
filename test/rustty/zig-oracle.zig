@@ -7,6 +7,7 @@ const parser_adapter = @import("zig-parser.zig");
 const paste_adapter = @import("zig-paste.zig");
 const semantic_adapter = @import("zig-semantic.zig");
 const graphics_adapter = @import("zig-graphics.zig");
+const grid_adapter = @import("zig-grid.zig");
 const Allocator = std.mem.Allocator;
 // libghostty-vt exposes this type through the callback without re-exporting
 // the implementation module. Use that public signature as the source of truth.
@@ -16,6 +17,9 @@ const DeviceAttributes = @typeInfo(@typeInfo(DeviceAttributesFn).pointer.child).
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const capabilities = [_][]const u8{
+    "terminal.selection",
+    "terminal.search",
+    "terminal.tracked",
     "graphics.kitty",
     "graphics.png",
     "protocol.dcs",
@@ -63,6 +67,7 @@ const Operation = struct {
     cursor_shape: []const u8 = "block",
     cursor_blink: ?bool = false,
     colors: ?ColorDefaults = null,
+    grid: ?grid_adapter.Operation = null,
 };
 const Request = struct {
     id: []const u8 = "case",
@@ -274,6 +279,7 @@ const Response = struct {
     snapshot_progress: []const SnapshotProgress = &.{},
     mode_results: []const bool = &.{},
     parsed_colors: []const ?[3]u16 = &.{},
+    grid_results: []const grid_adapter.Result = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -506,6 +512,9 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     defer stream.deinit();
     var observations: std.ArrayList(Observation) = .empty;
     var mode_results: std.ArrayList(bool) = .empty;
+    var grid: grid_adapter.Context = .{};
+    defer grid.deinit(alloc, &t);
+    var grid_results: std.ArrayList(grid_adapter.Result) = .empty;
     var snapshots: std.ArrayList([]const u8) = .empty;
     var snapshot_source: std.Io.Reader = .fixed(&.{});
     var snapshot_decoder: ?vt.snapshot.Decoder = null;
@@ -581,6 +590,8 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             configureClipboard(&stream);
         } else if (std.mem.eql(u8, op.op, "observe")) {
             try observations.append(alloc, try observe(alloc, &t, request));
+        } else if (std.mem.eql(u8, op.op, "grid")) {
+            try grid_results.append(alloc, try grid.run(alloc, &t, op.grid orelse return error.MissingGridOperation));
         } else if (std.mem.eql(u8, op.op, "input")) {
             Context.append("input", try input_adapter.encode(alloc, &t, op.input orelse return error.MissingInput));
         } else if (std.mem.eql(u8, op.op, "paste")) {
@@ -589,6 +600,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             observations.clearRetainingCapacity();
             ctx.events.clearRetainingCapacity();
             mode_results.clearRetainingCapacity();
+            grid_results.clearRetainingCapacity();
         } else if (std.mem.eql(u8, op.op, "snapshot")) {
             var continuation: std.Io.Writer.Allocating = .init(alloc);
             try stream.writeContinuation(&continuation.writer);
@@ -598,12 +610,14 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             });
             try snapshots.append(alloc, try hexEncode(alloc, encoded.written()));
         } else if (std.mem.eql(u8, op.op, "restore")) {
+            if (grid.hasHandles()) return error.UnsupportedGridRestore;
             var source: std.Io.Reader = .fixed(try hexDecode(alloc, op.data));
             var decoded = vt.snapshot.decode(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
             defer decoded.deinit(alloc);
             restoreTerminal(alloc, &t, &stream, &decoded);
             snapshot_decoder = null;
         } else if (std.mem.eql(u8, op.op, "restore_ready")) {
+            if (grid.hasHandles()) return error.UnsupportedGridRestore;
             snapshot_source = .fixed(try hexDecode(alloc, op.data));
             snapshot_decoder = .init(&snapshot_source);
             var decoded = snapshot_decoder.?.ready(alloc, io, .{ .max_continuation_bytes = 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
@@ -633,6 +647,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     response.snapshots = snapshots.items;
     response.snapshot_progress = snapshot_progress.items;
     response.mode_results = mode_results.items;
+    response.grid_results = grid_results.items;
     return response;
 }
 

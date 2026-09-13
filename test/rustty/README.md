@@ -41,6 +41,7 @@ python3 test/rustty/parity.py --no-build --unicode
 python3 test/rustty/parity.py --no-build --snapshots
 python3 test/rustty/parity.py --no-build --snapshot-wire
 python3 test/rustty/parity.py --no-build --protocols
+python3 test/rustty/parity.py --no-build --grid
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json
 python3 test/rustty/parity.py --no-build --replay target/parity/failures/ID/request.json --minimize
 python3 -m unittest discover -s test/rustty -p 'test_*.py'
@@ -78,6 +79,26 @@ and DEC graphics mappings through G0–G3, cell-write single shifts, repeat and
 snapshot continuation. Combining characters and wide-cell spacers exercise
 shift consumption separately from input-scalar dispatch. Smoke cases also keep
 minimized inherited failures with their original corpus source identifiers.
+
+`--grid` compares direct selection, literal search and tracked-reference APIs.
+Each `grid` operation appends its result to `grid_results`; actions are `select`,
+`clear_selection`, `track`, `untrack`, `viewport`, `limits`, `search` and `observe`.
+Points name `active`, `viewport`, `screen` or `history` coordinates. Observations
+translate each implementation's own handles to those coordinates and include
+cell codepoints, selected text and viewport position. Raw row IDs are not shared.
+Selection extraction uses the native plain-text defaults (`unwrap` and `trim`
+enabled). Search needles are hexadecimal bytes; Rust currently accepts UTF-8
+literal needles through its regex API. Match order and overlapping results are
+compared without sorting or deduplication. The native adapter accepts arbitrary
+needle bytes, preserving the Rust API gap for invalid UTF-8.
+
+Grid cases cover live writes, erasure, reflow, height changes, screen switches,
+resets, handle reuse and scrollback limits. Rust currently cannot release an
+inactive screen's handle through its public API. Restoring a new terminal while
+the adapter owns tracked handles is explicitly unsupported; those external
+lifetimes need a separate API comparison. Incremental search, search selection,
+word/line/output selection, gestures and styled selection formatting remain
+uncovered. The failing grid cases remain part of `--grid` and `--thorough`.
 
 Native libghostty-vt updates OSC 133 semantic state without command lifecycle
 callbacks. `Terminal::shell_command_events` explicitly enables Rustty's

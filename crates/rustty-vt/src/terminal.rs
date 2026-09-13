@@ -620,6 +620,9 @@ impl Terminal {
     ) {
         match event {
             Event::Print(cp) => self.print(cp),
+            // Raw C1 controls emitted outside UTF-8 ground-state decoding are
+            // equivalent to their seven-bit ESC forms.
+            Event::Execute(byte) if byte > 0x7f => self.esc(&[], byte - 0x40, effects),
             Event::Execute(byte) => match byte {
                 0x05 => effects.push(Effect::Query(Query::Enquiry)),
                 0x07 => effects.push(Effect::Bell),

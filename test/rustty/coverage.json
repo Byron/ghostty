@@ -179,7 +179,7 @@
     {
       "id": "snapshot.fixtures",
       "status": "partial",
-      "remaining": "Complete-v1, every truncation and selected corruptions are compared; remaining component fixtures and mixed PAGE behavior need coverage. Original Zig asserts on some mixed-width cursor states; reference-limit cases remain in thorough runs."
+      "remaining": "Complete-v1, every truncation and selected corruptions are compared. Native restored-cursor bounds are repaired; all 45 mixed-width cursor comparisons, including pending wrap and continued printing, pass. Remaining component fixtures and complete mixed PAGE transitions need coverage."
     },
     {
       "id": "fuzz.resource-limits",

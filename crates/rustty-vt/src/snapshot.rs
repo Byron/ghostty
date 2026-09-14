@@ -1220,9 +1220,9 @@ impl<R: Read> Decoder<R> {
         }
         screen.next_row = contents.len() as u64;
         screen.rows = contents.split_off(contents.len() - usize::from(rows));
-        let physical_cols = screen.rows[screen.cursor.row].cells.len();
-        screen.cursor.col = x.min(physical_cols - 1);
-        screen.cursor.pending_wrap = flags & 1 != 0 && screen.cursor.col == physical_cols - 1;
+        let cursor_cols = usize::from(cols).min(screen.rows[screen.cursor.row].cells.len());
+        screen.cursor.col = x.min(cursor_cols - 1);
+        screen.cursor.pending_wrap = flags & 1 != 0 && screen.cursor.col == cursor_cols - 1;
         screen.history = contents.into();
         screen.history_bytes = screen.history.iter().map(Row::storage_bytes).sum();
         screen.pages = pages;

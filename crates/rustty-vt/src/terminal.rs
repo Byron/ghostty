@@ -327,50 +327,83 @@ impl Terminal {
         let write_enabled = handler.clipboard_write_enabled();
         parser.advance(bytes, |event| {
             self.handle(event, &mut effects, write_enabled, read_enabled);
-            for effect in effects.drain(..) {
-                match effect {
-                    Effect::DragAndDrop(event) => {
-                        handler.drag_and_drop(event, self.kitty_dnd.as_ref());
-                    }
-                    Effect::ClipboardRead(request) => {
-                        let result = if read_enabled {
-                            handler.clipboard_read(&request)
-                        } else if request.protocol == clipboard::Protocol::Osc52 {
-                            continue;
-                        } else {
-                            clipboard::ReadResult::Denied
-                        };
-                        handler.effect(Effect::Write(self.reply_clipboard_read(request, result)));
-                    }
-                    Effect::ClipboardWrite(request) => {
-                        if write_enabled {
-                            let result = handler.clipboard_write(&request);
-                            if let Some(reply) = self.reply_clipboard_write(request, result) {
-                                handler.effect(Effect::Write(reply));
-                            }
-                        }
-                    }
-                    Effect::Query(query) => {
-                        let reply = match query {
-                            Query::ColorScheme => {
-                                handler.color_scheme().map(query::ColorScheme::encode)
-                            }
-                            Query::DeviceAttributes(kind) => {
-                                handler.device_attributes().map(|a| a.encode(kind))
-                            }
-                            Query::Enquiry => query::enquiry(&handler.enquiry()),
-                            Query::Size(style) => handler.size().map(|s| s.encode(style)),
-                            Query::Xtversion => query::xtversion(&handler.xtversion()),
-                        };
-                        if let Some(reply) = reply {
+            self.dispatch_effects(effects.drain(..), handler, write_enabled, read_enabled);
+        });
+        self.parser = parser;
+    }
+
+    /// Dispatch one complete OSC payload, including its numeric prefix, without
+    /// VT stream framing. Control bytes are data; `None` represents a missing
+    /// terminator and uses ST for replies. Command capture limits still apply.
+    /// The streaming parser and any unfinished escape sequence are unchanged.
+    pub fn feed_osc_with_handler(
+        &mut self,
+        data: &[u8],
+        terminator: Option<u8>,
+        handler: &mut impl EffectHandler,
+    ) {
+        let mut effects = Vec::new();
+        let read_enabled = handler.clipboard_read_enabled();
+        let write_enabled = handler.clipboard_write_enabled();
+        self.osc(
+            data,
+            terminator == Some(0x07),
+            &mut effects,
+            write_enabled,
+            read_enabled,
+        );
+        self.dispatch_effects(effects.into_iter(), handler, write_enabled, read_enabled);
+    }
+
+    fn dispatch_effects(
+        &mut self,
+        effects: impl Iterator<Item = Effect>,
+        handler: &mut impl EffectHandler,
+        write_enabled: bool,
+        read_enabled: bool,
+    ) {
+        for effect in effects {
+            match effect {
+                Effect::DragAndDrop(event) => {
+                    handler.drag_and_drop(event, self.kitty_dnd.as_ref());
+                }
+                Effect::ClipboardRead(request) => {
+                    let result = if read_enabled {
+                        handler.clipboard_read(&request)
+                    } else if request.protocol == clipboard::Protocol::Osc52 {
+                        continue;
+                    } else {
+                        clipboard::ReadResult::Denied
+                    };
+                    handler.effect(Effect::Write(self.reply_clipboard_read(request, result)));
+                }
+                Effect::ClipboardWrite(request) => {
+                    if write_enabled {
+                        let result = handler.clipboard_write(&request);
+                        if let Some(reply) = self.reply_clipboard_write(request, result) {
                             handler.effect(Effect::Write(reply));
                         }
                     }
-                    effect => handler.effect(effect),
                 }
+                Effect::Query(query) => {
+                    let reply = match query {
+                        Query::ColorScheme => {
+                            handler.color_scheme().map(query::ColorScheme::encode)
+                        }
+                        Query::DeviceAttributes(kind) => {
+                            handler.device_attributes().map(|a| a.encode(kind))
+                        }
+                        Query::Enquiry => query::enquiry(&handler.enquiry()),
+                        Query::Size(style) => handler.size().map(|s| s.encode(style)),
+                        Query::Xtversion => query::xtversion(&handler.xtversion()),
+                    };
+                    if let Some(reply) = reply {
+                        handler.effect(Effect::Write(reply));
+                    }
+                }
+                effect => handler.effect(effect),
             }
-        });
-        self.parser = parser;
+        }
     }
 
     /// Complete a deferred clipboard request, including an optional grant.

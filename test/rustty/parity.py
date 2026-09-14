@@ -31,6 +31,7 @@ import host_queries
 import mode_defaults
 import color_protocols
 import osc_strings
+import osc_requests
 import glyph_requests
 import reset_stream
 import dnd_requests
@@ -509,6 +510,7 @@ def main():
     parser.add_argument("--corpus", action="store_true", help="compare inherited terminal-stream corpus cases")
     parser.add_argument("--input", action="store_true", help="compare keyboard, mouse, focus and paste encoding")
     parser.add_argument("--parser", action="store_true", help="compare raw parser events and inherited parser corpus")
+    parser.add_argument("--osc", action="store_true", help="compare direct OSC corpus state and effects")
     parser.add_argument("--unicode", action="store_true", help="compare widths of all 1,112,064 Unicode scalars")
     parser.add_argument("--snapshots", action="store_true", help="cross-decode both snapshot encodings and resume terminal input")
     parser.add_argument("--snapshot-wire", action="store_true", help="compare snapshot fixtures, streaming, malformed input and mixed PAGE widths")
@@ -528,7 +530,7 @@ def main():
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     if not args.no_build:
         zig_build = ["zig", "build", "vt-oracle", "-Demit-lib-vt=true", "-Demit-macos-app=false"]
-        if args.pages or args.corpus or args.thorough:
+        if args.pages or args.corpus or args.osc or args.thorough:
             zig_build.append("-Doptimize=ReleaseSafe")
         subprocess.run(zig_build, cwd=ROOT, check=True)
         subprocess.run(["cargo", "build", "--offline", "-p", "rustty-vt", "--example", "parity"], cwd=ROOT, check=True)
@@ -657,6 +659,11 @@ def main():
                 requests.extend(osc_strings.allocating_requests(args.case))
             if args.corpus or args.thorough:
                 requests.extend((request, ["terminal.write"]) for request in corpus_requests()
+                                if not args.case or args.case in request["id"])
+            if args.osc or args.thorough:
+                requests.extend((request, covers) for request, covers in osc_requests.corpus_requests(ROOT)
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in osc_requests.requests()
                                 if not args.case or args.case in request["id"])
             requests.extend((request, []) for request in generated_requests(args.seed, args.generated or (100 if args.thorough else 0))
                             if not args.case or args.case in request["id"])

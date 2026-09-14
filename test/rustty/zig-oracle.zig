@@ -4,6 +4,7 @@ const std = @import("std");
 const vt = @import("ghostty-vt");
 const input_adapter = @import("zig-input.zig");
 const parser_adapter = @import("zig-parser.zig");
+const osc_adapter = @import("zig-osc.zig");
 const paste_adapter = @import("zig-paste.zig");
 const semantic_adapter = @import("zig-semantic.zig");
 const graphics_adapter = @import("zig-graphics.zig");
@@ -580,6 +581,8 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             if (request.scalar) {
                 for (bytes) |byte| stream.next(byte);
             } else stream.nextSlice(bytes);
+        } else if (std.mem.eql(u8, op.op, "osc")) {
+            osc_adapter.run(alloc, &stream, try hexDecode(alloc, op.data), request.scalar);
         } else if (std.mem.eql(u8, op.op, "resize")) {
             if (op.cols == 0 or op.rows == 0 or op.cols > 1024 or op.rows > 1024) return error.InvalidDimensions;
             try stream.handler.resize(.{

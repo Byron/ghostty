@@ -38,6 +38,7 @@ python3 test/rustty/parity.py --no-build --generated 100 --seed 0
 python3 test/rustty/parity.py --corpus --case corpus/stream-initial/
 python3 test/rustty/parity.py --no-build --input
 python3 test/rustty/parity.py --no-build --parser
+python3 test/rustty/parity.py --no-build --osc
 python3 test/rustty/parity.py --no-build --unicode
 python3 test/rustty/parity.py --no-build --snapshots
 python3 test/rustty/parity.py --no-build --snapshot-wire
@@ -84,6 +85,23 @@ parser and UTF-8 decoder. For OSC it captures bytes at the parser's transition
 boundary because Zig exposes validated commands while Rust exposes raw OSC
 payloads. This comparison therefore does **not** validate OSC command parsing,
 effects or command-specific limits; those need terminal/protocol cases.
+
+`--osc` compares direct OSC dispatch and includes all 40 inherited `osc-initial`
+and `osc-cmin` files unchanged. The first byte selects BEL, C1 ST or a missing
+terminator exactly as in `fuzz_osc.zig`. Remaining bytes go directly to the OSC
+parser, including embedded control bytes; wrapping these records in ANSI escapes
+would change their meaning. The native adapter dispatches validated commands
+through the existing stream handler. Rust's `Terminal::feed_osc_with_handler`
+uses the same command parsing and host-effect dispatch as streamed input while
+preserving any unfinished stream sequence.
+
+The corpus and 176 focused fixtures pass 648 comparisons of terminal state and
+host effects, including reply terminators, capture boundaries, control bytes and
+pending CSI continuation. Use `--osc --case osc/corpus/` for just the inherited
+records. Scalar delivery exercises native `next` rather than `nextSlice`;
+delivery variants keep each direct OSC record intact. This verifies observable
+command behavior, not the typed metadata of commands that the terminal ignores.
+Allocator-failure injection and complete command/resource coverage remain.
 
 The OSC hyperlink cases compare opaque URI/ID bytes in cells, the active cursor
 and restored snapshots. Duplicate IDs, malformed option traversal, invalid

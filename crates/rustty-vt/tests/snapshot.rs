@@ -79,6 +79,24 @@ fn frame(records: &[(u16, Vec<u8>)]) -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn unknown_cursor_default_flags_preserve_host_cursor_preferences() {
+    for (flag, expected) in [
+        (0, CursorShape::Block),
+        (1, CursorShape::Bar),
+        (2, CursorShape::Bar),
+        (255, CursorShape::Bar),
+    ] {
+        let mut parts = records(&encode_to_vec(&Terminal::new(8, 3, 0)).unwrap());
+        parts[0].1[29] = flag;
+        let mut terminal = decode(frame(&parts).as_slice(), DecodeOptions::default()).unwrap();
+        terminal.set_default_cursor(CursorShape::Bar, Some(true));
+        assert_eq!(terminal.screen().cursor.shape, expected, "flag={flag}");
+        let encoded = records(&encode_to_vec(&terminal).unwrap());
+        assert_eq!(encoded[0].1[29], u8::from(flag != 0));
+    }
+}
+
 fn text<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<String> {
     rows.into_iter().map(Row::text).collect()
 }

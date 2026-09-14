@@ -15,6 +15,7 @@ const Placement = struct {
     location: []const u8,
     anchor: ?Location,
     parent: ?struct { image_id: u32, placement_id: PlacementId, offset: [2]i32 },
+    chain: ?struct { image_id: u32, placement_id: PlacementId, anchor: ?Location, offset: [2]i32 },
     requested_size: [2]u32,
     requested_source: [4]u32,
     stored_offset: [2]u32,
@@ -68,6 +69,22 @@ fn placements(alloc: Allocator, t: *vt.Terminal, owner: *vt.Screen) ![]Placement
             .parent = switch (p.location) {
                 .relative => |r| .{ .image_id = r.parent.image_id, .placement_id = .{ .internal = r.parent.placement_id.tag == .internal, .id = r.parent.placement_id.id }, .offset = .{ r.horizontal_offset, r.vertical_offset } },
                 else => null,
+            },
+            .chain = chain: {
+                const rel = switch (p.location) {
+                    .relative => |rel| rel,
+                    else => break :chain null,
+                };
+                const resolved = owner.kitty_images.resolveChain(rel) orelse break :chain null;
+                break :chain .{
+                    .image_id = resolved.root_key.image_id,
+                    .placement_id = .{ .internal = resolved.root_key.placement_id.tag == .internal, .id = resolved.root_key.placement_id.id },
+                    .anchor = switch (resolved.root.location) {
+                        .pin => |pin| location(owner, pin.*),
+                        else => null,
+                    },
+                    .offset = .{ resolved.horizontal_offset, resolved.vertical_offset },
+                };
             },
             .requested_size = .{ p.columns, p.rows },
             .requested_source = .{ p.source_x, p.source_y, p.source_width, p.source_height },

@@ -219,24 +219,10 @@ fn geometry(screen: &Screen, metrics: FontMetrics, options: &RenderOptions) -> V
         if !valid_image(image) {
             continue;
         }
-        let mut p = placement;
-        let mut offset = [0i64; 2];
-        let mut depth = 0;
-        while let Some(parent) = p.parent {
-            offset[0] = offset[0].saturating_add(i64::from(p.parent_offset[0]));
-            offset[1] = offset[1].saturating_add(i64::from(p.parent_offset[1]));
-            let Some(next) = index.get(&parent) else {
-                break;
-            };
-            p = next;
-            depth += 1;
-            if depth > 64 {
-                break;
-            }
-        }
-        if p.parent.is_some() {
+        let Some((p, offset)) = placement.resolve_chain(|key| index.get(&key).copied()) else {
             continue;
-        }
+        };
+        let offset = offset.map(i64::from);
         let origin = if p.virtual_placement {
             let Some(origin) = virtual_origins.get(&(p.image_id, p.placement_id)) else {
                 continue;
@@ -476,6 +462,36 @@ mod tests {
                 .as_bytes(),
         );
         assert!(t.screen().graphics.images.contains_key(&id));
+    }
+
+    #[test]
+    fn relative_descendants_past_eight_links_are_omitted_after_replacement() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        transmit(&mut terminal, 1, "c=1,r=1");
+        for id in 2..=9 {
+            terminal
+                .feed(format!("\x1b_Ga=p,i=1,p={id},P=1,Q={},c=1,r=1\x1b\\", id - 1).as_bytes());
+        }
+        let (renderer, options) = renderer();
+        assert_eq!(
+            geometry(terminal.screen(), renderer.metrics(), &options).len(),
+            9
+        );
+        terminal.feed(b"\x1b_Ga=p,i=1,p=20,C=1,c=1,r=1\x1b\\");
+        terminal.feed(b"\x1b_Ga=p,i=1,p=1,P=1,Q=20,c=1,r=1\x1b\\");
+        assert_eq!(terminal.graphics().placements.len(), 10);
+        let rendered = geometry(terminal.screen(), renderer.metrics(), &options);
+        assert_eq!(rendered.len(), 9);
+        assert!(
+            !rendered
+                .iter()
+                .any(|p| p.placement == PlacementId::External(9))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|p| p.placement == PlacementId::External(8))
+        );
     }
 
     #[test]

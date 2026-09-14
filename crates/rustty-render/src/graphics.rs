@@ -565,6 +565,68 @@ mod tests {
     }
 
     #[test]
+    fn kitty_protocol_lifecycle_refreshes_pixels_and_reuses_unchanged_frames() {
+        let mut terminal = Terminal::new(10, 3, 100);
+        let (mut renderer, options) = renderer();
+        let mut check = |terminal: &Terminal, expected: Option<[u8; 4]>, uploads: usize| {
+            let frame = renderer.prepare(terminal.screen(), &options).unwrap();
+            assert_eq!(frame.atlas_uploads.len(), uploads);
+            let images: Vec<_> = frame
+                .quads
+                .iter()
+                .filter(|q| q.paint == Paint::Color)
+                .collect();
+            let Some(expected) = expected else {
+                assert!(images.is_empty());
+                return;
+            };
+            assert_eq!(images.len(), 1);
+            let quad = images[0];
+            let pixel = frame.atlas_uploads.iter().find_map(|upload| {
+                let x = (quad.uv[0] * upload.page_size as f32) as u32;
+                let y = (quad.uv[1] * upload.page_size as f32) as u32;
+                if quad.atlas != upload.page
+                    || !(upload.origin[0]..upload.origin[0] + upload.size[0]).contains(&x)
+                    || !(upload.origin[1]..upload.origin[1] + upload.size[1]).contains(&y)
+                {
+                    return None;
+                }
+                let index =
+                    ((y - upload.origin[1]) * upload.size[0] + x - upload.origin[0]) as usize * 4;
+                Some(&upload.pixels[index..index + 4])
+            });
+            assert_eq!(pixel, Some(expected.as_slice()));
+        };
+        let red = Some([255, 0, 0, 128]);
+        let green = Some([0, 255, 0, 255]);
+        transmit(&mut terminal, 1, "");
+        check(&terminal, red, 1);
+        terminal.feed(b"\x1b_Ga=f,i=1,f=32,s=1,v=1,z=10;AP8A/w==\x1b\\");
+        check(&terminal, red, 1); // Uploading a hidden frame needs no atlas update.
+        terminal.feed(b"\x1b_Ga=a,i=1,r=1,z=10,s=3\x1b\\");
+        assert_eq!(terminal.tick_graphics(0), Some(10));
+        assert_eq!(terminal.tick_graphics(10), Some(20));
+        check(&terminal, green, 2);
+        check(&terminal, green, 2); // Repainting the same frame reuses its texture.
+        terminal.feed(b"\x1b_Ga=a,i=1,c=1,s=1\x1b\\");
+        check(&terminal, red, 2);
+        terminal.feed(b"\x1b_Ga=a,i=1,c=2\x1b\\");
+        check(&terminal, green, 2);
+
+        // Both editing and composing into the displayed frame replace its pixels.
+        terminal.feed(b"\x1b_Ga=f,i=1,r=2,f=32,s=1,v=1,X=1;AAD//w==\x1b\\");
+        check(&terminal, Some([0, 0, 255, 255]), 3);
+        terminal.feed(b"\x1b_Ga=c,i=1,r=1,c=2,C=1\x1b\\");
+        check(&terminal, red, 4);
+        terminal.feed(b"\x1b_Ga=d,d=f,i=1,r=2\x1b\\");
+        check(&terminal, red, 4);
+        terminal.feed(b"\x1b_Ga=d,d=I,i=1\x1b\\");
+        check(&terminal, None, 4);
+        terminal.feed(b"\x1b_Ga=T,i=1,p=1,f=32,s=1,v=1,C=1;//8A/w==\x1b\\");
+        check(&terminal, Some([255, 255, 0, 255]), 5);
+    }
+
+    #[test]
     fn unicode_placeholders_use_native_whole_pixel_source_and_destination_rectangles() {
         let (renderer, options) = renderer();
         let metrics = FontMetrics {

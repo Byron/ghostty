@@ -170,3 +170,16 @@ def requests():
                          f"\x1b_Ga=d,d=f,i=1,r={removed}\x1b\\".encode(), 110, 150])
     yield animation("lifecycle/delete/plain", [raw(b"i=1,a=T,C=1"),
                     b"\x1b_Ga=d,d=f,i=1\x1b\\", b"\x1b_Ga=d,d=F,i=1\x1b\\", 100])
+
+    base = upload(bytes([255, 0, 0, 255, 0, 0, 255, 255]), b"a=T,i=1,f=32,s=2,v=1,C=1")
+    green = raw(b"a=f,i=1,c=1,x=1,z=30", bytes([0, 255, 0, 128]))
+    yield animation("lifecycle/edit-and-compose", [base, green, control(b"c=2,s=3"), 100,
+                    raw(b"a=f,i=1,r=2,x=1,X=1", bytes([255, 255, 255, 255])), 110,
+                    b"\x1b_Ga=c,i=1,r=1,c=2,w=1,h=1,x=1,C=1\x1b\\", 120,
+                    b"\x1b_Ga=c,i=1,r=2,c=1,w=1,h=1,X=1,C=0\x1b\\", control(b"c=1")])
+    yield animation("lifecycle/compose-errors", [base, green,
+                    b"\x1b_Ga=c,i=1,r=9,c=1\x1b\\", b"\x1b_Ga=c,i=1,r=1,c=9\x1b\\",
+                    b"\x1b_Ga=c,i=1,r=1,c=2,w=1,x=2\x1b\\",
+                    b"\x1b_Ga=c,i=1,r=1,c=2,w=1,X=2\x1b\\",
+                    b"\x1b_Ga=c,i=1,r=1,c=1,w=1\x1b\\",
+                    b"\x1b_Ga=c,i=1,r=1,c=1,w=1,x=1,C=1\x1b\\"])

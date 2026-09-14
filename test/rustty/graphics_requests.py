@@ -160,3 +160,13 @@ def requests():
     yield animation("multiple-images", [frames((10, 40)) + control(b"s=3"),
                     raw(b"i=2,a=T,C=1") + raw(b"a=f,i=2,z=25")
                     + b"\x1b_Ga=a,i=2,r=1,z=20,s=3\x1b\\", 0, 10, 20, 45, 50, 70])
+
+    # A few lifecycle transitions, rather than another parameter cross-product.
+    for name, current, removed in (("root", 1, 0), ("current", 2, 2),
+                                   ("earlier", 3, 2), ("later", 1, 2),
+                                   ("root-before-current", 2, 1), ("past-end", 3, 99)):
+        yield animation("lifecycle/delete/" + name,
+                        [frames((20, 30, 40)) + control(f"c={current},s=3".encode()), 100,
+                         f"\x1b_Ga=d,d=f,i=1,r={removed}\x1b\\".encode(), 110, 150])
+    yield animation("lifecycle/delete/plain", [raw(b"i=1,a=T,C=1"),
+                    b"\x1b_Ga=d,d=f,i=1\x1b\\", b"\x1b_Ga=d,d=F,i=1\x1b\\", 100])

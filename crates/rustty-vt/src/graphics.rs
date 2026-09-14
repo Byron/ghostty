@@ -1068,21 +1068,32 @@ impl Terminal {
         let graphics = &mut self.screen_mut().graphics;
         graphics.loading = None;
         if what.eq_ignore_ascii_case(&b'f') {
-            if let Some(image) = graphics.images.get_mut(&image_id) {
-                let frame = cmd.n(b'r') as usize;
-                if frame == 1 && !image.frames.is_empty() {
+            let Some(image) = graphics.images.get_mut(&image_id) else {
+                return;
+            };
+            if image.frames.is_empty() {
+                if !what.is_ascii_uppercase() {
+                    return;
+                }
+                graphics.images.remove(&image_id);
+                graphics.placements.retain(|p| p.image_id != image_id);
+                graphics.reap_orphans();
+            } else {
+                let frame = (cmd.n(b'r') as usize).clamp(1, image.frames.len() + 1);
+                if frame == 1 {
                     let first = image.frames.remove(0);
                     image.pixels = first.pixels;
                     image.root_gap_ms = first.gap_ms;
-                } else if frame >= 2 && frame <= image.frames.len() + 1 {
+                } else {
                     image.frames.remove(frame - 2);
-                } else if frame == 1 && what.is_ascii_uppercase() {
-                    graphics.images.remove(&image_id);
-                    graphics.placements.retain(|p| p.image_id != image_id);
                 }
-                if let Some(image) = graphics.images.get_mut(&image_id) {
+                let removed = frame - 1;
+                if removed == image.current_frame {
                     image.current_frame = image.current_frame.min(image.frames.len());
                     image.frame_shown_at_ms = None;
+                    image.generation = graphics.generation.wrapping_add(1);
+                } else if removed < image.current_frame {
+                    image.current_frame -= 1;
                 }
             }
         } else {

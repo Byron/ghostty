@@ -10,6 +10,32 @@ impl EffectHandler for Readonly {
 }
 
 #[test]
+fn linefeed_mode_effects_keep_stream_order_including_reset() {
+    let stream = b"\x1b[20h\x1b[5n\x1b[20l\x1b[5n\x1bc";
+    for split in 0..=stream.len() {
+        let mut terminal = Terminal::new(10, 2, 0);
+        terminal.linefeed_mode_events = true;
+        let mut effects = terminal.feed(&stream[..split]);
+        effects.extend(terminal.feed(&stream[split..]));
+        assert_eq!(
+            effects,
+            [
+                Effect::LinefeedMode(true),
+                Effect::Write(b"\x1b[0n".to_vec()),
+                Effect::LinefeedMode(false),
+                Effect::Write(b"\x1b[0n".to_vec()),
+                Effect::LinefeedMode(false),
+                Effect::Progress {
+                    state: 0,
+                    value: None
+                },
+            ]
+        );
+        assert!(terminal.linefeed_mode_events);
+    }
+}
+
+#[test]
 fn focus_reporting_sends_current_host_state_on_enable_and_restore() {
     for focused in [false, true] {
         let mut terminal = Terminal::new(10, 2, 0);

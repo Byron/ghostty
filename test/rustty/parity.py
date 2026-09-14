@@ -35,6 +35,7 @@ import glyph_requests
 import reset_stream
 import dnd_requests
 import style_lifecycle_requests
+import grapheme_lifecycle_requests
 import selection_requests
 import selection_adjust_requests
 import selection_format_requests
@@ -522,6 +523,8 @@ def main():
                 requests.extend((request, covers) for request, covers in page_lifecycle_requests.requests(peers[0])
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in style_lifecycle_requests.requests(peers[0])
+                                if not args.case or args.case in request["id"])
+                requests.extend((request, covers) for request, covers in grapheme_lifecycle_requests.requests(peers[0])
                                 if not args.case or args.case in request["id"])
             if args.thorough:
                 requests.extend((request, covers) for request, covers in search_pages.requests()

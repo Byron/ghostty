@@ -4,11 +4,11 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::page_layout::PageCapacity;
-use crate::page_resources::StyleAdmission;
+use crate::page_resources::{GraphemeAdmission, StyleAdmission};
 use crate::screen::ScrollbackLimits;
 
 /// A live list differs from its clones and replacements even when page serials
-/// repeat. This is transient; STYLE ownership still uses local page serials.
+/// repeat. This is transient; resource ownership still uses local page serials.
 #[derive(Debug)]
 struct ListIdentity(u64);
 
@@ -48,6 +48,8 @@ pub(crate) struct Page {
     #[serde(skip)]
     pub layout_generation: u64,
     pub styles: StyleAdmission,
+    #[serde(skip)]
+    pub graphemes: GraphemeAdmission,
 }
 
 impl Page {
@@ -135,7 +137,7 @@ impl PageList {
         panic!("row is outside the page list");
     }
 
-    /// Renew cached-coordinate generations without changing STYLE owners.
+    /// Renew cached-coordinate generations without changing resource owners.
     pub fn invalidate_layout(&mut self, first: usize, last: usize) {
         let start = self.page_index(first);
         let end = self.page_index(last);
@@ -146,26 +148,36 @@ impl PageList {
 
     pub fn append(&mut self, capacity: PageCapacity, rows: u16) {
         assert!(rows <= capacity.rows);
+        let layout = capacity.metadata().unwrap();
         self.pages.push_back(Page {
             capacity,
             columns: capacity.cols,
             rows,
             serial: self.next_serial,
             layout_generation: 0,
-            styles: StyleAdmission::new(capacity.metadata().unwrap().styles_layout),
+            styles: StyleAdmission::new(layout.styles_layout),
+            graphemes: GraphemeAdmission::new(
+                layout.grapheme_alloc_layout,
+                layout.grapheme_map_layout.capacity as usize,
+            ),
         });
         self.next_serial = self.next_serial.wrapping_add(1);
     }
 
     pub fn prepend(&mut self, capacity: PageCapacity, rows: u16) {
         assert!(rows <= capacity.rows);
+        let layout = capacity.metadata().unwrap();
         self.pages.push_front(Page {
             capacity,
             columns: capacity.cols,
             rows,
             serial: self.next_serial,
             layout_generation: 0,
-            styles: StyleAdmission::new(capacity.metadata().unwrap().styles_layout),
+            styles: StyleAdmission::new(layout.styles_layout),
+            graphemes: GraphemeAdmission::new(
+                layout.grapheme_alloc_layout,
+                layout.grapheme_map_layout.capacity as usize,
+            ),
         });
         self.next_serial = self.next_serial.wrapping_add(1);
     }
@@ -316,6 +328,7 @@ impl PageList {
                     serial: result.next_serial,
                     layout_generation: 0,
                     styles: StyleAdmission::default(),
+                    graphemes: GraphemeAdmission::default(),
                 });
                 result.next_serial = result.next_serial.wrapping_add(1);
             }

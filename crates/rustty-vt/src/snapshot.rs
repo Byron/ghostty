@@ -10,7 +10,8 @@ use crate::modes::Modes;
 use crate::page_layout::PageCapacity;
 use crate::page_list::PageList;
 use crate::page_resources::{
-    BitmapAllocator, HyperlinkAdmission, SetAdmission, StyleAdmission, hyperlink_hash,
+    BitmapAllocator, GraphemeAdmission, HyperlinkAdmission, SetAdmission, StyleAdmission,
+    hyperlink_hash,
 };
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
@@ -355,9 +356,9 @@ fn encoding_capacity(
     for link in links {
         link.validate()?;
     }
-    // ponytail: live resource growth/splitting is not yet in the page ledger.
-    // Until those mutation hooks exist, grow only emitted hints as needed to
-    // keep native decode from silently discarding owned cell resources.
+    // ponytail: live hyperlink growth is not yet in the page ledger. Keep
+    // emitted hints sufficient for decode, including detached cell styles and
+    // the transient replacement space needed when appending grapheme suffixes.
     let link_hashes: Vec<_> = links
         .iter()
         .map(|link| hyperlink_hash(&link.id, &link.uri))
@@ -854,6 +855,7 @@ struct Sequence {
 
 struct DecodedPage {
     styles: StyleAdmission,
+    graphemes: GraphemeAdmission,
     capacity: PageCapacity,
     rows: Vec<Row>,
 }
@@ -1202,8 +1204,9 @@ impl<R: Read> Decoder<R> {
             pages.append(page.capacity, page.rows.len() as u16);
             let resident = pages.pages.back_mut().unwrap();
             resident.styles = page.styles;
+            resident.graphemes = page.graphemes;
             for row in &mut page.rows {
-                row.style_page = Some(resident.serial);
+                row.resource_page = Some(resident.serial);
             }
             contents.extend(page.rows);
         }
@@ -1358,7 +1361,10 @@ impl<R: Read> Decoder<R> {
             result.push(row);
         }
         let entries = r.u32()?;
-        let mut graphemes = BitmapAllocator::<16>::new(layout.grapheme_alloc_layout);
+        let mut graphemes = GraphemeAdmission::new(
+            layout.grapheme_alloc_layout,
+            layout.grapheme_map_layout.capacity as usize,
+        );
         let mut assigned = std::collections::HashSet::new();
         for _ in 0..entries {
             let row = usize::from(r.u16()?);
@@ -1374,43 +1380,23 @@ impl<R: Read> Decoder<R> {
                 && !assigned.contains(&(row, col))
             {
                 let base_len = cell.text.len();
-                let mut suffix_len = 0;
-                let mut allocation = None;
                 for bytes in bytes.as_chunks::<4>().0.iter() {
                     if let Some(cp) = char::from_u32(u32::from_le_bytes(*bytes))
                         && cp != '\0'
-                        && suffix_len < 64
+                        && cell.grapheme.is_none_or(|allocation| allocation.len < 64)
                     {
-                        // Appending grows in four-codepoint chunks. Reserve
-                        // the replacement before freeing its old run so native
-                        // fragmentation and mid-cluster failures are preserved.
-                        if suffix_len % 4 == 0 {
-                            let next = graphemes.alloc((suffix_len + 1) * 4);
-                            if next.is_none()
-                                || (suffix_len == 0
-                                    && assigned.len()
-                                        >= layout.grapheme_map_layout.capacity as usize)
-                            {
-                                if let Some(offset) = next {
-                                    graphemes.free(offset, (suffix_len + 1) * 4);
-                                }
-                                if let Some(offset) = allocation {
-                                    graphemes.free(offset, suffix_len * 4);
-                                }
-                                cell.text.truncate(base_len);
-                                suffix_len = 0;
-                                break;
+                        let Ok(allocation) = graphemes.append(cell.grapheme) else {
+                            if let Some(allocation) = cell.grapheme.take() {
+                                graphemes.release(allocation);
                             }
-                            if let Some(offset) = allocation {
-                                graphemes.free(offset, suffix_len * 4);
-                            }
-                            allocation = next;
-                        }
+                            cell.text.truncate(base_len);
+                            break;
+                        };
+                        cell.grapheme = Some(allocation);
                         cell.text.push(cp);
-                        suffix_len += 1;
                     }
                 }
-                if suffix_len > 0 {
+                if cell.grapheme.is_some() {
                     assigned.insert((row, col));
                 }
             }
@@ -1423,6 +1409,7 @@ impl<R: Read> Decoder<R> {
         }
         Ok(DecodedPage {
             styles: style_admission,
+            graphemes,
             capacity,
             rows: result,
         })
@@ -1477,8 +1464,9 @@ impl<R: Read> Decoder<R> {
                         screen.pages.prepend(page.capacity, count as u16);
                         let resident = screen.pages.pages.front_mut().unwrap();
                         resident.styles = page.styles;
+                        resident.graphemes = page.graphemes;
                         for row in &mut rows {
-                            row.style_page = Some(resident.serial);
+                            row.resource_page = Some(resident.serial);
                             row.id = screen.next_row;
                             screen.next_row = screen.next_row.wrapping_add(1);
                         }

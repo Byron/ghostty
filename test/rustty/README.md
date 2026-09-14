@@ -404,6 +404,20 @@ and batched failures remain recorded; these checks use the repaired reference.
 Complete resource-exhaustion combinations, especially splitting during reflow,
 remain unverified.
 
+`--pages --case pages/graphemes/` compares live grapheme allocation and reuse
+across 259 fixtures (777 delivery comparisons). Cells retain their native
+bitmap allocation through moves; copies reserve a new run. Append replaces
+four-codepoint chunks before freeing the previous run. Page growth uses native
+utilization and row-density projection and rebuilds styles and graphemes
+together. Restored snapshots retain their allocation history for continuation.
+The matrix covers capacity and fragmentation boundaries, erasure, row shifts,
+horizontal margins, both screens, widening across page boundaries, reflow,
+mixed-width restored pages, tiny capacities and continued printing. Viewport
+copies remain detached from live resource storage. Rust invariants check that
+each suffix has one owner, allocations do not overlap and erased storage is
+reclaimed. Complete resource limits, reflow splitting and hyperlink lifetimes
+remain separate requirements.
+
 `pages/styles/mixed-edit/` adds 114 comparisons for cursor motion, direct row
 and cell edits, margins and linked/wide printing on restored pages.
 `pages/styles/wrap-reset/` adds 24 comparisons for ordinary wraps and wide-cell

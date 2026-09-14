@@ -399,12 +399,110 @@ impl HyperlinkAdmission {
     }
 }
 
+/// A cell's unique suffix allocation. Moves keep it; copies allocate a new run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct GraphemeAllocation {
+    offset: std::num::NonZeroU32,
+    pub len: u8,
+}
+
+/// Native grapheme map admission and bitmap fragmentation, without backing data.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GraphemeAdmission {
+    allocator: BitmapAllocator<16>,
+    count: usize,
+    capacity: usize,
+}
+
+impl GraphemeAdmission {
+    pub fn new(layout: BitmapLayout, capacity: usize) -> Self {
+        Self {
+            allocator: BitmapAllocator::new(layout),
+            count: 0,
+            capacity,
+        }
+    }
+
+    pub fn used_bytes(&self) -> usize {
+        self.allocator.used_bytes()
+    }
+
+    pub fn acquire(&mut self, len: u8) -> Result<GraphemeAllocation, SetFull> {
+        assert!((1..=64).contains(&len));
+        let offset = self
+            .allocator
+            .alloc(usize::from(len) * 4)
+            .ok_or(SetFull::OutOfMemory)?;
+        if self.count == self.capacity {
+            self.allocator.free(offset, usize::from(len) * 4);
+            return Err(SetFull::OutOfMemory);
+        }
+        self.count += 1;
+        Ok(GraphemeAllocation {
+            offset: std::num::NonZeroU32::new(offset.try_into().unwrap()).unwrap(),
+            len,
+        })
+    }
+
+    pub fn append(
+        &mut self,
+        previous: Option<GraphemeAllocation>,
+    ) -> Result<GraphemeAllocation, SetFull> {
+        let Some(mut previous) = previous else {
+            return self.acquire(1);
+        };
+        assert!(previous.len < 64);
+        if previous.len % 4 == 0 {
+            // Native allocates the replacement before releasing the old run.
+            // The existing map entry is reused even when the map is full.
+            let offset = self
+                .allocator
+                .alloc(usize::from(previous.len + 1) * 4)
+                .ok_or(SetFull::OutOfMemory)?;
+            self.allocator.free(
+                previous.offset.get() as usize,
+                usize::from(previous.len) * 4,
+            );
+            previous.offset = std::num::NonZeroU32::new(offset.try_into().unwrap()).unwrap();
+        }
+        previous.len += 1;
+        Ok(previous)
+    }
+
+    pub fn release(&mut self, allocation: GraphemeAllocation) {
+        self.allocator.free(
+            allocation.offset.get() as usize,
+            usize::from(allocation.len) * 4,
+        );
+        self.count -= 1;
+    }
+
+    #[cfg(test)]
+    pub fn assert_allocations(&self, allocations: impl Iterator<Item = GraphemeAllocation>) {
+        let mut allocations: Vec<_> = allocations.collect();
+        allocations.sort_unstable_by_key(|allocation| allocation.offset);
+        assert_eq!(allocations.len(), self.count);
+        let mut remaining = self.clone();
+        let mut end = self.allocator.chunks_start;
+        for allocation in allocations {
+            assert!(
+                allocation.offset.get() as usize >= end,
+                "overlapping grapheme allocations"
+            );
+            end = allocation.offset.get() as usize
+                + BitmapAllocator::<16>::bytes_required(usize::from(allocation.len) * 4).unwrap();
+            remaining.release(allocation);
+        }
+        assert_eq!(remaining.used_bytes(), 0, "unowned grapheme allocations");
+    }
+}
+
 /// Bookkeeping for `terminal/bitmap_allocator.zig`.
 ///
 /// Offsets are relative to this allocator's region, including its bitmap header.
 /// The page ledger adds the region's page offset. Callers pass byte lengths;
 /// grapheme codepoints occupy four native bytes each.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BitmapAllocator<const CHUNK: usize> {
     bitmaps: Vec<u64>,
     chunks_start: usize,
@@ -475,7 +573,6 @@ impl<const CHUNK: usize> BitmapAllocator<CHUNK> {
         self.bitmaps.len() * 64 * CHUNK
     }
 
-    #[cfg(test)]
     fn used_bytes(&self) -> usize {
         self.bitmaps
             .iter()

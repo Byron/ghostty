@@ -959,8 +959,14 @@ impl Terminal {
                 self.put_cell(String::new(), 1, right == self.cols as usize - 1);
             }
             self.print_wrap();
+            let source_col = col;
             col = self.screen().cursor.col;
-            self.put_cell(cell.text, width, false);
+            let base_len = cell.text.chars().next().map_or(0, char::len_utf8);
+            self.put_cell(cell.text[..base_len].to_owned(), width, false);
+            if base_len < cell.text.len() {
+                self.screen_mut()
+                    .move_wrapped_grapheme(source_col, &cell.text[base_len..]);
+            }
         } else if width != old_width {
             if width == 2 {
                 // Widening writes a spacer tail, which consumes the shift.
@@ -973,14 +979,13 @@ impl Terminal {
                     if width == 2 {
                         row.cells[col + 1] = row.cells[col].clone();
                         row.cells[col + 1].text.clear();
+                        row.cells[col + 1].grapheme = None;
                         row.cells[col + 1].width = 0;
                     }
                 }
             });
         }
-        let row = self.screen().cursor.row;
-        self.screen_mut().rows[row].cells[col].text.push(cp);
-        self.screen_mut().rows[row].dirty = true;
+        let _ = self.screen_mut().append_grapheme(col, cp);
         if width != old_width {
             self.screen_mut().cursor.col = (col + width as usize).min(right);
             self.screen_mut().cursor.pending_wrap =
@@ -1025,6 +1030,7 @@ impl Terminal {
         let row = &mut self.screen_mut().rows[cursor.row];
         let cell = Cell {
             style_id,
+            grapheme: None,
             text,
             width,
             style: cursor.style,
@@ -1339,7 +1345,7 @@ impl Terminal {
         screen.rows.insert(m.bottom, blank);
         screen.discard_row(row.id);
         screen.install_row_copies(copies, Some(row));
-        screen.sync_style_pages(false);
+        screen.sync_resource_pages(false);
     }
 
     fn scroll_up(&mut self, count: usize, history: bool) {
@@ -1416,10 +1422,10 @@ impl Terminal {
                         );
                     }
                 } else {
-                    screen.release_row_styles(&row);
+                    screen.release_row_resources(&row);
                     screen.discard_row(row.id);
                 }
-                screen.sync_style_pages(false);
+                screen.sync_resource_pages(false);
             } else {
                 for y in m.top..m.bottom {
                     self.copy_row_region(y + 1, y, m.left, m.right + 1, bg);
@@ -1457,10 +1463,10 @@ impl Terminal {
                     .collect();
                 screen.remap_grid_rows(&pins);
                 let row = screen.rows.remove(m.bottom);
-                screen.release_row_styles(&row);
+                screen.release_row_resources(&row);
                 screen.discard_row(row.id);
                 screen.rows.insert(m.top, blank);
-                screen.sync_style_pages(true);
+                screen.sync_resource_pages(true);
             } else {
                 for y in (m.top + 1..=m.bottom).rev() {
                     self.copy_row_region(y - 1, y, m.left, m.right + 1, bg);
@@ -1483,26 +1489,29 @@ impl Terminal {
                 screen.history.len() + m.bottom,
             );
         }
-        for row in &mut self.screen_mut().rows[m.top..=m.bottom] {
-            if m.left == 0 && right_edge {
-                row.wrapped = false;
-                row.wrap_continuation = false;
-            }
-            if (right_edge || m.left < 2)
-                && let Some(cell) = row.cells.last_mut()
-            {
-                cell.spacer_head = false;
-            }
-            // Split glyphs lose their text, but the cells outside the moved
-            // region retain their attributes and hyperlink identity.
-            for boundary in [m.left, m.right + 1] {
-                if boundary > 0 && row.cells.get(boundary).is_some_and(|cell| cell.width == 0) {
-                    row.cells[boundary - 1].text.clear();
-                    row.cells[boundary - 1].width = 1;
-                    row.cells[boundary].width = 1;
+        for y in m.top..=m.bottom {
+            self.screen_mut().edit_row(y, |row| {
+                if m.left == 0 && right_edge {
+                    row.wrapped = false;
+                    row.wrap_continuation = false;
                 }
-            }
-            row.dirty = true;
+                if (right_edge || m.left < 2)
+                    && let Some(cell) = row.cells.last_mut()
+                {
+                    cell.spacer_head = false;
+                }
+                // Split glyphs lose their text, but the cells outside the moved
+                // region retain their attributes and hyperlink identity.
+                for boundary in [m.left, m.right + 1] {
+                    if boundary > 0 && row.cells.get(boundary).is_some_and(|cell| cell.width == 0) {
+                        row.cells[boundary - 1].text.clear();
+                        row.cells[boundary - 1].grapheme = None;
+                        row.cells[boundary - 1].width = 1;
+                        row.cells[boundary].width = 1;
+                    }
+                }
+                row.dirty = true;
+            });
         }
     }
 

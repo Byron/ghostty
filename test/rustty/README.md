@@ -94,6 +94,18 @@ clear cases are included; full placeholder rendering, margin
 clipping, pruning, transports and animation clocks remain incomplete. Rust's
 renderer and terminal now share integer placement sizing from `rustty-vt`.
 
+
+`--protocols --case protocol/graphics/placements/placeholder/` compares native
+Unicode placeholder runs and resolved target keys. All reference diacritics,
+missing/invalid indices, inherited IDs, row/column discontinuities, palette/RGB
+IDs, stable zero-ID selection, explicit ordinary/relative targets, replacement,
+erasure, reflow and screen switches are covered by 343 fixtures (1,029 delivery
+comparisons). The renderer and adapter share the VT decoder and target lookup.
+Renderer tests check that relative children use independent minimum x/y origins
+from the selected virtual parent's visible placeholders, and that ordinary
+placements alone do not enable placeholder rendering. Pixel rounding and full
+viewport-edge behavior remain separate from these run/target observations.
+
 `--protocols --case protocol/graphics/placements/relative/` covers ordinary
 parent references and chains with 64 fixtures (192 delivery comparisons).
 Cases compare explicit/fallback parent choice, missing images versus placements,

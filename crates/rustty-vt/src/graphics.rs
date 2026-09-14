@@ -7,6 +7,8 @@ use std::{
     sync::Arc,
 };
 
+pub mod unicode;
+
 const MAX_DATA: usize = 400 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 10000;
 const PARENT_CHAIN_LIMIT: usize = 8;
@@ -258,6 +260,24 @@ impl Default for Graphics {
 }
 
 impl Graphics {
+    /// Resolve a Unicode placeholder's optional application-supplied placement ID.
+    pub fn placeholder_target(&self, image_id: u32, placement_id: u32) -> Option<&Placement> {
+        self.placements
+            .iter()
+            .filter(|p| {
+                p.image_id == image_id
+                    && if placement_id == 0 {
+                        p.virtual_placement
+                    } else {
+                        p.placement_id == PlacementId::External(placement_id)
+                    }
+            })
+            .min_by_key(|p| match p.placement_id {
+                PlacementId::External(id) => (false, id),
+                PlacementId::Internal(id) => (true, id),
+            })
+    }
+
     fn resolve_parent(
         &self,
         child: Option<(u32, PlacementId)>,

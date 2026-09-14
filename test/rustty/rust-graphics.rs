@@ -1,4 +1,7 @@
-use rustty_vt::{GridPoint, Screen, Terminal, graphics::PlacementId};
+use rustty_vt::{
+    GridPoint, Screen, Terminal,
+    graphics::{PlacementId, unicode},
+};
 use serde_json::{Value, json};
 
 pub fn observe(terminal: &Terminal) -> Value {
@@ -12,7 +15,26 @@ pub fn observe_placements(terminal: &Terminal) -> Value {
         terminal.height_px / u32::from(terminal.rows),
     ];
     json!({"primary":placements(terminal.primary_screen(), cell),
-        "alternate":terminal.alternate_screen().map(|screen| placements(screen, cell))})
+        "alternate":terminal.alternate_screen().map(|screen| placements(screen, cell)),
+        "primary_placeholders":placeholders(terminal.primary_screen()),
+        "alternate_placeholders":terminal.alternate_screen().map(placeholders)})
+}
+
+fn placeholders(screen: &Screen) -> Vec<Value> {
+    screen
+        .viewport()
+        .flat_map(|row| {
+            unicode::placements(row).map(|p| {
+                let target = screen
+                    .graphics
+                    .placeholder_target(p.image_id, p.placement_id);
+                json!({"image_id":p.image_id,"placement_id":p.placement_id,
+            "anchor":location(screen,GridPoint { row:row.id,col:p.col }),
+            "fragment":[p.image_col,p.image_row],"size":[p.width,1],
+            "target":target.map(|target| placement_id(target.placement_id))})
+            })
+        })
+        .collect()
 }
 
 fn placement_id(id: PlacementId) -> Value {

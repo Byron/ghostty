@@ -717,6 +717,17 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     terminal.feed_with_handler(&bytes, &mut host);
                 }
             }
+            "osc" => {
+                let bytes = unhex(&operation.data)?;
+                if let Some((&selector, payload)) = bytes.split_first() {
+                    let terminator = match selector % 3 {
+                        0 => Some(7),
+                        1 => Some(0x9c),
+                        _ => None,
+                    };
+                    terminal.feed_osc_with_handler(payload, terminator, &mut host);
+                }
+            }
             "resize" => {
                 dimensions(operation.cols, operation.rows)?;
                 for effect in terminal.resize_with_cell_size(

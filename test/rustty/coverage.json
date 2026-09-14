@@ -79,7 +79,7 @@
     {
       "id": "parser.events",
       "status": "partial",
-      "remaining": "Validated title/PWD, color, notification and clipboard semantics plus fixed capture/prefix cases are compared. Native OSC 66/99 deliberately unimplemented terminal callbacks are verified as no-ops across payload/capture boundaries, malformed input and continuation. Remaining OSC commands, typed metadata APIs, streaming capture allocation and complete malformed contexts remain."
+      "remaining": "Validated title/PWD, color, notification and clipboard semantics plus fixed capture/prefix cases are compared. Native OSC 66/99 deliberately unimplemented terminal callbacks are verified as no-ops across payload/capture boundaries, malformed input and continuation. Direct OSC parser corpus and 176 focused fixtures pass 648 comparisons of terminal state and host effects, preserving all selector/payload bytes, missing terminators, embedded controls, capture boundaries and pending CSI continuation. Typed metadata for ignored commands, remaining OSC commands, streaming capture allocation and complete malformed contexts remain."
     },
     {
       "id": "terminal.modes",
@@ -184,7 +184,7 @@
     {
       "id": "fuzz.resource-limits",
       "status": "partial",
-      "remaining": "All 3,295 inherited terminal-stream byte fixtures pass 9,885 delivery comparisons; --corpus can replay them independently with case filtering. Parser corpora are covered under parser.raw-events. All 1000 mixed-operation cases from seed 2 pass 3000 delivery comparisons after retaining three cursor/blank-row resize regressions, but direct OSC corpus semantics, allocator/resource limits, broader mixed operations and invariants remain."
+      "remaining": "All 3,295 inherited terminal-stream byte fixtures pass 9,885 delivery comparisons; --corpus can replay them independently with case filtering. Parser corpora are covered under parser.raw-events. All 1000 mixed-operation cases from seed 2 pass 3000 delivery comparisons after retaining three cursor/blank-row resize regressions, and all 40 inherited direct OSC records now pass 120 comparisons using their exact terminator selectors and raw payloads. Direct OSC comparison observes terminal state and effects; ignored command metadata, allocator/resource limits, broader mixed operations and invariants remain."
     }
   ]
 }

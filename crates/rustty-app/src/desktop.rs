@@ -1282,7 +1282,7 @@ impl App {
             .map(|tab| self.tab_label(tab))
     }
 
-    fn drain(&mut self, id: Id) {
+    fn drain(&mut self, event_loop: &ActiveEventLoop, id: Id) {
         let previous_tab_label = self.pane_tab_label(id);
         let live = previous_tab_label.is_some();
         let mut close = false;
@@ -1292,7 +1292,7 @@ impl App {
             .windows
             .values()
             .any(|host| host.visible && host.focused && self.focused(host.id) == Some(id));
-        let config = self.config().clone();
+        let config = &self.loaded.config;
         let Some(pane) = self.panes.get_mut(&id) else {
             return;
         };
@@ -1389,7 +1389,7 @@ impl App {
                         signal.map(|s| format!(" ({s})")).unwrap_or_default()
                     );
                     pane.exit_message = Some(format!("{} — press any key to close", pane.title));
-                    close = live && !hold_after_exit(&config, runtime);
+                    close = live && !hold_after_exit(config, runtime);
                 }
                 SessionEvent::Error(error) => self.errors.push(error),
                 _ => {}
@@ -1439,6 +1439,11 @@ impl App {
             );
         }
         self.repaint_pane(id, indicators_changed);
+        // Output updates this pane's metadata above. Only closing a pane changes
+        // the layout and requires reconciling every window and session.
+        if close {
+            self.reconcile(event_loop);
+        }
     }
 
     fn repaint_pane(&self, pane: Id, indicators_changed: bool) {
@@ -3922,8 +3927,7 @@ impl ApplicationHandler<Event> for App {
                 if let Some(smoke) = &mut self.smoke {
                     smoke.record("pty-output");
                 }
-                self.drain(id);
-                self.reconcile(event_loop);
+                self.drain(event_loop, id);
             }
             Event::Repaint(info, deadline) => {
                 let current_pass = self.context.cumulative_pass_nr_for(info.viewport_id);
@@ -4436,7 +4440,7 @@ impl ApplicationHandler<Event> for App {
             .map(|(&id, _)| id)
             .collect();
         for id in sync_expired {
-            self.drain(id);
+            self.drain(event_loop, id);
         }
         let expired = self
             .panes

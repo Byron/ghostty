@@ -40,6 +40,7 @@ def wire_requests(root, reference):
     yield from snapshot_resources.requests(reference)
     yield from snapshot_resources.style_requests(reference)
     yield from metadata_requests(reference)
+    yield from boundary_requests(reference)
     yield from hyperlink_requests.requests(reference)
 
     data = fixture(root / "src/terminal/snapshot/testdata/complete-v1.hex")
@@ -110,6 +111,90 @@ def metadata_requests(reference):
             "operations": [{"op": "restore", "data": frame(parts).hex()}], "after": [
             write(b"\x1b[31m\x1b]8;;https://example.org\x07\x1b[3b\x1b[6n"),
         ]}, ["snapshot.fixtures", "snapshot.cross-decode"])
+    fields = [
+        (0, 20, "B", "status-display", (0, 1, 2, 255)),
+        (0, 30, "B", "cursor-shape", (0, 1, 2, 3, 4, 255)),
+        (0, 31, "B", "cursor-blink", (0, 1, 2, 3, 255)),
+        (0, 32, "B", "shell-redraw", (0, 1, 2, 3, 255)),
+        (0, 33, "B", "modify-other-keys", (0, 1, 2, 255)),
+        (0, 34, "B", "mouse-event", (0, 1, 2, 3, 4, 5, 255)),
+        (0, 35, "B", "mouse-format", (0, 1, 2, 3, 4, 5, 255)),
+        (0, 36, "B", "mouse-shift", (0, 1, 2, 3, 255)),
+        (0, 37, "B", "mouse-shape", (0, 8, 33, 34, 255)),
+        (0, 38, "B", "password-input", (0, 1, 2, 255)),
+        (0, 21, "H", "active-screen", (0, 1, 2, 65535)),
+        (1, 12, "H", "screen-cursor-x", (0, 7, 8, 65535)),
+        (1, 14, "H", "screen-cursor-y", (0, 2, 3, 65535)),
+        (1, 16, "B", "screen-cursor-shape", (0, 1, 2, 3, 4, 255)),
+        (1, 17, "B", "screen-cursor-flags", (0, 1, 2, 4, 8, 12, 16, 255)),
+        (1, 38, "H", "screen-charset", (0, 0x4000, 0x5000, 0xFFFF)),
+        (1, 40, "B", "screen-protection", (0, 1, 2, 3, 255)),
+        (1, 41, "B", "keyboard-index", (0, 1, 7, 8, 255)),
+        (1, 50, "B", "semantic-click-kind", (0, 1, 2, 3, 255)),
+        (1, 51, "B", "semantic-click-value", (0, 1, 3, 4, 255)),
+    ]
+    for offset in (12, 14, 16, 18):
+        fields.append((0, offset, "H", f"margin-{offset}", (0, 1, 2, 3, 7, 8, 65535)))
+    for offset in (63, 67, 71, 75, 79, 83):
+        fields.append((0, offset, "B", f"dynamic-color-{offset}", (0, 1, 2, 255)))
+    for offset in (87, 95):
+        fields.append((0, offset, "Q", f"limit-{offset}", (0, 1, 1024, 65536, 2**64 - 2, 2**64 - 1)))
+    for offset in (39, 47, 55):
+        fields.append((0, offset, "Q", f"mode-{offset}", (0, 2**63, 2**64 - 1)))
+    for offset in range(42, 50):
+        fields.append((1, offset, "B", f"keyboard-flags-{offset}", (0, 31, 32, 255)))
+    for index, offset, fmt, name, values in fields:
+        for value in values:
+            parts = [(tag, bytearray(payload)) for tag, payload in base]
+            struct.pack_into("<" + fmt, parts[index][1], offset, value)
+            yield ({"id": f"snapshot/metadata/{name}/{value}", "observe_colors": True,
+                "observe_semantic": True, "operations": [
+                    {"op": "restore", "data": frame(parts).hex()}, {"op": "observe"},
+                    {"op": "snapshot"}, write(b"\x1b[3b\x1b[6n"), {"op": "observe"},
+                ]}, ["snapshot.fixtures", "snapshot.cross-decode"])
+
+
+def boundary_requests(reference):
+    encoded = reference.request({"id": "snapshot/boundary-source", "cols": 8, "rows": 3,
+        "operations": [write(b"abc"), {"op": "snapshot"}]})
+    if not encoded["ok"] or len(encoded["snapshots"]) != 1:
+        raise RuntimeError("reference could not encode boundary fixture")
+    base = records(bytes.fromhex(encoded["snapshots"][0]))
+
+    def invalid(name, parts):
+        return ({"id": "snapshot/boundary/" + name, "expected_error": "InvalidSnapshot",
+            "operations": [{"op": "restore", "data": frame(parts).hex()}]}, ["snapshot.fixtures"])
+
+    for index, (tag, payload) in enumerate(base):
+        for length in sorted({0, 1, max(0, len(payload) - 1)} - {len(payload)}):
+            if length < len(payload):
+                yield invalid(f"record-{tag}/short-{length}",
+                              base[:index] + [(tag, payload[:length])] + base[index + 1:])
+        yield invalid(f"record-{tag}/trailing", base[:index] + [(tag, payload + b"\0")] + base[index + 1:])
+        yield invalid(f"record-{tag}/unknown-tag", base[:index] + [(65535, payload)] + base[index + 1:])
+        yield invalid(f"record-{tag}/missing", base[:index] + base[index + 1:])
+        # FINISH ends the stream, so another FINISH is an accepted transport tail.
+        if tag != 6:
+            yield invalid(f"record-{tag}/duplicate", base[:index] + [base[index]] + base[index:])
+    for index, offset, name, values in ((0, 0, "columns", (0,)), (0, 2, "rows", (0,)),
+            (0, 23, "screen-count", (0, 2, 3, 65535)), (1, 0, "screen-key", (1, 2, 65535)),
+            (1, 2, "page-count", (0, 2, 65535))):
+        for value in values:
+            parts = [(tag, bytearray(payload)) for tag, payload in base]
+            struct.pack_into("<H", parts[index][1], offset, value)
+            yield invalid(f"{name}/{value}", parts)
+    continuation_index = next(i for i, (tag, _) in enumerate(base) if tag == 7)
+    for payload in (b"", b"\x1b", b"\x1b[1;", b"\x1b]2;title", b"\xf0\x9f\x98"):
+        parts = list(base)
+        parts[continuation_index] = (7, payload)
+        for limit in sorted({0, max(0, len(payload) - 1), len(payload), len(payload) + 1}):
+            for operation in ("restore", "restore_exact", "restore_ready"):
+                request = {"id": f"snapshot/boundary/continuation/{payload.hex()}/{limit}/{operation}",
+                    "operations": [{"op": operation, "data": frame(parts).hex(),
+                                    "snapshot_max_continuation_bytes": limit}, {"op": "observe"}]}
+                if limit < len(payload):
+                    request["expected_error"] = "InvalidSnapshot"
+                yield request, ["snapshot.fixtures", "snapshot.cross-decode"]
 
 
 def streaming_requests(root):

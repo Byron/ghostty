@@ -121,6 +121,88 @@ fn repeated_nul_prints_empty_cells_with_the_current_pen() {
     }
 }
 
+#[test]
+fn snapshot_propagates_io_failures_at_record_boundaries() {
+    use std::io::{Error, ErrorKind, Write};
+
+    struct FailingReader<'a> {
+        source: &'a [u8],
+        remaining: usize,
+    }
+    impl Read for FailingReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(Error::from(ErrorKind::ConnectionReset));
+            }
+            let count = buffer.len().min(self.remaining).min(self.source.len());
+            buffer[..count].copy_from_slice(&self.source[..count]);
+            self.source = &self.source[count..];
+            self.remaining -= count;
+            Ok(count)
+        }
+    }
+    struct FailingWriter {
+        bytes: Vec<u8>,
+        remaining: usize,
+    }
+    impl Write for FailingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(Error::from(ErrorKind::BrokenPipe));
+            }
+            let count = buffer.len().min(self.remaining);
+            self.bytes.extend_from_slice(&buffer[..count]);
+            self.remaining -= count;
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let terminal = decode(fixture().as_slice(), DecodeOptions::default()).unwrap();
+    let bytes = encode_to_vec(&terminal).unwrap();
+    let mut cuts = vec![0, 1, 9, 10];
+    let mut offset = 10;
+    for (_, payload) in records(&bytes) {
+        cuts.extend([
+            offset,
+            offset + 1,
+            offset + 6,
+            offset + 9,
+            offset + 10,
+            offset + 10 + payload.len() / 2,
+            offset + 10 + payload.len(),
+        ]);
+        offset += 10 + payload.len();
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    for cut in cuts.into_iter().filter(|&cut| cut < bytes.len()) {
+        let reader = FailingReader {
+            source: &bytes,
+            remaining: cut,
+        };
+        assert_eq!(
+            decode(reader, DecodeOptions::default()).unwrap_err().kind(),
+            ErrorKind::ConnectionReset,
+            "read cut={cut}"
+        );
+        let mut writer = FailingWriter {
+            bytes: Vec::new(),
+            remaining: cut,
+        };
+        assert_eq!(
+            rustty_vt::snapshot::encode(&terminal, &mut writer)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::BrokenPipe,
+            "write cut={cut}"
+        );
+        assert_eq!(writer.bytes, bytes[..cut], "write cut={cut}");
+    }
+}
+
 fn text<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<String> {
     rows.into_iter().map(Row::text).collect()
 }

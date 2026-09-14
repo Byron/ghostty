@@ -9,6 +9,13 @@ pub fn observe(terminal: &Terminal) -> Value {
            "alternate":terminal.alternate_screen().map(screen)})
 }
 
+pub fn tick(terminal: &mut Terminal, now_ms: u64) -> Value {
+    let before = terminal.graphics().generation;
+    let deadline = terminal.tick_graphics(now_ms);
+    json!({"next_delay_ms":deadline.map(|next| next.saturating_sub(now_ms)),
+        "changed":terminal.graphics().generation != before})
+}
+
 pub fn observe_placements(terminal: &Terminal) -> Value {
     let cell = [
         terminal.width_px / u32::from(terminal.cols),
@@ -89,7 +96,12 @@ fn screen(screen: &Screen) -> Vec<Value> {
         .into_iter()
         .map(|image| {
             json!({"id":image.id,"number":image.number,
-        "width":image.width,"height":image.height,"pixels":super::hex(&image.pixels)})
+        "width":image.width,"height":image.height,"pixels":super::hex(&image.pixels),
+        "displayed_pixels":super::hex(image.display_pixels()),
+        "frames":image.frames.iter().map(|frame| json!({"pixels":super::hex(&frame.pixels),"gap_ms":frame.gap_ms})).collect::<Vec<_>>(),
+        "current_frame":image.current_frame,"root_gap_ms":image.root_gap_ms,
+        "animation_state":image.animation_state,"max_loops":image.max_loops,
+        "completed_loops":image.completed_loops,"frame_shown_at_ms":image.frame_shown_at_ms})
         })
         .collect()
 }

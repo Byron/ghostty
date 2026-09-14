@@ -104,8 +104,24 @@ explicit image deletes its old placements as soon as transmission starts, even
 if the replacement fails. Terminal clears reclaim unplaced image data while
 preserving placements outside the active area. Basic parent-orphan and virtual
 clear cases are included; full placeholder rendering, margin
-clipping, pruning, transports and animation clocks remain incomplete. Rust's
+clipping, pruning and transports remain incomplete. Rust's
 renderer and terminal now share integer placement sizing from `rustty-vt`.
+
+`--protocols --case protocol/graphics/animation/` compares host-clock animation
+ticks, their next wakeup delays and whether a tick changed image content. Image
+observations include every frame's RGBA pixels and gap, displayed pixels, current
+frame, playback state, loop budget/count and shown-at timestamp. A plain image
+has an implicit stopped root frame. Rust keeps its public absolute-deadline API;
+the adapter reports the corresponding delay, matching the native API.
+
+The 90 fixtures cover both screens, multiple images, stopped/loading/running
+states, finite loops, gapless frames, late ticks, clock restarts and saturation,
+unplaced/replaced placements, terminal reset, frame arrival while loading, and
+client-driven controls. Unplaced images schedule no redraws; loading and finite
+loops park on the last displayed frame. Controls selecting the current frame
+or continuing playback preserve the deadline and do not invalidate its pixels.
+Frame editing/deletion, snapshot restoration and resource limits still need
+complete animation coverage.
 
 
 `--protocols --case protocol/graphics/placements/placeholder/` compares native

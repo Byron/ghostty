@@ -107,3 +107,56 @@ def requests():
             prefix = b"\x1b[?1049h" if alternate else b""
             request, _ = case(f"ids/{alternate}/{name}", prefix + data)
             yield request, ["graphics.kitty", "effects.pty"]
+
+    def animation(name, steps, alternate=False):
+        operations = []
+        if alternate:
+            operations.append({"op": "write", "data": b"\x1b[?1049h".hex()})
+        for step in steps:
+            operations.append({"op": "write", "data": step.hex()} if isinstance(step, bytes)
+                              else {"op": "graphics_tick", "now_ms": step})
+            operations.append({"op": "observe"})
+        return ({"id": "protocol/graphics/animation/" + name, "kind": "input",
+                 "observe_graphics": True, "operations": operations}, ["graphics.kitty", "effects.pty"])
+
+    def control(options):
+        return b"\x1b_Ga=a,i=1," + options + b"\x1b\\"
+
+    def frames(gaps, placed=True):
+        data = raw(b"i=1,C=1,a=" + (b"T" if placed else b"t"))
+        for index, gap in enumerate(gaps[1:], 1):
+            data += raw(f"a=f,i=1,z={gap or -1}".encode(), bytes([index * 30, 2, 3, 255]))
+        return data + control(f"r=1,z={gaps[0] or -1}".encode())
+
+    for alternate in (False, True):
+        for state in (1, 2, 3):
+            for gaps in ((50,), (0,), (50, 50), (0, 40), (40, 0), (0, 0), (40, 0, 50), (0, 40, 0), (40, 0, 0)):
+                setup = frames(gaps) + control(f"s={state}".encode())
+                yield animation(f"clock/{alternate}/{state}/{gaps}",
+                                [setup, 0, 1, 39, 40, 49, 50, 90, 100, 10000], alternate)
+        for loops in (1, 2, 3):
+            for gaps in ((10, 40), (10, 0, 0), (0, 40, 0)):
+                yield animation(f"loops/{alternate}/{loops}/{gaps}",
+                                [frames(gaps) + control(f"s=3,v={loops}".encode()),
+                                 0, 10, 50, 60, 100, 110, 500], alternate)
+        for name, times in (("restart", [100, 125, 5, 44, 45]),
+                            ("saturation", [2**64 - 20, 2**64 - 1, 2**64 - 1])):
+            yield animation(f"{name}/{alternate}", [frames((40, 50)) + control(b"s=3"), *times], alternate)
+
+    yield animation("unplaced", [frames((10, 40), placed=False) + control(b"s=3"), 0, 100,
+                    b"\x1b_Ga=p,i=1,C=1\x1b\\", 100, 110,
+                    b"\x1b_Ga=d,d=i,i=1\x1b\\", 150, 1000,
+                    b"\x1b_Ga=p,i=1,C=1\x1b\\", 1010, 1020, b"\x1bc", 2000])
+    yield animation("stop-resume", [frames((40, 50)) + control(b"s=3"), 100, 120,
+                    control(b"s=1"), 200, control(b"s=3"), 250, 289, 290])
+    yield animation("loading-append", [frames((10, 40)) + control(b"s=2"), 0, 10, 50, 100,
+                    raw(b"a=f,i=1,z=25", b"\xff\xff\xff\xff"), 150, 175, 200])
+    for options in (b"c=1", b"c=2", b"s=2", b"s=3", b"s=1", b"r=1,z=80", b"r=1,z=-1", b"v=2", b"s=99,c=99"):
+        yield animation("control/" + options.decode(), [frames((40, 50)) + control(b"s=3"),
+                        100, 120, control(options), 140, 150, 190, 200])
+    yield animation("both-screens", [frames((10, 40)) + control(b"s=3"), 100,
+                    b"\x1b[?1049h" + frames((20, 50)) + control(b"s=3"), 110, 130,
+                    b"\x1b[?1049l", 150, b"\x1b[?1049h", 160])
+    yield animation("multiple-images", [frames((10, 40)) + control(b"s=3"),
+                    raw(b"i=2,a=T,C=1") + raw(b"a=f,i=2,z=25")
+                    + b"\x1b_Ga=a,i=2,r=1,z=20,s=3\x1b\\", 0, 10, 20, 45, 50, 70])

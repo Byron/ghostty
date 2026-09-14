@@ -125,6 +125,8 @@ impl Default for Request {
 struct Operation {
     op: String,
     #[serde(default)]
+    now_ms: Option<u64>,
+    #[serde(default)]
     snapshot_max_continuation_bytes: Option<usize>,
     #[serde(default)]
     glyph_max_bytes: Option<usize>,
@@ -621,7 +623,7 @@ fn main() -> io::Result<()> {
 
 fn response(id: &str, error: Option<&str>) -> Value {
     json!({"id":id,"ok":error.is_none(),"err":error,"capabilities":CAPABILITIES,
-        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[],"page_layout":null,"glyph_results":[],"page_results":[],"dnd_results":[]})
+        "observations":[],"events":[],"widths":[],"parser":null,"snapshots":[],"snapshot_progress":[],"mode_results":[],"parsed_colors":[],"grid_results":[],"page_layout":null,"glyph_results":[],"page_results":[],"dnd_results":[],"graphics_ticks":[]})
 }
 
 fn execute(request: &Request) -> Result<Value, &'static str> {
@@ -681,6 +683,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     let mut glyph_results = Vec::new();
     let mut page_results = Vec::new();
     let mut dnd_results = Vec::new();
+    let mut graphics_ticks = Vec::new();
     let mut host = Host::new(request)?;
     host.host.configure(&mut terminal);
     let mut snapshots = Vec::new();
@@ -689,6 +692,10 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     let snapshot_offset = std::rc::Rc::new(std::cell::Cell::new(0));
     for operation in &request.operations {
         match operation.op.as_str() {
+            "graphics_tick" => graphics_ticks.push(graphics_adapter::tick(
+                &mut terminal,
+                operation.now_ms.ok_or("MissingTime")?,
+            )),
             "pages" => page_results.push(pages_adapter::observe(&terminal)),
             "dnd" => {
                 let (state, bytes) = dnd_adapter::run(
@@ -826,6 +833,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 glyph_results.clear();
                 page_results.clear();
                 dnd_results.clear();
+                graphics_ticks.clear();
             }
             "snapshot" => {
                 snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
@@ -907,6 +915,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     result["glyph_results"] = json!(glyph_results);
     result["page_results"] = json!(page_results);
     result["dnd_results"] = json!(dnd_results);
+    result["graphics_ticks"] = json!(graphics_ticks);
     Ok(result)
 }
 

@@ -4,8 +4,30 @@ const vt = @import("ghostty-vt");
 const wuffs = @import("wuffs");
 const Allocator = std.mem.Allocator;
 
-pub const Image = struct { id: u32, number: u32, width: u32, height: u32, pixels: []const u8 };
+pub const Image = struct {
+    id: u32,
+    number: u32,
+    width: u32,
+    height: u32,
+    pixels: []const u8,
+    displayed_pixels: []const u8,
+    frames: []const struct { pixels: []const u8, gap_ms: u32 },
+    current_frame: u32,
+    root_gap_ms: u32,
+    animation_state: u8,
+    max_loops: u32,
+    completed_loops: u32,
+    frame_shown_at_ms: ?u64,
+};
 pub const State = struct { primary: []Image, alternate: ?[]Image };
+pub const Tick = struct { next_delay_ms: ?u64, changed: bool };
+
+pub fn tick(t: *vt.Terminal, io: std.Io, now_ms: u64) Tick {
+    const storage = &t.screens.active.kitty_images;
+    const before = storage.generation;
+    const delay = storage.animationTick(io, now_ms);
+    return .{ .next_delay_ms = delay, .changed = storage.generation != before };
+}
 
 const PlacementId = struct { internal: bool, id: u32 };
 const Location = struct { screen: ?[2]u32, active: ?[2]u32, viewport: ?[2]u32 };
@@ -199,13 +221,29 @@ fn screen(alloc: Allocator, value: *vt.Screen) ![]Image {
             }
             break :pixels bytes;
         } else if (image.format == .rgba) data else return error.UnsupportedImageFormat;
-        const hex = try alloc.alloc(u8, rgba.len * 2);
-        const alphabet = "0123456789abcdef";
-        for (rgba, 0..) |byte, index| {
-            hex[index * 2] = alphabet[byte >> 4];
-            hex[index * 2 + 1] = alphabet[byte & 15];
-        }
-        images[i] = .{ .id = image.id, .number = image.number, .width = image.width, .height = image.height, .pixels = hex };
+        // An image without animation state has an implicit stopped root frame.
+        const anim: vt.kitty.graphics.Animation = if (image.animation) |a| a.* else .{};
+        const frames = try alloc.alloc(std.meta.Elem(@FieldType(Image, "frames")), anim.frames.items.len);
+        for (frames, anim.frames.items) |*dst, src| dst.* = .{ .pixels = try hex(alloc, src.data), .gap_ms = src.gap_ms };
+        images[i] = .{
+            .id = image.id,
+            .number = image.number,
+            .width = image.width,
+            .height = image.height,
+            .pixels = try hex(alloc, rgba),
+            .displayed_pixels = try hex(alloc, if (anim.current_index == 0) rgba else image.renderData().bytes().?),
+            .frames = frames,
+            .current_frame = anim.current_index,
+            .root_gap_ms = anim.root_gap_ms,
+            .animation_state = switch (anim.state) {
+                .stopped => 1,
+                .loading => 2,
+                .running => 3,
+            },
+            .max_loops = anim.max_loops,
+            .completed_loops = anim.current_loop,
+            .frame_shown_at_ms = anim.frame_shown_at_ms,
+        };
     }
     std.mem.sort(Image, images, {}, struct {
         fn less(_: void, a: Image, b: Image) bool {
@@ -213,4 +251,10 @@ fn screen(alloc: Allocator, value: *vt.Screen) ![]Image {
         }
     }.less);
     return images;
+}
+
+fn hex(alloc: Allocator, bytes: []const u8) ![]const u8 {
+    const result = try alloc.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, index| result[index * 2 ..][0..2].* = std.fmt.bytesToHex([_]u8{byte}, .lower);
+    return result;
 }

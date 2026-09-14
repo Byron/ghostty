@@ -16,11 +16,11 @@ pub fn observe_placements(terminal: &Terminal) -> Value {
     ];
     json!({"primary":placements(terminal.primary_screen(), cell),
         "alternate":terminal.alternate_screen().map(|screen| placements(screen, cell)),
-        "primary_placeholders":placeholders(terminal.primary_screen()),
-        "alternate_placeholders":terminal.alternate_screen().map(placeholders)})
+        "primary_placeholders":placeholders(terminal.primary_screen(),cell),
+        "alternate_placeholders":terminal.alternate_screen().map(|screen| placeholders(screen,cell))})
 }
 
-fn placeholders(screen: &Screen) -> Vec<Value> {
+fn placeholders(screen: &Screen, cell: [u32; 2]) -> Vec<Value> {
     screen
         .viewport()
         .flat_map(|row| {
@@ -28,10 +28,15 @@ fn placeholders(screen: &Screen) -> Vec<Value> {
                 let target = screen
                     .graphics
                     .placeholder_target(p.image_id, p.placement_id);
+                let geometry = screen.graphics.images.get(&p.image_id).ok_or("MissingImage")
+                    .and_then(|image| target.ok_or("PlacementMissingPlacement").map(|target| (image,target)))
+                    .and_then(|(image,target)| p.geometry(target,image,cell).ok_or("PlacementGridOutOfBounds"));
                 json!({"image_id":p.image_id,"placement_id":p.placement_id,
             "anchor":location(screen,GridPoint { row:row.id,col:p.col }),
             "fragment":[p.image_col,p.image_row],"size":[p.width,1],
-            "target":target.map(|target| placement_id(target.placement_id))})
+            "target":target.map(|target| placement_id(target.placement_id)),
+            "geometry":geometry.as_ref().ok().map(|g| json!({"offset":g.offset,"source":g.source,"pixels":g.pixels})),
+            "geometry_error":geometry.err()})
             })
         })
         .collect()

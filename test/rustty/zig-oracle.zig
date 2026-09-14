@@ -521,6 +521,10 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         .kitty_image_loading_limits = .direct,
     });
     defer t.deinit(alloc);
+    if (!observe_terminal) {
+        t.width_px = @as(u32, request.cols) * 8;
+        t.height_px = @as(u32, request.rows) * 16;
+    }
     const clipboard_replies = try alloc.alloc(DecodedClipboardReply, request.clipboard_replies.len);
     for (request.clipboard_replies, clipboard_replies) |source, *destination| {
         const contents = try alloc.alloc(vt.clipboard.Content, source.contents.len);

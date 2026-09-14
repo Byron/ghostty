@@ -54,7 +54,11 @@ python3 test/rustty/transport_limits.py zig-out/bin/vt-oracle target/debug/examp
 actions, consumed text modifiers, IME, mouse formats, focus and paste. Use
 `--case input/key` to select keyboard cases. Input cases compare each encoded
 result even when it is empty; a dropped key cannot disappear from the event
-list. Mouse coordinates use 8-by-16-pixel cells. `--artifacts`, `--zig-bin` and
+list. Input requests initialize both terminals with 8-by-16-pixel cells, matching
+the mouse encoder geometry. Terminal requests retain the native zero pixel-size
+default. `--protocols --case protocol/host/size/resize/` compares initial and
+resized snapshot geometry for both request kinds, including missing/zero cell
+sizes, saturated dimensions and mode-2048 reports. `--artifacts`, `--zig-bin` and
 `--rust-bin` select isolated output and adapter paths for concurrent work.
 
 `--protocols --case protocol/paste` exercises the state-aware paste entry point:

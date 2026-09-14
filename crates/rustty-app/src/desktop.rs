@@ -217,6 +217,15 @@ struct Host {
     frames: u64,
 }
 impl Host {
+    fn hovered_pane(&self) -> Option<Id> {
+        if !self.egui.is_pointer_in_window() {
+            return None;
+        }
+        self.rects
+            .iter()
+            .find(|(_, rect)| rect.contains(self.mouse))
+            .map(|(&id, _)| id)
+    }
     fn ui_input(&self) -> bool {
         self.search.is_some()
             || self.palette
@@ -3240,6 +3249,51 @@ impl App {
         }
         host.repaint();
     }
+    fn scroll(&mut self, host: &mut Host, delta: MouseScrollDelta) {
+        if host.ui_input()
+            || host.peek.is_some()
+            || host.divider_drag.is_some()
+            || self
+                .context
+                .layer_id_at(host.mouse)
+                .is_some_and(|layer| layer.order != egui::Order::Background)
+        {
+            return;
+        }
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(pos) => {
+                pos.y as f32 / host.fonts.metrics().cell_height as f32
+            }
+        };
+        if let Some(id) = host.hovered_pane() {
+            let mouse = self
+                .panes
+                .get(&id)
+                .and_then(|p| p.session.terminal().ok().map(|t| t.mouse_mode != 0))
+                .unwrap_or(false);
+            if mouse && !host.modifiers.state().shift_key() {
+                for _ in 0..lines.abs().ceil().min(128.0) as usize {
+                    self.mouse(
+                        host,
+                        vt::MouseAction::Press,
+                        Some(if lines > 0.0 {
+                            vt::MouseButton::WheelUp
+                        } else {
+                            vt::MouseButton::WheelDown
+                        }),
+                    );
+                }
+            } else if let Some(pane) = self.panes.get(&id)
+                && let Ok(mut terminal) = pane.session.terminal()
+            {
+                terminal
+                    .screen_mut()
+                    .scroll_viewport((lines * 3.0).round() as isize);
+            }
+        }
+        host.repaint();
+    }
     fn mouse(&mut self, host: &mut Host, action: vt::MouseAction, button: Option<vt::MouseButton>) {
         if let Some((id, axis, bounds)) = host.divider_drag {
             if action == vt::MouseAction::Release {
@@ -3282,11 +3336,7 @@ impl App {
                 return;
             }
         }
-        let hit = host
-            .rects
-            .iter()
-            .find(|(_, rect)| rect.contains(host.mouse))
-            .map(|(&id, _)| id);
+        let hit = host.hovered_pane();
         if hit.is_none() && (action == vt::MouseAction::Press || host.mouse_button.is_none()) {
             return;
         }
@@ -3308,12 +3358,23 @@ impl App {
             }
             return;
         }
-        if action == vt::MouseAction::Press
+        let wheel = matches!(
+            button,
+            Some(
+                vt::MouseButton::WheelUp
+                    | vt::MouseButton::WheelDown
+                    | vt::MouseButton::WheelLeft
+                    | vt::MouseButton::WheelRight
+            )
+        );
+        if !wheel
+            && action == vt::MouseAction::Press
             && let Some(id) = hit
         {
             self.focus_pane(host.id, id);
         }
-        let Some(id) = self.focused(host.id) else {
+        // Wheel reports follow the pointer without changing the keyboard target.
+        let Some(id) = (if wheel { hit } else { self.focused(host.id) }) else {
             return;
         };
         let Some(rect) = host.rects.get(&id) else {
@@ -3959,40 +4020,8 @@ impl ApplicationHandler<Event> for App {
                     host.selection_drag = None;
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if !host.ui_input() => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        pos.y as f32 / host.fonts.metrics().cell_height as f32
-                    }
-                };
-                if let Some(id) = self.focused(host.id) {
-                    let mouse = self
-                        .panes
-                        .get(&id)
-                        .and_then(|p| p.session.terminal().ok().map(|t| t.mouse_mode != 0))
-                        .unwrap_or(false);
-                    if mouse && !host.modifiers.state().shift_key() {
-                        for _ in 0..lines.abs().ceil().min(128.0) as usize {
-                            self.mouse(
-                                &mut host,
-                                vt::MouseAction::Press,
-                                Some(if lines > 0.0 {
-                                    vt::MouseButton::WheelUp
-                                } else {
-                                    vt::MouseButton::WheelDown
-                                }),
-                            );
-                        }
-                    } else if let Some(pane) = self.panes.get(&id)
-                        && let Ok(mut terminal) = pane.session.terminal()
-                    {
-                        terminal
-                            .screen_mut()
-                            .scroll_viewport((lines * 3.0).round() as isize);
-                    }
-                }
-                host.repaint();
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.scroll(&mut host, delta);
             }
             WindowEvent::DroppedFile(path) => {
                 if let Some(id) = self.focused(host.id) {

@@ -296,6 +296,7 @@ impl Smoke {
                     }
                 }
                 if capture_path.is_file() {
+                    check_hover_scrolling(app, host)?;
                     self.idle_frames = host.frames;
                     self.progress_started = Instant::now();
                     app.panes
@@ -333,7 +334,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -395,6 +396,150 @@ impl Smoke {
         }
         Ok(false)
     }
+}
+
+fn check_hover_scrolling(app: &mut App, host: &mut Host) -> Result<()> {
+    let focused = app
+        .focused(host.id)
+        .ok_or("no focused pane for scrolling")?;
+    let hovered = *host
+        .rects
+        .keys()
+        .find(|&&id| id != focused)
+        .ok_or("no unfocused pane for scrolling")?;
+    let mouse = host.mouse;
+    let modifiers = host.modifiers;
+    let pointer_in_window = host.egui.is_pointer_in_window();
+    let mut saved = Vec::new();
+    for id in [focused, hovered] {
+        let pane = app.panes.get_mut(&id).unwrap();
+        let mut terminal = pane.session.terminal()?;
+        let mut fixture = vt::Terminal::new(terminal.cols, terminal.rows, 64);
+        fixture.feed("\r\n".repeat(usize::from(terminal.rows) + 12).as_bytes());
+        saved.push((
+            id,
+            std::mem::replace(&mut *terminal, fixture),
+            std::mem::take(&mut pane.input),
+            std::mem::take(&mut pane.input_bytes),
+            pane.mouse_cell.take(),
+        ));
+        // Hold encoded reports in the existing queue instead of sending them to a shell.
+        pane.input.push_back(Vec::new());
+    }
+    let result = (|| -> Result<()> {
+        host.mouse = host.rects[&hovered].center();
+        let _ = host.egui.on_window_event(
+            &host.window,
+            &WindowEvent::CursorMoved {
+                device_id: winit::event::DeviceId::dummy(),
+                position: LogicalPosition::new(host.mouse.x, host.mouse.y)
+                    .to_physical(host.window.scale_factor()),
+            },
+        );
+        for (focused_mode, hovered_mode, shift) in [
+            (0, 0, false),
+            (1000, 0, false),
+            (0, 1000, false),
+            (1000, 1000, false),
+            (0, 1000, true),
+        ] {
+            host.modifiers = if shift {
+                winit::keyboard::ModifiersState::SHIFT
+            } else {
+                winit::keyboard::ModifiersState::empty()
+            }
+            .into();
+            for (id, mode) in [(focused, focused_mode), (hovered, hovered_mode)] {
+                let mut terminal = app.panes[&id].session.terminal()?;
+                terminal.mouse_mode = mode;
+                terminal.mouse_format = 1006;
+            }
+            let reporting = hovered_mode != 0 && !shift;
+            let pixels = f64::from(host.fonts.metrics().cell_height);
+            for (delta, offset, code) in [
+                (MouseScrollDelta::LineDelta(0.0, 1.0), 3, 64),
+                (MouseScrollDelta::PixelDelta((0.0, pixels).into()), 6, 64),
+                (MouseScrollDelta::LineDelta(0.0, -1.0), 3, 65),
+                (MouseScrollDelta::PixelDelta((0.0, -pixels).into()), 0, 65),
+            ] {
+                app.scroll(host, delta);
+                let focused_pane = &app.panes[&focused];
+                if app.focused(host.id) != Some(focused)
+                    || focused_pane.session.terminal()?.screen().viewport_offset != 0
+                    || focused_pane.input.len() != 1
+                {
+                    return Err(
+                        "scrolling affected the focused pane instead of the hovered pane".into(),
+                    );
+                }
+                let pane = app.panes.get_mut(&hovered).unwrap();
+                if pane.session.terminal()?.screen().viewport_offset
+                    != if reporting { 0 } else { offset }
+                    || pane.input.len() != if reporting { 2 } else { 1 }
+                    || reporting
+                        && !pane
+                            .input
+                            .back()
+                            .unwrap()
+                            .starts_with(format!("\x1b[<{code};").as_bytes())
+                {
+                    return Err(format!("hovered pane did not scroll correctly: {delta:?}, mouse modes {focused_mode}/{hovered_mode}, shift={shift}").into());
+                }
+                if reporting {
+                    pane.input.pop_back();
+                    pane.input_bytes = 0;
+                }
+            }
+        }
+        // A stale last position after leaving the window must not keep a target.
+        let _ = host.egui.on_window_event(
+            &host.window,
+            &WindowEvent::CursorLeft {
+                device_id: winit::event::DeviceId::dummy(),
+            },
+        );
+        app.scroll(host, MouseScrollDelta::LineDelta(0.0, 1.0));
+        host.mouse = Pos2::new(-1.0, -1.0);
+        let _ = host.egui.on_window_event(
+            &host.window,
+            &WindowEvent::CursorMoved {
+                device_id: winit::event::DeviceId::dummy(),
+                position: (0.0, 0.0).into(),
+            },
+        );
+        app.scroll(host, MouseScrollDelta::LineDelta(0.0, 1.0));
+        for id in [focused, hovered] {
+            let pane = &app.panes[&id];
+            if pane.session.terminal()?.screen().viewport_offset != 0 || pane.input.len() != 1 {
+                return Err("scrolling outside panes kept a terminal target".into());
+            }
+        }
+        Ok(())
+    })();
+    for (id, terminal, input, input_bytes, mouse_cell) in saved {
+        let pane = app.panes.get_mut(&id).unwrap();
+        *pane.session.terminal()? = terminal;
+        pane.input = input;
+        pane.input_bytes = input_bytes;
+        pane.mouse_cell = mouse_cell;
+    }
+    host.mouse = mouse;
+    host.modifiers = modifiers;
+    let event = if pointer_in_window {
+        WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: LogicalPosition::new(mouse.x, mouse.y)
+                .to_physical(host.window.scale_factor()),
+        }
+    } else {
+        WindowEvent::CursorLeft {
+            device_id: winit::event::DeviceId::dummy(),
+        }
+    };
+    let _ = host.egui.on_window_event(&host.window, &event);
+    result?;
+    eprintln!("Native smoke: trackpad and wheel scrolling followed hover without changing focus");
+    Ok(())
 }
 
 /// Render the same host primitives to a texture when no drawable is available

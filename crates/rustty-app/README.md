@@ -29,6 +29,8 @@ empty Rustty override. Settings always uses the default text editor, including
 for existing files with an unregistered extension. Light/dark theme pairs follow macOS appearance, and
 reload keeps the original command-line overrides. Terminal appearance and visibility
 queries reflect the OS scheme and whether the pane is currently shown.
+`title-report = true` enables CSI 21 t replies with the terminal title; it is
+disabled by default and follows configuration reloads.
 Tabs, splits, zoom, quadrant navigation, clipboard and
 search use the configured Ghostty keybindings. Window layouts and pane directories
 are saved separately under `com.rustty.app`.

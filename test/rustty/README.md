@@ -35,6 +35,7 @@ Use deterministic generated cases and saved failures to diagnose differences:
 
 ```sh
 python3 test/rustty/parity.py --no-build --generated 100 --seed 0
+python3 test/rustty/parity.py --corpus --case corpus/stream-initial/
 python3 test/rustty/parity.py --no-build --input
 python3 test/rustty/parity.py --no-build --parser
 python3 test/rustty/parity.py --no-build --unicode
@@ -666,10 +667,15 @@ in batches of 4,096 codepoints, plus rejected surrogate and out-of-range inputs.
 The cases enumerate the scalar range independently of Rust's generated table.
 This verifies scalar width; terminal grapheme composition needs separate cases.
 
+`--corpus` runs the inherited `stream-initial` and `stream-cmin` terminal bytes
+without requiring the full compatibility gate. The 3,295 fixtures passed 9,885
+whole-buffer, scalar and varied-delivery comparisons. Their first byte is the
+original delivery selector, so it is removed from terminal input. `--case`
+filters corpus and generated cases as well as the other suites. Corpus builds
+use ReleaseSafe, retaining runtime checks without per-edit debug integrity scans.
+
 `--thorough` additionally exercises Unicode, input, parser, protocol and both snapshot suites, all split points
-for short writes, the inherited stream corpus and generated operations. The
-stream corpus's first byte is its original delivery selector, so it is removed
-from the terminal input.
+for short writes, the inherited stream corpus and generated operations.
 Missing corpus directories are errors. A thorough run also requires every
 entry in `coverage.json` to be complete, exposed by both adapters and covered
 by a passing case in that run. The coverage manifest intentionally remains

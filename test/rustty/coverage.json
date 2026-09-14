@@ -183,8 +183,8 @@
     },
     {
       "id": "fuzz.resource-limits",
-      "status": "pending",
-      "remaining": "All inherited corpora, deterministic mixed operations, invariants and minimized regressions."
+      "status": "partial",
+      "remaining": "All 3,295 inherited terminal-stream byte fixtures pass 9,885 delivery comparisons; --corpus can replay them independently with case filtering. Parser corpora are covered under parser.raw-events. Deterministic mixed operations have retained resize regressions, but direct OSC corpus semantics, allocator/resource limits, broader mixed operations and invariants remain."
     }
   ]
 }

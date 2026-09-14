@@ -2313,6 +2313,7 @@ impl Screen {
             let mut line = self.blank_row(cols, Color::Default);
             let mut x: usize = 0;
             let mut pin_x: usize = 0;
+            let mut written_rows = 0;
             for (old_index, old) in contents.iter().enumerate() {
                 let source_page = source_pages.page_at(old_index).0;
                 let capacity = source_page.adjusted_capacity(cols as u16, true);
@@ -2483,6 +2484,7 @@ impl Screen {
                 }
                 if used > 0 {
                     pin_x = x.min(cols - 1);
+                    written_rows = output.len() + 1;
                 }
                 if !old.wrapped {
                     output.push(line);
@@ -2490,7 +2492,7 @@ impl Screen {
                     x = 0;
                 }
             }
-            if x > 0 {
+            if output.len() < written_rows {
                 output.push(line);
             }
             if let Some(p) = map.get(&(old_cursor.row, old_cursor.col)) {
@@ -2510,22 +2512,9 @@ impl Screen {
                     rectangular: s.rectangular,
                 })
             });
-            // Reflow uses blank rows below the content before pushing live text
-            // into history. Cursor and tracked references keep their blank rows.
-            while output.len() > 1
-                && output.last().is_some_and(|r| {
-                    r.id != mapped_cursor.row
-                        && !saved_point.is_some_and(|p| p.row == r.id)
-                        && !self.viewport_pin.is_some_and(|p| p.row == r.id)
-                        && !self
-                            .tracked
-                            .0
-                            .values()
-                            .any(|p| p.is_some_and(|p| p.row == r.id))
-                        && r.used() == 0
-                        && r.semantic == SemanticContent::Output
-                })
-            {
+            // Drop only deferred blank rows. Blanks copied from wrapped source
+            // rows, cursor positions or other pins are meaningful output.
+            while output.len() > written_rows {
                 let row = output.pop().unwrap();
                 self.release_row_resources(&row);
             }

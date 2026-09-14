@@ -114,20 +114,21 @@ def requests():
                     {"op": "resize", "cols": 12, "rows": 6}, b"\r\nmore\r\nrows", observe],
                    ["terminal.tracked", "terminal.resize"])
 
-    for alternate in (False, True):
+    for mode, prefix in (("primary", []), ("no-history", [grid("limits", bytes=0)]),
+                         ("alternate", [b"\x1b[?47h"]),
+                         ("no-history-retained", [grid("limits", bytes=0), b"A\x1b[22J"])):
         for margin, setup in (("full", b""), ("vertical", b"\x1b[2;3r"),
                               ("top", b"\x1b[1;3r"),
                               ("horizontal", b"\x1b[?69h\x1b[3;6s")):
             for command in "LMST":
                 for count in (0, 1, 2, 5):
-                    prefix = b"\x1b[?47h" if alternate else b""
-                    operations = [prefix + b"aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd"]
+                    operations = [*prefix, b"aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd"]
                     operations.extend(grid("track", id=y, point=point(1, y)) for y in range(4))
                     operations.extend([
                         grid("select", start=point(1), end=point(3, 2)),
                         setup + b"\x1b[2;3H" + f"\x1b[{count}{command}".encode(), observe,
                     ])
-                    yield case(f"tracked/row-shift/{alternate}/{margin}/{command}/{count}",
+                    yield case(f"tracked/row-shift/{mode}/{margin}/{command}/{count}",
                                operations, ["terminal.tracked", "terminal.selection"])
 
     yield case("index/corpus-wrap", [b"\x1b[5W\x1b[4r\x1b[\t33BhD"],

@@ -114,7 +114,7 @@
     {
       "id": "terminal.tracked",
       "status": "partial",
-      "remaining": "Live coordinates/codepoints are compared through reflow, erasure, resets, handle reuse and screen switches. Owner isolation, reset lifetime, inactive release, line shifts and alternate/history pin motion pass; rebinding, exact pruning and snapshot restoration remain."
+      "remaining": "Live coordinates/codepoints are compared through reflow, erasure, resets, handle reuse and screen switches. Owner isolation, reset lifetime, inactive release, line shifts and alternate/history pin motion pass. IL/DL/SU/SD with full and partial margins, zero/oversized counts, primary/alternate screens, disabled scrollback and ED22-retained history pass 768 comparisons across 256 fixtures. Scroll path selection uses the active screen's actual byte limit, preserving pins and wrap flags with scrollback disabled. Rebinding, exact pruning and snapshot restoration remain."
     },
     {
       "id": "graphics.kitty",

@@ -59,6 +59,7 @@ const capabilities = [_][]const u8{
 
 const Operation = struct {
     op: []const u8,
+    now_ms: ?u64 = null,
     snapshot_max_continuation_bytes: ?usize = null,
     data: []const u8 = "",
     cols: u16 = 0,
@@ -300,6 +301,7 @@ const Response = struct {
     glyph_results: []const glyph_adapter.State = &.{},
     page_results: []const pages_adapter.State = &.{},
     dnd_results: []const ?dnd_adapter.State = &.{},
+    graphics_ticks: []const graphics_adapter.Tick = &.{},
 };
 
 // Effects arrive synchronously; one terminal is exercised at a time. This
@@ -557,12 +559,15 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     var glyph_results: std.ArrayList(glyph_adapter.State) = .empty;
     var page_results: std.ArrayList(pages_adapter.State) = .empty;
     var dnd_results: std.ArrayList(?dnd_adapter.State) = .empty;
+    var graphics_ticks: std.ArrayList(graphics_adapter.Tick) = .empty;
     var snapshots: std.ArrayList([]const u8) = .empty;
     var snapshot_source: std.Io.Reader = .fixed(&.{});
     var snapshot_decoder: ?vt.snapshot.Decoder = null;
     var snapshot_progress: std.ArrayList(SnapshotProgress) = .empty;
     for (request.operations) |op| {
-        if (std.mem.eql(u8, op.op, "pages")) {
+        if (std.mem.eql(u8, op.op, "graphics_tick")) {
+            try graphics_ticks.append(alloc, graphics_adapter.tick(&t, io, op.now_ms orelse return error.MissingTime));
+        } else if (std.mem.eql(u8, op.op, "pages")) {
             try page_results.append(alloc, try pages_adapter.observe(alloc, &t));
         } else if (std.mem.eql(u8, op.op, "dnd")) {
             var output: std.Io.Writer.Allocating = .init(alloc);
@@ -667,6 +672,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             glyph_results.clearRetainingCapacity();
             page_results.clearRetainingCapacity();
             dnd_results.clearRetainingCapacity();
+            graphics_ticks.clearRetainingCapacity();
         } else if (std.mem.eql(u8, op.op, "snapshot")) {
             var continuation: std.Io.Writer.Allocating = .init(alloc);
             try stream.writeContinuation(&continuation.writer);
@@ -720,6 +726,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     response.glyph_results = glyph_results.items;
     response.page_results = page_results.items;
     response.dnd_results = dnd_results.items;
+    response.graphics_ticks = graphics_ticks.items;
     return response;
 }
 

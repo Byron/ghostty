@@ -14,7 +14,7 @@
     {
       "id": "terminal.resize",
       "status": "partial",
-      "remaining": "Row prompt metadata and OSC 133 redraw policies are compared across resize and snapshots. Native non-reflow truncation now clears both halves of a wide cell, repairing a later insertion crash; 144 comparisons cover both screens, active/inactive state, graphemes, links, styles and snapshot continuation. Complete reflow, height changes, scrollback pruning and tracked-reference cases remain."
+      "remaining": "Row prompt metadata and OSC 133 redraw policies are compared across resize and snapshots. Native non-reflow truncation now clears both halves of a wide cell, repairing a later insertion crash; 144 comparisons cover both screens, active/inactive state, graphemes, links, styles and snapshot continuation. Initial and resized pixel geometry is compared in snapshots for terminal and input requests, including missing/zero cell sizes, saturated products, unchanged grids and mode-2048 reports. The adapters now initialize identical pixel geometry for input requests. Complete reflow, height changes, scrollback pruning and tracked-reference cases remain."
     },
     {
       "id": "terminal.reset",

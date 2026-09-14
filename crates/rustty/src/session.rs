@@ -664,6 +664,7 @@ fn enqueue(
 
 fn apply_appearance(terminal: &mut Terminal, config: &Config) {
     terminal.clipboard_write_limit = config.clipboard_write_limit_bytes.unwrap_or(usize::MAX);
+    terminal.title_report = config.title_report;
     let palette: Vec<_> = config
         .palette
         .iter()
@@ -776,6 +777,23 @@ fn command(config: &Config, options: &SessionOptions) -> io::Result<CommandBuild
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn title_reporting_follows_configuration_reload_and_survives_reset() {
+        let mut terminal = Terminal::new(10, 2, 0);
+        for title_report in [false, true, false] {
+            let mut config = Config::default();
+            config.title_report = title_report;
+            apply_appearance(&mut terminal, &config);
+            terminal.feed(b"\x1bc\x1b]2;title\x07");
+            let expected = if title_report {
+                vec![Effect::Write(b"\x1b]ltitle\x1b\\".to_vec())]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(terminal.feed(b"\x1b[21t"), expected);
+        }
+    }
 
     #[cfg(unix)]
     #[test]

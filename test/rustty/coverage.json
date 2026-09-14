@@ -14,7 +14,7 @@
     {
       "id": "terminal.resize",
       "status": "partial",
-      "remaining": "Row prompt metadata and OSC 133 redraw policies are compared across resize and snapshots. Native non-reflow truncation now clears both halves of a wide cell, repairing a later insertion crash; 144 comparisons cover both screens, active/inactive state, graphemes, links, styles and snapshot continuation. Initial and resized pixel geometry is compared in snapshots for terminal and input requests, including missing/zero cell sizes, saturated products, unchanged grids and mode-2048 reports. The adapters now initialize identical pixel geometry for input requests. The internal viewport anchor survives returning to the active area; saved cursors and external pins agree across 1200 comparisons through narrowing, widening, line edits, history clearing and viewport movement. Empty wrap continuations are dropped without adding hard breaks; 648 comparisons cover retained cursor/selection pins, semantic rows and backgrounds. Complete reflow, height changes, scrollback pruning and tracked-reference cases remain."
+      "remaining": "Row prompt metadata and OSC 133 redraw policies are compared across resize and snapshots. Native non-reflow truncation now clears both halves of a wide cell, repairing a later insertion crash; 144 comparisons cover both screens, active/inactive state, graphemes, links, styles and snapshot continuation. Initial and resized pixel geometry is compared in snapshots for terminal and input requests, including missing/zero cell sizes, saturated products, unchanged grids and mode-2048 reports. The adapters now initialize identical pixel geometry for input requests. The internal viewport anchor survives returning to the active area; saved cursors and external pins agree across 1200 comparisons through narrowing, widening, line edits, history clearing and viewport movement. Empty wrap continuations are dropped without adding hard breaks; 648 comparisons cover retained cursor/selection pins, semantic rows and backgrounds. Reflow preserves the blank tail copied from a wrapped source row instead of trimming it as deferred empty space; generated/2/979 has a retained ASCII regression. Complete reflow, height changes, scrollback pruning and tracked-reference cases remain."
     },
     {
       "id": "terminal.reset",
@@ -184,7 +184,7 @@
     {
       "id": "fuzz.resource-limits",
       "status": "partial",
-      "remaining": "All 3,295 inherited terminal-stream byte fixtures pass 9,885 delivery comparisons; --corpus can replay them independently with case filtering. Parser corpora are covered under parser.raw-events. Deterministic mixed operations have retained resize regressions, but direct OSC corpus semantics, allocator/resource limits, broader mixed operations and invariants remain."
+      "remaining": "All 3,295 inherited terminal-stream byte fixtures pass 9,885 delivery comparisons; --corpus can replay them independently with case filtering. Parser corpora are covered under parser.raw-events. All 1000 mixed-operation cases from seed 2 pass 3000 delivery comparisons after retaining three cursor/blank-row resize regressions, but direct OSC corpus semantics, allocator/resource limits, broader mixed operations and invariants remain."
     }
   ]
 }

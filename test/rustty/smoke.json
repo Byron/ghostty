@@ -1006,5 +1006,39 @@
     "generated_sources": [
       "generated/2/291"
     ]
+  },
+  {
+    "request": {
+      "id": "terminal/resize/blank-tail-of-wrapped-row",
+      "cols": 20,
+      "rows": 4,
+      "operations": [
+        {
+          "op": "write",
+          "data": "616263646566676809"
+        },
+        {
+          "op": "resize",
+          "cols": 14,
+          "rows": 8
+        },
+        {
+          "op": "write",
+          "data": "1b5b48"
+        },
+        {
+          "op": "resize",
+          "cols": 6,
+          "rows": 2
+        }
+      ]
+    },
+    "covers": [
+      "terminal.resize",
+      "terminal.cursor"
+    ],
+    "generated_sources": [
+      "generated/2/979"
+    ]
   }
 ]

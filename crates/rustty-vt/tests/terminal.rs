@@ -208,6 +208,21 @@ fn resize_skips_an_empty_wrap_continuation_without_ending_the_line() {
 }
 
 #[test]
+fn resize_retains_blank_cells_copied_from_a_wrapped_source_row() {
+    let mut terminal = Terminal::new(20, 4, 100);
+    terminal.feed(b"abcdefgh\t");
+    terminal.resize(14, 8);
+    terminal.feed(b"\x1b[H");
+    terminal.resize(6, 2);
+    assert_eq!(terminal.screen().history.len(), 1);
+    assert_eq!(terminal.screen().history[0].text(), "abcdef");
+    assert_eq!(lines(&terminal), ["gh", ""]);
+    assert!(terminal.screen().rows[0].wrapped);
+    assert!(terminal.screen().rows[1].wrap_continuation);
+    invariant(&terminal);
+}
+
+#[test]
 fn resize_remaps_saved_cursor_separately_from_the_live_cursor() {
     let mut t = Terminal::new(12, 4, 100);
     t.feed(b"abcdefghi\n\x1b[?1049h");

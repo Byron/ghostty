@@ -2969,14 +2969,18 @@ mod resource_tests {
     fn live_grapheme_allocations_survive_mutations_and_restore() {
         let mut terminal = Terminal::new(1024, 2, 100);
         terminal.feed("a\u{301}".repeat(512).as_bytes());
-        assert_eq!(
-            terminal.screen().pages.pages[0].capacity.grapheme_bytes,
-            8192
-        );
+        let page = &terminal.screen().pages.pages[0];
+        assert_eq!(page.capacity.grapheme_bytes, 8192);
+        assert_eq!(page.graphemes.used_bytes(), 8192);
+        assert_eq!(page.rows, 2);
+        let capacity_rows = u32::from(page.capacity.rows);
         terminal.feed("a\u{301}".as_bytes());
+        // The 8192 live bytes across two initialized rows project to 4096
+        // bytes per row, plus 25% headroom. Native page alignment determines
+        // the row capacity: 46 on macOS ARM64, 45 on Windows x64.
         assert_eq!(
             terminal.screen().pages.pages[0].capacity.grapheme_bytes,
-            235520
+            5120 * capacity_rows
         );
         assert_references(terminal.screen());
 

@@ -335,6 +335,7 @@ pub const ImageStorage = struct {
         // (e.g. renderer texture caches) can detect content changes.
         self.markMutated(io);
         gop.value_ptr.generation = self.generation;
+        gop.value_ptr.identity = self.generation;
     }
 
     /// Add an image whose decoded payload bytes have not arrived yet.

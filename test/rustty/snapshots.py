@@ -103,6 +103,13 @@ def metadata_requests(reference):
             {"op": "cursor_defaults", "cursor_shape": "bar", "cursor_blink": True},
             {"op": "observe"}, {"op": "snapshot"},
         ]}, ["snapshot.fixtures", "snapshot.cross-decode"])
+    for value in (0, 0x41, 0xD800, 0xDFFF, 0x10FFFF, 0x110000, 0xFFFFFFFF):
+        parts = [(tag, bytearray(payload)) for tag, payload in base]
+        struct.pack_into("<I", parts[0][1], 25, value)
+        yield ({"id": f"snapshot/metadata/previous-char/{value}", "kind": "snapshot",
+            "operations": [{"op": "restore", "data": frame(parts).hex()}], "after": [
+            write(b"\x1b[31m\x1b]8;;https://example.org\x07\x1b[3b\x1b[6n"),
+        ]}, ["snapshot.fixtures", "snapshot.cross-decode"])
 
 
 def streaming_requests(root):

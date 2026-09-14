@@ -97,6 +97,30 @@ fn unknown_cursor_default_flags_preserve_host_cursor_preferences() {
     }
 }
 
+#[test]
+fn repeated_nul_prints_empty_cells_with_the_current_pen() {
+    for restored in [false, true] {
+        let mut terminal = Terminal::new(8, 3, 0);
+        terminal.feed(b"abc\x1b[31m\x1b]8;;https://example.org\x07");
+        if restored {
+            let mut parts = records(&encode_to_vec(&terminal).unwrap());
+            parts[0].1[25..29].copy_from_slice(&0u32.to_le_bytes());
+            terminal = decode(frame(&parts).as_slice(), DecodeOptions::default()).unwrap();
+            terminal.feed(b"\x1b[3b");
+        } else {
+            terminal.print('\0');
+            terminal.feed(b"\x1b[2b");
+        }
+        assert_eq!(terminal.screen().cursor.col, 6, "restored={restored}");
+        for cell in &terminal.screen().rows[0].cells[3..6] {
+            assert!(cell.text.is_empty(), "restored={restored}");
+            assert_eq!(cell.width, 1);
+            assert_eq!(cell.style.foreground, Color::Indexed(1));
+            assert_eq!(cell.hyperlink.as_deref(), Some("https://example.org"));
+        }
+    }
+}
+
 fn text<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<String> {
     rows.into_iter().map(Row::text).collect()
 }

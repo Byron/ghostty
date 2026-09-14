@@ -11,24 +11,40 @@ pub enum Format {
     Html,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Options {
+#[derive(Clone, Copy, Debug)]
+pub struct CodepointMap<'a> {
+    /// Inclusive Unicode range. The last matching entry takes precedence.
+    pub range: [char; 2],
+    pub replacement: Replacement<'a>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Replacement<'a> {
+    Codepoint(char),
+    String(&'a str),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Options<'a> {
     pub emit: Format,
     pub unwrap: bool,
     pub trim: bool,
+    pub background: Option<[u8; 3]>,
+    pub foreground: Option<[u8; 3]>,
+    /// Resolve indexed cell colors to RGB without changing terminal state.
+    pub palette: Option<&'a [[u8; 3]; 256]>,
+    pub codepoint_map: &'a [CodepointMap<'a>],
 }
-impl Default for Options {
+impl Default for Options<'_> {
     fn default() -> Self {
         Self {
-            emit: Format::Plain,
             unwrap: true,
-            trim: true,
+            ..Self::new(Format::Plain)
         }
     }
 }
 
-impl Options {
+impl Options<'_> {
     /// Native full-export defaults. Selection convenience defaults additionally
     /// unwrap soft-wrapped rows; formatter constructors preserve screen rows.
     pub const fn new(emit: Format) -> Self {
@@ -36,6 +52,10 @@ impl Options {
             emit,
             unwrap: false,
             trim: true,
+            background: None,
+            foreground: None,
+            palette: None,
+            codepoint_map: &[],
         }
     }
 }
@@ -131,7 +151,7 @@ impl Default for TerminalExtra {
 /// only VT output. HTML retains one outer wrapper per physical page.
 pub struct ScreenFormatter<'a> {
     pub screen: &'a Screen,
-    pub options: Options,
+    pub options: Options<'a>,
     pub content: Content,
     pub extra: ScreenExtra,
 }
@@ -178,7 +198,7 @@ impl<'a> ScreenFormatter<'a> {
 /// Format both screens separately after a no-content terminal export if needed.
 pub struct TerminalFormatter<'a> {
     pub terminal: &'a Terminal,
-    pub options: Options,
+    pub options: Options<'a>,
     pub content: Content,
     pub extra: TerminalExtra,
 }
@@ -268,7 +288,7 @@ impl Terminal {
     /// Export a selection with its palette and current style/hyperlink state.
     /// VT output can contain opaque hyperlink bytes, so it is not always UTF-8.
     /// This does not replace the active selection or change terminal state.
-    pub fn format_selection(&self, selection: Selection, options: Options) -> Option<Vec<u8>> {
+    pub fn format_selection(&self, selection: Selection, options: Options<'_>) -> Option<Vec<u8>> {
         TerminalFormatter {
             terminal: self,
             options,
@@ -286,7 +306,7 @@ impl Screen {
 
     /// Export inclusive bounds, retaining physical page breaks and native wide-cell rules.
     /// Screen exports reference palette indices; Terminal exports include the palette.
-    pub fn format_selection(&self, selection: Selection, options: Options) -> Option<Vec<u8>> {
+    pub fn format_selection(&self, selection: Selection, options: Options<'_>) -> Option<Vec<u8>> {
         let rows: Vec<_> = self.all_rows().collect();
         let position = |point: crate::GridPoint| {
             let row = rows.iter().position(|row| row.id == point.row)?;
@@ -361,7 +381,7 @@ fn palette(out: &mut Vec<u8>, terminal: &Terminal, emit: Format) {
     }
 }
 
-fn screen_extra(out: &mut Vec<u8>, screen: &Screen, options: Options, extra: ScreenExtra) {
+fn screen_extra(out: &mut Vec<u8>, screen: &Screen, options: Options<'_>, extra: ScreenExtra) {
     let cursor = &screen.cursor;
     if extra.cursor {
         let wrapped = cursor.pending_wrap && cursor.col == screen.columns - 1;
@@ -391,7 +411,7 @@ fn screen_extra(out: &mut Vec<u8>, screen: &Screen, options: Options, extra: Scr
         }
     }
     if extra.style {
-        style_open(out, cursor.style, Format::Vt);
+        style_open(out, cursor.style, Format::Vt, None);
     }
     if extra.hyperlink
         && let Some(uri) = &cursor.hyperlink
@@ -443,7 +463,7 @@ fn format_page(
     start: (usize, usize),
     mut end: (usize, usize),
     rectangle: bool,
-    options: Options,
+    options: Options<'_>,
     trailing: (usize, usize),
 ) -> (usize, usize) {
     let (mut blank_rows, mut blank_cells) = if start == (0, 0) { trailing } else { (0, 0) };
@@ -463,7 +483,24 @@ fn format_page(
         return (blank_rows, blank_cells);
     }
     if options.emit == Format::Html {
-        out.extend_from_slice(b"<div style=\"font-family: monospace; white-space: pre;\">");
+        out.extend_from_slice(b"<div style=\"font-family: monospace; white-space: pre;");
+        for (property, color) in [
+            ("background-color", options.background),
+            ("color", options.foreground),
+        ] {
+            if let Some([r, g, b]) = color {
+                out.extend_from_slice(format!("{property}: #{r:02x}{g:02x}{b:02x};").as_bytes());
+            }
+        }
+        out.extend_from_slice(b"\">");
+    } else if options.emit == Format::Vt {
+        for (code, color) in [(10, options.foreground), (11, options.background)] {
+            if let Some([r, g, b]) = color {
+                out.extend_from_slice(
+                    format!("\x1b]{code};rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\").as_bytes(),
+                );
+            }
+        }
     }
     let mut style = Style::default();
     let mut hyperlink = None;
@@ -534,7 +571,7 @@ fn format_page(
                 }
                 style = cell.style;
                 if style != Style::default() {
-                    style_open(out, style, options.emit);
+                    style_open(out, style, options.emit, options.palette);
                 }
             }
             if options.emit == Format::Html {
@@ -560,9 +597,23 @@ fn format_page(
             }
             if cell.text.is_empty() {
                 out.push(b' ');
-            } else if options.emit == Format::Html {
+            } else if !options.codepoint_map.is_empty() || options.emit == Format::Html {
                 for cp in cell.text.chars() {
-                    html_char(out, cp);
+                    let replacement = options
+                        .codepoint_map
+                        .iter()
+                        .rev()
+                        .find(|rule| rule.range[0] <= cp && cp <= rule.range[1])
+                        .map(|rule| rule.replacement)
+                        .unwrap_or(Replacement::Codepoint(cp));
+                    match replacement {
+                        Replacement::Codepoint(cp) => write_char(out, cp, options.emit),
+                        Replacement::String(text) => {
+                            for cp in text.chars() {
+                                write_char(out, cp, options.emit);
+                            }
+                        }
+                    }
                 }
             } else {
                 out.extend_from_slice(cell.text.as_bytes());
@@ -580,6 +631,14 @@ fn format_page(
         blank_rows = blank_rows.saturating_sub(1);
     }
     (blank_rows, blank_cells)
+}
+
+fn write_char(out: &mut Vec<u8>, cp: char, emit: Format) {
+    if emit == Format::Html {
+        html_char(out, cp);
+    } else {
+        out.extend_from_slice(cp.encode_utf8(&mut [0; 4]).as_bytes());
+    }
 }
 
 fn html_char(out: &mut Vec<u8>, cp: char) {
@@ -608,7 +667,19 @@ fn style_close(out: &mut Vec<u8>, emit: Format) {
     });
 }
 
-fn style_open(out: &mut Vec<u8>, style: Style, emit: Format) {
+fn style_open(out: &mut Vec<u8>, mut style: Style, emit: Format, palette: Option<&[[u8; 3]; 256]>) {
+    if let Some(palette) = palette {
+        for color in [
+            &mut style.foreground,
+            &mut style.background,
+            &mut style.underline_color,
+        ] {
+            if let Color::Indexed(index) = *color {
+                let [r, g, b] = palette[usize::from(index)];
+                *color = Color::Rgb(r, g, b);
+            }
+        }
+    }
     let underline = match style.underline {
         Underline::None => 0,
         Underline::Single => 1,

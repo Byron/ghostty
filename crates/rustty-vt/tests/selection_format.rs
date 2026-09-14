@@ -1,6 +1,6 @@
 use rustty_vt::{
     Selection, Terminal,
-    formatter::{Content, Format, Options, TerminalExtra},
+    formatter::{CodepointMap, Content, Format, Options, Replacement, TerminalExtra},
 };
 
 #[test]
@@ -62,6 +62,39 @@ fn full_exports_include_history_and_preserve_wrapped_rows_by_default() {
     assert_eq!(formatter.format().unwrap(), b"abcdefghi");
     formatter.content = Content::None;
     assert!(formatter.format().unwrap().is_empty());
+}
+
+#[test]
+fn formatter_options_borrow_colors_and_replace_text_without_changing_the_source() {
+    let mut terminal = Terminal::new(8, 2, 100);
+    terminal.feed(b"\x1b[31;44;58;5;2ma b");
+    let before = rustty_vt::snapshot::encode_to_vec(&terminal).unwrap();
+    let mut palette: [[u8; 3]; 256] = rustty_vt::default_palette().try_into().unwrap();
+    palette[1] = [1, 2, 3];
+    palette[2] = [4, 5, 6];
+    palette[4] = [7, 8, 9];
+    let maps = [
+        CodepointMap {
+            range: ['a', 'z'],
+            replacement: Replacement::Codepoint('X'),
+        },
+        CodepointMap {
+            range: ['b', 'b'],
+            replacement: Replacement::String("<&é"),
+        },
+    ];
+    let mut formatter = terminal.screen().formatter(Format::Html);
+    formatter.options.foreground = Some([10, 11, 12]);
+    formatter.options.background = Some([13, 14, 15]);
+    formatter.options.palette = Some(&palette);
+    formatter.options.codepoint_map = &maps;
+    assert_eq!(formatter.format().unwrap(), b"<div style=\"font-family: monospace; white-space: pre;background-color: #0d0e0f;color: #0a0b0c;\"><div style=\"display: inline;color: rgb(1, 2, 3);background-color: rgb(7, 8, 9);text-decoration-color: rgb(4, 5, 6);\">X &lt;&amp;&#233;</div></div>");
+    formatter.options.emit = Format::Plain;
+    assert_eq!(formatter.format().unwrap(), "X <&é".as_bytes());
+    assert_eq!(
+        rustty_vt::snapshot::encode_to_vec(&terminal).unwrap(),
+        before
+    );
 }
 
 #[test]

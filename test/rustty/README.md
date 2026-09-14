@@ -219,9 +219,19 @@ individually or together. Exports preserve native ordering, including replaying
 the pending-wrap edge cell before restoring cursor attributes. Direct Rust tests
 also replay full and state-only exports into another terminal and check that
 exporting leaves the source unchanged. The native PWD formatter now omits its
-internal NUL terminator; all export bytes are compared directly. Explicit
-foreground/background/palette options, codepoint substitutions and coordinate
-maps remain separate coverage work.
+internal NUL terminator; all export bytes are compared directly. Coordinate maps
+remain separate coverage work.
+
+`--grid --case grid/terminal-format/options` checks explicit foreground/background
+colors, resolution of palette indices to RGB, and codepoint replacements for all
+three export entry points. `Options` borrows a 256-entry palette and a slice of
+`CodepointMap` rules; each rule has an inclusive character range and a character
+or UTF-8 string replacement. The last matching rule wins. HTML escapes replaced
+text, while blank cells keep their original padding behavior. The source terminal
+is unchanged. Cases include empty strings, NUL and combining characters, overlapping
+and inverted ranges, long strings, trim/unwrap combinations, page boundaries and
+pending-wrap cursor replay. The adapters reject invalid Unicode scalars and
+incorrect palette sizes before constructing the native options.
 
 Literal search formats each retained page separately and follows native active
 and history traversal, including repeated soft-wrap matches and trimmed blank

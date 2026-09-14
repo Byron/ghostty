@@ -34,6 +34,7 @@ def case(name, operations, cols=8, rows=4):
 
 
 def requests():
+    yield from option_requests()
     texts = {
         "empty": b"", "spaces": b"   a   \r\n \r\n\tb\r\n",
         "wrap": b"abcdefghijklmnopqrstuvwxyz0123456789",
@@ -91,6 +92,69 @@ def requests():
     data = snapshots.fixture(Path(__file__).resolve().parents[2] / "src/terminal/snapshot/testdata/complete-v1.hex").hex()
     yield case("restored", [{"op": "restore", "data": data}, *formats(),
                 export("terminal", terminal_extra=terminal_extra(TERMINAL_FLAGS, SCREEN_FLAGS))])
+
+
+def option_formats(**options):
+    for scope, emit, unwrap, trim in itertools.product(
+            ("screen", "terminal", "selection"), ("plain", "vt", "html"), (False, True), (False, True)):
+        yield grid("format_" + scope, format={"emit": emit, "unwrap": unwrap, "trim": trim, **options})
+
+
+def option_requests():
+    select = grid("select", start={"tag": "screen", "x": 0, "y": 0}, end={"x": 7, "y": 3})
+    palette = [[i, 255 - i, (i * 37) % 256] for i in range(256)]
+    styled = b"\x1b[31;44;58;5;2mA \x1b[38;2;1;2;3mB\x1b[0m\r\n\x1b[44m\x1b[2K\x1b[5GZ"
+    for foreground, background, resolved in itertools.product((None, [1, 23, 255]), (None, [255, 9, 2]), (False, True)):
+        options = {"foreground": foreground, "background": background, "palette": palette if resolved else None}
+        name = f"options/colors/{foreground}/{background}/{resolved}"
+        yield case(name, [styled, select, *option_formats(**options)])
+    yield case("options/colors/empty", [*option_formats(foreground=[1, 2, 3], background=[4, 5, 6], palette=palette)])
+    yield case("options/colors/pages", [b"\x1b[31;44mword\r\n" * 90,
+               *option_formats(foreground=[1, 2, 3], background=[4, 5, 6], palette=palette)], cols=1024, rows=3)
+
+    def rule(first, last, replacement):
+        return {"range": [ord(first), ord(last)], "replacement": replacement}
+
+    maps = {
+        "empty": [],
+        "latin": [rule("a", "z", {"codepoint": ord("X")})],
+        "overlap": [rule("a", "z", {"codepoint": ord("X")}), rule("b", "q", {"string": '<&é"\''})],
+        "unicode": [rule("\0", "\U0010ffff", {"codepoint": ord("🙂")})],
+        "grapheme": [rule("\u0301", "\u0301", {"string": "<combining>"})],
+        "empty-string": [rule("a", "z", {"string": ""})],
+        "spaces": [rule(" ", " ", {"string": "<space>"})],
+        "unwritten": [rule("\0", "\0", {"string": "<empty>"})],
+        "inverted": [rule("z", "a", {"string": "unused"})],
+        "control": [rule("b", "b", {"string": "\0\t\n\x1b\x07"})],
+        "nul": [rule("a", "a", {"codepoint": 0})],
+        "long": [rule("b", "b", {"string": "界" * 1025})],
+    }
+    text = "  abc界 e\u0301q\r\n\x1b[31;44;58;5;2ma b\x1b[0m\r\n\x1b[44m\x1b[2K\x1b[6Gz".encode()
+    for name, mapping in maps.items():
+        yield case("options/map/" + name, [text, select, *option_formats(codepoint_map=mapping)])
+    mapping = [rule("a", "a", {"string": "<&>"})]
+    yield case("options/map/pages", [("a" * 1023 + "界").encode() * 35,
+               *option_formats(codepoint_map=mapping)], cols=1024, rows=3)
+    yield case("options/pending-wrap", [b"\x1b[31mabcx\x1b[32m", *[
+        grid("format_" + scope, format={"emit": emit, "foreground": [1, 2, 3], "background": [4, 5, 6],
+             "palette": palette, "codepoint_map": [rule("x", "x", {"string": "<&"})]},
+             format_content=content, **{scope + "_extra": screen_extra(SCREEN_FLAGS) if scope == "screen"
+                                      else terminal_extra(TERMINAL_FLAGS, SCREEN_FLAGS)})
+        for scope, emit, content in itertools.product(("screen", "terminal"), ("plain", "vt", "html"), ("all", "none"))]], cols=4)
+    for size in (0, 1, 255, 257):
+        request, covers = case(f"options/invalid/palette-{size}", [grid("format_screen", format={"palette": [[0, 0, 0]] * size})])
+        request["expected_error"] = "InvalidFormatPalette"
+        yield request, covers
+    for value in (0xd800, 0xdfff, 0x110000, 0xffffffff):
+        for field in ("range", "replacement"):
+            invalid = rule("a", "z", {"codepoint": ord("X")})
+            if field == "range":
+                invalid["range"][1] = value
+            else:
+                invalid["replacement"]["codepoint"] = value
+            request, covers = case(f"options/invalid/{field}-{value}", [grid("format_screen", format={"codepoint_map": [invalid]})])
+            request["expected_error"] = "InvalidCodepoint"
+            yield request, covers
 
 
 def snapshot_requests(reference):

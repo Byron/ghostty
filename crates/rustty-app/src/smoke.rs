@@ -17,6 +17,7 @@ fn hover_measurement_restarts_for_motion_and_leaving_but_not_duplicate_events() 
         original: None,
         closed: None,
         idle_frames: 0,
+        progress_pane: None,
         progress_started: now,
         progress_frames: 0,
         progress_seconds: 0.0,
@@ -48,6 +49,7 @@ pub(super) struct Smoke {
     original: Option<Id>,
     closed: Option<(Id, Instant)>,
     idle_frames: u64,
+    progress_pane: Option<Id>,
     progress_started: Instant,
     progress_frames: u64,
     progress_seconds: f64,
@@ -82,6 +84,7 @@ impl Smoke {
             original: None,
             closed: None,
             idle_frames: 0,
+            progress_pane: None,
             progress_started: Instant::now(),
             progress_frames: 0,
             progress_seconds: 0.0,
@@ -122,6 +125,19 @@ impl Smoke {
         }
     }
     pub fn step(&mut self, app: &mut App, event_loop: &ActiveEventLoop) -> Result<bool> {
+        if self.offscreen {
+            // This mode exercises visible-host scheduling with offscreen Metal
+            // output, even if macOS occludes its disposable test window.
+            for host in app.windows.values_mut() {
+                if host.occluded {
+                    host.occluded = false;
+                    host.repaint();
+                    eprintln!(
+                        "Native smoke: continuing offscreen rendering after native occlusion"
+                    );
+                }
+            }
+        }
         if Instant::now() > self.deadline {
             let windows: Vec<_> = app
                 .windows
@@ -308,12 +324,17 @@ impl Smoke {
                     check_pointer_targets(app, host)?;
                     check_terminal_frames(app, event_loop, host)?;
                     self.idle_frames = host.frames;
+                    self.progress_pane = Some(pane);
                     self.progress_started = Instant::now();
                     app.panes
                         .get_mut(&pane)
                         .unwrap()
                         .activity
                         .progress_reported(3, None, self.progress_started);
+                    // Changing keyboard focus must not leave the pane whose
+                    // animation we started running during the later idle check.
+                    let other = *host.rects.keys().find(|&&id| id != pane).unwrap();
+                    app.focus_pane(host.id, other);
                     host.repaint();
                     self.next = self.progress_started + Duration::from_secs(2);
                     self.stage = 7;
@@ -393,7 +414,7 @@ impl Smoke {
                     self.progress_frames as f64 / self.progress_seconds
                 );
                 app.panes
-                    .get_mut(&pane)
+                    .get_mut(&self.progress_pane.unwrap())
                     .unwrap()
                     .activity
                     .progress_reported(1, Some(65), Instant::now());

@@ -3,7 +3,6 @@ use crate::query::{self, Query};
 use crate::screen::*;
 use crate::unicode::{self, properties};
 use crate::{clipboard, dnd};
-use base64::Engine;
 use rustty_parser::{Event, MAX_OSC_BYTES, Parser};
 
 /// Host actions are returned in input order. The terminal never accesses the OS.
@@ -2398,12 +2397,20 @@ impl Terminal {
             }
             1337 => {
                 if let Some(split) = data.iter().position(|&byte| byte == b'=')
-                    && data[..split].eq_ignore_ascii_case(b"CurrentDir")
                     && split + 1 < data.len()
                 {
-                    let directory = &data[split + 1..];
-                    self.set_working_directory(directory);
-                    effects.push(Effect::WorkingDirectory(directory.to_vec()));
+                    let value = &data[split + 1..];
+                    if data[..split].eq_ignore_ascii_case(b"CurrentDir") {
+                        self.set_working_directory(value);
+                        effects.push(Effect::WorkingDirectory(value.to_vec()));
+                    } else if data[..split].eq_ignore_ascii_case(b"Copy")
+                        && let Some(encoded) = value.strip_prefix(b":")
+                        && !encoded.is_empty()
+                        && let Some(write) =
+                            clipboard::Write::decode_osc52(clipboard::Location::Standard, encoded)
+                    {
+                        effects.push(Effect::ClipboardWrite(write));
+                    }
                 }
             }
             52 => {
@@ -2420,30 +2427,8 @@ impl Terminal {
                                 clipboard::Terminator::St
                             },
                         )));
-                    } else {
-                        let engine = base64::engine::general_purpose::GeneralPurpose::new(
-                            &base64::alphabet::STANDARD,
-                            base64::engine::general_purpose::GeneralPurposeConfig::new()
-                                .with_decode_allow_trailing_bits(true)
-                                .with_decode_padding_mode(if encoded.ends_with(b"=") {
-                                    base64::engine::DecodePaddingMode::RequireCanonical
-                                } else {
-                                    base64::engine::DecodePaddingMode::RequireNone
-                                }),
-                        );
-                        if let Ok(data) = engine.decode(encoded) {
-                            let contents = if encoded.is_empty() {
-                                Vec::new()
-                            } else {
-                                vec![clipboard::Content {
-                                    mime: b"text/plain".to_vec(),
-                                    data: data.into(),
-                                }]
-                            };
-                            effects.push(Effect::ClipboardWrite(clipboard::Write::osc52(
-                                location, contents,
-                            )));
-                        }
+                    } else if let Some(write) = clipboard::Write::decode_osc52(location, encoded) {
+                        effects.push(Effect::ClipboardWrite(write));
                     }
                 }
             }

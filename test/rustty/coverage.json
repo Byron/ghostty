@@ -134,7 +134,7 @@
     {
       "id": "clipboard",
       "status": "partial",
-      "remaining": "OSC 52/5522 metadata, binary reads/writes, MIME filtering, streamed base64, aliases, statuses, callback absence, configured limits, session grants, one-time paste grants and exact 8 MiB OSC capture boundaries are compared; OSC 1337, allocation failures and complete size limits remain."
+      "remaining": "OSC 52/5522 metadata, binary reads/writes, MIME filtering, streamed base64, aliases, statuses, callback absence, configured limits, session grants, one-time paste grants and exact 8 MiB OSC capture boundaries are compared. OSC 1337 Copy shares OSC 52 decoding and host policy; case-insensitive keys, binary data, malformed/query/empty values, fixed capture boundaries, disabled callbacks, reply statuses, event order and direct-reset continuation pass 645 comparisons across 215 fixtures. Allocation failures and complete size limits remain."
     },
     {
       "id": "drag-and-drop",

@@ -77,6 +77,25 @@ fn assert_references(screen: &Screen) {
 }
 
 #[test]
+fn grapheme_growth_uses_native_page_capacity() {
+    let mut terminal = Terminal::new(1024, 2, 100);
+    terminal.feed("a\u{301}".repeat(512).as_bytes());
+    let page = &terminal.screen().pages.pages[0];
+    assert_eq!(page.capacity.grapheme_bytes, 8192);
+    assert_eq!(page.graphemes.used_bytes(), 8192);
+    assert_eq!(page.rows, 2);
+    let capacity_rows = u32::from(page.capacity.rows);
+    terminal.feed("a\u{301}".as_bytes());
+    // The live bytes project to 4096 bytes per row, plus 25% headroom.
+    // Native page alignment determines how many row slots fit in the page.
+    assert_eq!(
+        terminal.screen().pages.pages[0].capacity.grapheme_bytes,
+        5120 * capacity_rows
+    );
+    assert_references(terminal.screen());
+}
+
+#[test]
 fn resource_ownership_survives_edits_reflow_snapshots_and_eviction() {
     for columns in [8, 80, 1024] {
         let mut terminal = Terminal::with_limits(columns, 4, ScrollbackLimits::default());

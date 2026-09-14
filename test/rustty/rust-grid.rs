@@ -10,6 +10,24 @@ use rustty_vt::{GridPoint, Screen, ScrollbackLimits, Selection, Terminal, Tracke
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FormatOptions {
+    emit: rustty_vt::formatter::Format,
+    unwrap: Option<bool>,
+    trim: Option<bool>,
+}
+
+impl FormatOptions {
+    fn options(self, selection: bool) -> rustty_vt::formatter::Options {
+        rustty_vt::formatter::Options {
+            emit: self.emit,
+            unwrap: self.unwrap.unwrap_or(selection),
+            trim: self.trim.unwrap_or(true),
+        }
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Point {
@@ -48,7 +66,10 @@ pub struct Operation {
     trim_line: Option<bool>,
     semantic_prompt_boundary: Option<bool>,
     adjustment: Option<Adjustment>,
-    format: Option<rustty_vt::formatter::Options>,
+    format: Option<FormatOptions>,
+    format_content: Option<String>,
+    screen_extra: Option<rustty_vt::formatter::ScreenExtra>,
+    terminal_extra: Option<rustty_vt::formatter::TerminalExtra>,
     gesture: Option<GestureOptions>,
 }
 
@@ -108,6 +129,13 @@ impl Context {
             "observe" => {}
             "format_selection" => {
                 if terminal.screen().selection.is_none() {
+                    status = "no_value";
+                }
+            }
+            "format_screen" | "format_terminal" => {
+                if op.format_content.as_deref() == Some("selection")
+                    && terminal.screen().selection.is_none()
+                {
                     status = "no_value";
                 }
             }
@@ -420,7 +448,38 @@ impl Context {
                 .screen()
                 .selection
                 .and_then(|selection| {
-                    terminal.format_selection(selection, op.format.unwrap_or_default())
+                    terminal
+                        .format_selection(selection, op.format.unwrap_or_default().options(true))
+                })
+                .map(|bytes| super::hex(&bytes))
+        } else if matches!(op.action.as_str(), "format_screen" | "format_terminal") {
+            use rustty_vt::formatter::Content;
+            let content = match op.format_content.as_deref().unwrap_or("all") {
+                "all" => Some(Content::All),
+                "none" => Some(Content::None),
+                "selection" => terminal.screen().selection.map(Content::Selection),
+                _ => return Err("InvalidFormatContent"),
+            };
+            content
+                .and_then(|content| {
+                    let options = op.format.unwrap_or_default().options(false);
+                    if op.action == "format_terminal" {
+                        let mut formatter = terminal.formatter(options.emit);
+                        formatter.options = options;
+                        formatter.content = content;
+                        if let Some(extra) = op.terminal_extra {
+                            formatter.extra = extra;
+                        }
+                        formatter.format()
+                    } else {
+                        let mut formatter = terminal.screen().formatter(options.emit);
+                        formatter.options = options;
+                        formatter.content = content;
+                        if let Some(extra) = op.screen_extra {
+                            formatter.extra = extra;
+                        }
+                        formatter.format()
+                    }
                 })
                 .map(|bytes| super::hex(&bytes))
         } else {

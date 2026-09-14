@@ -1,4 +1,4 @@
-//! Selection export using native plain text, VT and HTML formatting rules.
+//! Plain text, VT and HTML exports with optional terminal/screen state replay.
 use crate::{Color, Row, Screen, Selection, Style, Terminal, Underline};
 use serde::{Deserialize, Serialize};
 
@@ -28,55 +28,262 @@ impl Default for Options {
     }
 }
 
-impl Terminal {
-    /// Export a selection with its palette and current style/hyperlink state.
-    /// VT output can contain opaque hyperlink bytes, so it is not always UTF-8.
-    /// This does not replace the active selection or change terminal state.
-    pub fn format_selection(&self, selection: Selection, options: Options) -> Option<Vec<u8>> {
-        let screen = self.screen();
-        let contents = screen.format_selection(selection, options)?;
-        let mut out = Vec::new();
-        if options.emit == Format::Html {
-            out.extend_from_slice(b"<style>:root{");
+impl Options {
+    /// Native full-export defaults. Selection convenience defaults additionally
+    /// unwrap soft-wrapped rows; formatter constructors preserve screen rows.
+    pub const fn new(emit: Format) -> Self {
+        Self {
+            emit,
+            unwrap: false,
+            trim: true,
         }
-        if options.emit != Format::Plain {
-            for (index, [r, g, b]) in self.palette.iter().enumerate() {
-                let value = match options.emit {
-                    Format::Vt => format!("\x1b]4;{index};rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"),
-                    Format::Html => format!("--vt-palette-{index}: #{r:02x}{g:02x}{b:02x};"),
-                    Format::Plain => unreachable!(),
-                };
-                out.extend_from_slice(value.as_bytes());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Content {
+    #[default]
+    All,
+    None,
+    Selection(Selection),
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScreenExtra {
+    pub cursor: bool,
+    pub style: bool,
+    pub hyperlink: bool,
+    pub protection: bool,
+    pub kitty_keyboard: bool,
+    pub charsets: bool,
+}
+
+impl ScreenExtra {
+    pub const NONE: Self = Self {
+        cursor: false,
+        style: false,
+        hyperlink: false,
+        protection: false,
+        kitty_keyboard: false,
+        charsets: false,
+    };
+    pub const STYLES: Self = Self {
+        style: true,
+        hyperlink: true,
+        ..Self::NONE
+    };
+    pub const ALL: Self = Self {
+        cursor: true,
+        style: true,
+        hyperlink: true,
+        protection: true,
+        kitty_keyboard: true,
+        charsets: true,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TerminalExtra {
+    pub palette: bool,
+    pub modes: bool,
+    pub scrolling_region: bool,
+    pub tabstops: bool,
+    pub pwd: bool,
+    pub keyboard: bool,
+    pub screen: ScreenExtra,
+}
+
+impl TerminalExtra {
+    pub const NONE: Self = Self {
+        palette: false,
+        modes: false,
+        scrolling_region: false,
+        tabstops: false,
+        pwd: false,
+        keyboard: false,
+        screen: ScreenExtra::NONE,
+    };
+    pub const STYLES: Self = Self {
+        palette: true,
+        screen: ScreenExtra::STYLES,
+        ..Self::NONE
+    };
+    pub const ALL: Self = Self {
+        palette: true,
+        modes: true,
+        scrolling_region: true,
+        tabstops: true,
+        pwd: true,
+        keyboard: true,
+        screen: ScreenExtra::ALL,
+    };
+}
+
+impl Default for TerminalExtra {
+    fn default() -> Self {
+        Self::STYLES
+    }
+}
+
+/// Export one screen, including history, without changing it. Extras affect
+/// only VT output. HTML retains one outer wrapper per physical page.
+pub struct ScreenFormatter<'a> {
+    pub screen: &'a Screen,
+    pub options: Options,
+    pub content: Content,
+    pub extra: ScreenExtra,
+}
+
+impl<'a> ScreenFormatter<'a> {
+    pub fn new(screen: &'a Screen, emit: Format) -> Self {
+        Self {
+            screen,
+            options: Options::new(emit),
+            content: Content::All,
+            extra: ScreenExtra::NONE,
+        }
+    }
+
+    /// None indicates invalid selection bounds. No-content exports still emit
+    /// requested extras; all-content exports always include the entire screen.
+    pub fn format(&self) -> Option<Vec<u8>> {
+        let mut out = match self.content {
+            Content::None => Vec::new(),
+            Content::Selection(selection) => {
+                self.screen.format_selection(selection, self.options)?
             }
-        }
-        if options.emit == Format::Html {
-            out.extend_from_slice(b"}</style>");
-        }
-        out.extend_from_slice(&contents);
-        if options.emit == Format::Vt {
-            style_open(&mut out, screen.cursor.style, Format::Vt);
-            if let Some(uri) = &screen.cursor.hyperlink {
-                out.extend_from_slice(b"\x1b]8;");
-                if let Some(crate::HyperlinkId::Explicit(id)) = &screen.cursor.hyperlink_id {
-                    out.extend_from_slice(b"id=");
-                    out.extend_from_slice(id);
-                }
-                out.push(b';');
-                out.extend_from_slice(
-                    screen
-                        .cursor
-                        .hyperlink_raw
-                        .as_deref()
-                        .unwrap_or(uri.as_bytes()),
-                );
-                out.extend_from_slice(b"\x1b\\");
-            }
+            Content::All => self.screen.format_selection(
+                Selection {
+                    start: self.screen.point(0, 0)?,
+                    end: self.screen.point(
+                        self.screen.history.len() + self.screen.rows.len() - 1,
+                        self.screen.rows.last()?.cells.len() - 1,
+                    )?,
+                    rectangular: false,
+                },
+                self.options,
+            )?,
+        };
+        if self.options.emit == Format::Vt {
+            screen_extra(&mut out, self.screen, self.options, self.extra);
         }
         Some(out)
     }
 }
 
+/// Export the currently active screen. By default styled exports include the
+/// palette and current style/hyperlink; use ALL extras for state reconstruction.
+/// Format both screens separately after a no-content terminal export if needed.
+pub struct TerminalFormatter<'a> {
+    pub terminal: &'a Terminal,
+    pub options: Options,
+    pub content: Content,
+    pub extra: TerminalExtra,
+}
+
+impl<'a> TerminalFormatter<'a> {
+    pub fn new(terminal: &'a Terminal, emit: Format) -> Self {
+        Self {
+            terminal,
+            options: Options::new(emit),
+            content: Content::All,
+            extra: TerminalExtra::STYLES,
+        }
+    }
+
+    pub fn format(&self) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let terminal = self.terminal;
+        let emit = self.options.emit;
+        if self.extra.palette {
+            palette(&mut out, terminal, emit);
+        }
+        if emit == Format::Vt {
+            if self.extra.modes {
+                for ((private, number), current) in terminal.modes.changed() {
+                    out.extend_from_slice(
+                        format!(
+                            "\x1b[{}{number}{}",
+                            if private { "?" } else { "" },
+                            if current { "h" } else { "l" }
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+            if self.extra.tabstops {
+                out.extend_from_slice(b"\x1b[3g");
+                for (col, &enabled) in terminal.tabstops.iter().enumerate() {
+                    if enabled {
+                        out.extend_from_slice(format!("\x1b[{}G\x1bH", col + 1).as_bytes());
+                    }
+                }
+                out.extend_from_slice(b"\x1b[H");
+            }
+        }
+        out.extend_from_slice(
+            &ScreenFormatter {
+                screen: terminal.screen(),
+                options: self.options,
+                content: self.content,
+                extra: ScreenExtra::NONE,
+            }
+            .format()?,
+        );
+        if emit == Format::Vt {
+            if self.extra.scrolling_region {
+                let region = terminal.margins;
+                if region.top != 0 || region.bottom != usize::from(terminal.rows) - 1 {
+                    out.extend_from_slice(
+                        format!("\x1b[{};{}r", region.top + 1, region.bottom + 1).as_bytes(),
+                    );
+                }
+                if region.left != 0 || region.right != usize::from(terminal.cols) - 1 {
+                    out.extend_from_slice(
+                        format!("\x1b[{};{}s", region.left + 1, region.right + 1).as_bytes(),
+                    );
+                }
+            }
+            if self.extra.keyboard && terminal.modify_other_keys {
+                out.extend_from_slice(b"\x1b[>4;2m");
+            }
+            if self.extra.pwd && !terminal.working_directory_bytes().is_empty() {
+                out.extend_from_slice(b"\x1b]7;");
+                out.extend_from_slice(terminal.working_directory_bytes());
+                out.extend_from_slice(b"\x1b\\");
+            }
+            screen_extra(&mut out, terminal.screen(), self.options, self.extra.screen);
+        }
+        Some(out)
+    }
+}
+
+impl Terminal {
+    pub fn formatter(&self, emit: Format) -> TerminalFormatter<'_> {
+        TerminalFormatter::new(self, emit)
+    }
+
+    /// Export a selection with its palette and current style/hyperlink state.
+    /// VT output can contain opaque hyperlink bytes, so it is not always UTF-8.
+    /// This does not replace the active selection or change terminal state.
+    pub fn format_selection(&self, selection: Selection, options: Options) -> Option<Vec<u8>> {
+        TerminalFormatter {
+            terminal: self,
+            options,
+            content: Content::Selection(selection),
+            extra: TerminalExtra::STYLES,
+        }
+        .format()
+    }
+}
+
 impl Screen {
+    pub fn formatter(&self, emit: Format) -> ScreenFormatter<'_> {
+        ScreenFormatter::new(self, emit)
+    }
+
     /// Export inclusive bounds, retaining physical page breaks and native wide-cell rules.
     /// Screen exports reference palette indices; Terminal exports include the palette.
     pub fn format_selection(&self, selection: Selection, options: Options) -> Option<Vec<u8>> {
@@ -131,6 +338,102 @@ impl Screen {
             }
         }
         Some(out)
+    }
+}
+
+fn palette(out: &mut Vec<u8>, terminal: &Terminal, emit: Format) {
+    if emit == Format::Plain {
+        return;
+    }
+    if emit == Format::Html {
+        out.extend_from_slice(b"<style>:root{");
+    }
+    for (index, [r, g, b]) in terminal.palette.iter().enumerate() {
+        let value = match emit {
+            Format::Vt => format!("\x1b]4;{index};rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\"),
+            Format::Html => format!("--vt-palette-{index}: #{r:02x}{g:02x}{b:02x};"),
+            Format::Plain => unreachable!(),
+        };
+        out.extend_from_slice(value.as_bytes());
+    }
+    if emit == Format::Html {
+        out.extend_from_slice(b"}</style>");
+    }
+}
+
+fn screen_extra(out: &mut Vec<u8>, screen: &Screen, options: Options, extra: ScreenExtra) {
+    let cursor = &screen.cursor;
+    if extra.cursor {
+        let wrapped = cursor.pending_wrap && cursor.col == screen.columns - 1;
+        let col = if wrapped && screen.rows[cursor.row].cells[cursor.col].width == 0 {
+            cursor.col - 1
+        } else {
+            cursor.col
+        };
+        out.extend_from_slice(format!("\x1b[{};{}H", cursor.row + 1, col + 1).as_bytes());
+        if wrapped {
+            let point = crate::GridPoint {
+                row: screen.rows[cursor.row].id,
+                col: cursor.col,
+            };
+            // CUP clears pending wrap. Replay the edge cell, including a wide
+            // tail's leading cell, before restoring the requested cursor state.
+            if let Some(bytes) = screen.format_selection(
+                Selection {
+                    start: point,
+                    end: point,
+                    rectangular: false,
+                },
+                options,
+            ) {
+                out.extend_from_slice(&bytes);
+            }
+        }
+    }
+    if extra.style {
+        style_open(out, cursor.style, Format::Vt);
+    }
+    if extra.hyperlink
+        && let Some(uri) = &cursor.hyperlink
+    {
+        out.extend_from_slice(b"\x1b]8;");
+        if let Some(crate::HyperlinkId::Explicit(id)) = &cursor.hyperlink_id {
+            out.extend_from_slice(b"id=");
+            out.extend_from_slice(id);
+        }
+        out.push(b';');
+        out.extend_from_slice(cursor.hyperlink_raw.as_deref().unwrap_or(uri.as_bytes()));
+        out.extend_from_slice(b"\x1b\\");
+    }
+    if extra.protection && cursor.protected {
+        out.extend_from_slice(b"\x1b[1\"q");
+    }
+    let flags = screen.kitty_keyboard.current();
+    if extra.kitty_keyboard && flags != 0 {
+        out.extend_from_slice(format!("\x1b[={flags};1u").as_bytes());
+    }
+    if extra.charsets {
+        use crate::screen::Charset;
+        for (slot, charset) in screen.charset.slots.iter().enumerate() {
+            let final_byte = match charset {
+                Charset::Utf8 => continue,
+                Charset::Ascii => b'B',
+                Charset::British => b'A',
+                Charset::DecSpecial => b'0',
+            };
+            out.extend_from_slice(&[0x1b, b"()*+"[slot], final_byte]);
+        }
+        out.extend_from_slice(match screen.charset.gl {
+            1 => b"\x0e",
+            2 => b"\x1bn",
+            3 => b"\x1bo",
+            _ => b"",
+        });
+        out.extend_from_slice(match screen.charset.gr {
+            1 => b"\x1b~",
+            3 => b"\x1b|",
+            _ => b"",
+        });
     }
 }
 

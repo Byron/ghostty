@@ -32,8 +32,36 @@ pub const Operation = struct {
     trim_line: ?bool = null,
     semantic_prompt_boundary: ?bool = null,
     adjustment: ?vt.Selection.Adjustment = null,
-    format: ?struct { emit: vt.formatter.Format = .plain, unwrap: bool = true, trim: bool = true } = null,
+    format: ?struct { emit: vt.formatter.Format = .plain, unwrap: ?bool = null, trim: ?bool = null } = null,
+    format_content: ?[]const u8 = null,
+    screen_extra: ?ScreenExtra = null,
+    terminal_extra: ?TerminalExtra = null,
     gesture: ?GestureOptions = null,
+};
+const ScreenExtra = struct {
+    cursor: bool = false,
+    style: bool = false,
+    hyperlink: bool = false,
+    protection: bool = false,
+    kitty_keyboard: bool = false,
+    charsets: bool = false,
+
+    fn native(self: ScreenExtra) vt.formatter.ScreenFormatter.Extra {
+        return .{ .cursor = self.cursor, .style = self.style, .hyperlink = self.hyperlink, .protection = self.protection, .kitty_keyboard = self.kitty_keyboard, .charsets = self.charsets };
+    }
+};
+const TerminalExtra = struct {
+    palette: bool = true,
+    modes: bool = false,
+    scrolling_region: bool = false,
+    tabstops: bool = false,
+    pwd: bool = false,
+    keyboard: bool = false,
+    screen: ScreenExtra = .{ .style = true, .hyperlink = true },
+
+    fn native(self: TerminalExtra) vt.formatter.TerminalFormatter.Extra {
+        return .{ .palette = self.palette, .modes = self.modes, .scrolling_region = self.scrolling_region, .tabstops = self.tabstops, .pwd = self.pwd, .keyboard = self.keyboard, .screen = self.screen.native() };
+    }
 };
 const GestureOptions = struct {
     time: ?i64 = null,
@@ -139,6 +167,8 @@ pub const Context = struct {
             // Reading is explicit so writes retain their original boundaries.
         } else if (std.mem.eql(u8, op.action, "format_selection")) {
             if (screen.selection == null) status = "no_value";
+        } else if (std.mem.eql(u8, op.action, "format_screen") or std.mem.eql(u8, op.action, "format_terminal")) {
+            if (std.mem.eql(u8, op.format_content orelse "all", "selection") and screen.selection == null) status = "no_value";
         } else if (std.mem.eql(u8, op.action, "select")) {
             if (screen.pages.pin(op.start.native())) |start| {
                 if (screen.pages.pin(op.end.native())) |end| {
@@ -385,11 +415,30 @@ pub const Context = struct {
         const formatted = if (std.mem.eql(u8, op.action, "format_selection")) formatted: {
             const selection = active.selection orelse break :formatted null;
             const opts: @TypeOf(op.format.?) = op.format orelse .{};
-            var formatter: vt.formatter.TerminalFormatter = .init(terminal, .{ .emit = opts.emit, .unwrap = opts.unwrap, .trim = opts.trim });
+            var formatter: vt.formatter.TerminalFormatter = .init(terminal, .{ .emit = opts.emit, .unwrap = opts.unwrap orelse true, .trim = opts.trim orelse true });
             formatter.content = .{ .selection = selection };
             var output: std.Io.Writer.Allocating = .init(alloc);
             defer output.deinit();
             try formatter.format(&output.writer);
+            break :formatted try hex(alloc, output.written());
+        } else if (std.mem.eql(u8, op.action, "format_screen") or std.mem.eql(u8, op.action, "format_terminal")) formatted: {
+            const tag = op.format_content orelse "all";
+            const content: vt.formatter.ScreenFormatter.Content = if (std.mem.eql(u8, tag, "none")) .none else if (std.mem.eql(u8, tag, "all")) .{ .selection = null } else if (std.mem.eql(u8, tag, "selection")) .{ .selection = active.selection orelse break :formatted null } else return error.InvalidFormatContent;
+            const opts: @TypeOf(op.format.?) = op.format orelse .{};
+            const options: vt.formatter.Options = .{ .emit = opts.emit, .unwrap = opts.unwrap orelse false, .trim = opts.trim orelse true };
+            var output: std.Io.Writer.Allocating = .init(alloc);
+            defer output.deinit();
+            if (std.mem.eql(u8, op.action, "format_terminal")) {
+                var formatter: vt.formatter.TerminalFormatter = .init(terminal, options);
+                formatter.content = content;
+                if (op.terminal_extra) |extra| formatter.extra = extra.native();
+                try formatter.format(&output.writer);
+            } else {
+                var formatter: vt.formatter.ScreenFormatter = .init(active, options);
+                formatter.content = content;
+                if (op.screen_extra) |extra| formatter.extra = extra.native();
+                try formatter.format(&output.writer);
+            }
             break :formatted try hex(alloc, output.written());
         } else null;
         const selection = if (active.selection) |selection| sel: {

@@ -79,6 +79,9 @@ pub struct Session {
     events: mpsc::Receiver<SessionEvent>,
     pending_input: Arc<PendingInput>,
     exited: Arc<AtomicBool>,
+    #[cfg(target_os = "macos")]
+    close_child: std::os::unix::net::UnixStream,
+    #[cfg(not(target_os = "macos"))]
     close_child: mpsc::Sender<()>,
 }
 
@@ -130,6 +133,9 @@ impl Session {
         let (events_tx, events) = mpsc::sync_channel(256);
         let pending_input = Arc::new(PendingInput::default());
         let exited = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let (close_child, child_closed) = std::os::unix::net::UnixStream::pair()?;
+        #[cfg(not(target_os = "macos"))]
         let (close_child, child_closed) = mpsc::channel();
         let (started_tx, started) = mpsc::sync_channel(1);
 
@@ -388,6 +394,9 @@ impl Session {
     pub fn close(&self) {
         self.pending_input.close();
         let _ = self.input.send(IoCommand::Close);
+        #[cfg(target_os = "macos")]
+        let _ = self.close_child.shutdown(std::net::Shutdown::Write);
+        #[cfg(not(target_os = "macos"))]
         let _ = self.close_child.send(());
     }
     pub fn apply_config(&self, config: &Config) -> io::Result<()> {
@@ -433,7 +442,8 @@ impl Drop for Session {
 
 fn wait_for_child(
     mut child: Box<dyn Child + Send + Sync>,
-    closed: mpsc::Receiver<()>,
+    #[cfg(target_os = "macos")] closed: std::os::unix::net::UnixStream,
+    #[cfg(not(target_os = "macos"))] closed: mpsc::Receiver<()>,
 ) -> io::Result<ExitStatus> {
     loop {
         match child.try_wait() {
@@ -443,12 +453,23 @@ fn wait_for_child(
             // Even a failed status query must not discard an owned child.
             Err(_) => break,
         }
-        // ponytail: one owner polls at 50 ms to receive close requests; use native
-        // process notifications if very large session counts need fewer wakeups.
+        #[cfg(target_os = "macos")]
+        match wait_for_child_event(child.process_id(), &closed) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => break,
+        }
+        // ponytail: other platforms still poll; replace with their native
+        // process notifications when desktop support reaches them.
+        #[cfg(not(target_os = "macos"))]
         match closed.recv_timeout(Duration::from_millis(50)) {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+    // Closing or failing to register may race with a natural exit. Reap that
+    // exit before attempting to signal the process.
+    if let Ok(Some(status)) = child.try_wait() {
+        return Ok(status);
     }
     // Unlike clone_killer(), the owned portable-pty child escalates SIGHUP to
     // SIGKILL on Unix. Both its grace period and wait stay off the UI thread.
@@ -457,6 +478,70 @@ fn wait_for_child(
         match child.wait() {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             result => return result,
+        }
+    }
+}
+
+/// Block until the process exits (true) or its owner requests close (false).
+#[cfg(target_os = "macos")]
+fn wait_for_child_event(
+    pid: Option<u32>,
+    closed: &std::os::unix::net::UnixStream,
+) -> io::Result<bool> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let pid = pid.ok_or_else(|| error("PTY child has no process ID"))?;
+    // SAFETY: a successful kqueue call returns a new owned descriptor.
+    let fd = unsafe { libc::kqueue() };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let queue = unsafe { OwnedFd::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(queue.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let event = |ident, filter, fflags| libc::kevent {
+        ident,
+        filter,
+        flags: libc::EV_ADD | libc::EV_ONESHOT,
+        fflags,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let changes = [
+        event(pid as usize, libc::EVFILT_PROC, libc::NOTE_EXIT),
+        event(closed.as_raw_fd() as usize, libc::EVFILT_READ, 0),
+    ];
+    let mut ready = event(0, 0, 0);
+    loop {
+        // Both filters are installed before blocking, with no timeout. Closing
+        // the socket is persistent EOF, including before this registration.
+        // SAFETY: the arrays and both descriptors remain live through kevent.
+        let count = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                changes.as_ptr(),
+                changes.len() as i32,
+                &mut ready,
+                1,
+                std::ptr::null(),
+            )
+        };
+        let failure = if count < 0 {
+            io::Error::last_os_error()
+        } else if ready.flags & libc::EV_ERROR != 0 && ready.data != 0 {
+            io::Error::from_raw_os_error(ready.data as i32)
+        } else if count > 0 {
+            return Ok(ready.filter == libc::EVFILT_PROC);
+        } else {
+            continue;
+        };
+        if failure.raw_os_error() == Some(libc::ESRCH) {
+            // The child exited between try_wait and registering NOTE_EXIT.
+            return Ok(true);
+        }
+        if failure.kind() != io::ErrorKind::Interrupted {
+            return Err(failure);
         }
     }
 }
@@ -893,6 +978,56 @@ mod tests {
                 session.snapshot().unwrap();
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn idle_child_waiter_checks_status_only_when_woken() {
+        use portable_pty::ChildKiller;
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Debug)]
+        struct IdleChild(Arc<AtomicUsize>, mpsc::Sender<()>);
+        impl ChildKiller for IdleChild {
+            fn kill(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+            fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+                unreachable!("the waiter owns and kills its child")
+            }
+        }
+        impl Child for IdleChild {
+            fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                let _ = self.1.send(());
+                Ok(None)
+            }
+            fn wait(&mut self) -> io::Result<ExitStatus> {
+                Ok(ExitStatus::with_exit_code(0))
+            }
+            fn process_id(&self) -> Option<u32> {
+                // Watch a process that stays alive; the fake kill never signals it.
+                Some(std::process::id())
+            }
+        }
+
+        let checks = Arc::new(AtomicUsize::new(0));
+        let (entered, ready) = mpsc::channel();
+        let (close, closed) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (done, finished) = mpsc::channel();
+        let child = IdleChild(checks.clone(), entered);
+        thread::spawn(move || done.send(wait_for_child(Box::new(child), closed)).unwrap());
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread::sleep(Duration::from_millis(180));
+        let idle_checks = checks.load(Ordering::SeqCst);
+        drop(close);
+        assert!(
+            finished
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(idle_checks, 1, "an idle child must not be polled");
     }
 
     #[test]

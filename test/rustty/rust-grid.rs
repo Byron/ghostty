@@ -1,5 +1,5 @@
 //! Direct selection/search/tracked-reference APIs, independent of snapshots.
-use rustty_vt::search::ViewportSearch;
+use rustty_vt::search::{Direction, SelectScroll, Status, TerminalSearch, Tick};
 use rustty_vt::selection::{
     Adjustment, DEFAULT_LINE_WHITESPACE, DEFAULT_WORD_BOUNDARIES, SelectLine,
 };
@@ -39,6 +39,7 @@ pub struct Operation {
     rectangle: bool,
     needle: String,
     active_dirty: Option<bool>,
+    scroll: Option<bool>,
     delta: i32,
     lines: Option<usize>,
     bytes: Option<usize>,
@@ -85,7 +86,7 @@ struct Handle {
 #[derive(Default)]
 pub struct Context {
     handles: Vec<Handle>,
-    search: ViewportSearch,
+    search: TerminalSearch,
     gesture: SelectionGesture,
     gesture_used: bool,
 }
@@ -99,6 +100,8 @@ impl Context {
         let mut status = "ok";
         let mut matches = None;
         let mut search_needle = None;
+        let mut search_state = None;
+        let mut search_tick = None;
         let mut selection_result = None;
         let columns = terminal.cols;
         match op.action.as_str() {
@@ -317,13 +320,12 @@ impl Context {
                 search_needle = Some(super::hex(self.search.needle()));
             }
             "search_feed" => {
-                self.search
-                    .feed(terminal.screen(), op.active_dirty.unwrap_or(true));
+                self.search.feed(terminal, op.active_dirty.unwrap_or(true));
             }
             "search_viewport" => {
                 matches = Some(
                     self.search
-                        .matches()
+                        .viewport_matches()
                         .iter()
                         .map(|value| {
                             json!({"start": location(terminal.screen(), value.start),
@@ -332,7 +334,86 @@ impl Context {
                         .collect::<Vec<_>>(),
                 );
             }
+            "search_status" | "search_selected" => {}
+            "search_tick" => {
+                search_tick = Some(match self.search.tick() {
+                    Tick::Progress => "progress",
+                    Tick::Blocked => "blocked",
+                    Tick::Complete => "complete",
+                });
+            }
+            "search_run" => self.search.run(terminal),
+            "search_matches" | "search_match" => {
+                let screen = if self.search.is_alternate_screen() {
+                    terminal.alternate_screen()
+                } else {
+                    Some(terminal.primary_screen())
+                };
+                let found: Vec<_> = if op.action == "search_match" {
+                    self.search.match_at(op.id as usize).into_iter().collect()
+                } else {
+                    self.search.matches().collect()
+                };
+                if op.action == "search_match" && found.is_empty() {
+                    status = "no_value";
+                }
+                matches = Some(
+                    found
+                        .into_iter()
+                        .map(|value| {
+                            json!({
+                                "start": screen.map(|screen| location(screen, value.start)),
+                                "end": screen.map(|screen| location(screen, value.end)),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+            "search_next" | "search_prev" => {
+                let direction = if op.action == "search_next" {
+                    Direction::Next
+                } else {
+                    Direction::Previous
+                };
+                let scroll = if op.scroll.unwrap_or(true) {
+                    SelectScroll::IfNeeded
+                } else {
+                    SelectScroll::None
+                };
+                if !self.search.select(terminal, direction, scroll) {
+                    status = "no_value";
+                }
+            }
             _ => return Err("UnsupportedGridAction"),
+        }
+        if matches!(
+            op.action.as_str(),
+            "search_status"
+                | "search_selected"
+                | "search_tick"
+                | "search_run"
+                | "search_matches"
+                | "search_match"
+                | "search_next"
+                | "search_prev"
+        ) {
+            let screen = if self.search.is_alternate_screen() {
+                terminal.alternate_screen()
+            } else {
+                Some(terminal.primary_screen())
+            };
+            let selected = self.search.selected_match().map(|value| {
+                json!({
+                    "start": screen.map(|screen| location(screen, value.start)),
+                    "end": screen.map(|screen| location(screen, value.end)),
+                })
+            });
+            search_state = Some(json!({
+                "status": match self.search.status() { Status::Running => "running", Status::FeedRequired => "feed_required", Status::Complete => "complete" },
+                "tick": search_tick, "total": self.search.total_matches(),
+                "selected_index": self.search.selected_index(), "selected_match": selected,
+                "screen": if self.search.is_alternate_screen() { "alternate" } else { "primary" },
+            }));
         }
         let formatted = if op.action == "format_selection" {
             terminal
@@ -363,9 +444,10 @@ impl Context {
         }).collect::<Vec<_>>();
         Ok(
             json!({"action": op.action, "status": status, "matches": matches, "search_needle": search_needle,
+            "search_state": search_state,
             "formatted": formatted,
             "active_screen": if terminal.is_alternate_screen() { "alternate" } else { "primary" },
-            "viewport_top": [0, screen.history.len().saturating_sub(screen.viewport_offset)],
+            "viewport_top": [screen.viewport_top().col, screen.history.len().saturating_sub(screen.viewport_offset)],
             "selection": selection, "selection_result": selection_result, "tracked": handles,
             "gesture": self.gesture_used.then(|| json!({
                 "click_count": self.gesture.click_count(), "behavior": self.gesture.behavior(),

@@ -116,7 +116,9 @@ minimized inherited failures with their original corpus source identifiers.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,
 `clear_selection`, `select_word`, `select_word_between`, `select_line`,
 `select_all`, `select_output`, `adjust_selection`, `format_selection`, `track`, `untrack`, `viewport`, `limits`, `search`,
-`search_needle`, `search_feed`, `search_viewport`, `observe` and the `gesture_*`
+`search_needle`, `search_feed`, `search_viewport`, `search_status`, `search_tick`,
+`search_run`, `search_matches`, `search_match`, `search_selected`, `search_next`,
+`search_prev`, `observe` and the `gesture_*`
 actions described below.
 Points name `active`, `viewport`, `screen` or `history` coordinates. Observations
 translate each implementation's own handles to those coordinates and include
@@ -208,8 +210,35 @@ python3 test/rustty/parity.py --no-build --fixtures target/search-pages.json --m
 These direct search cases use `kind=input` to avoid serializing hundreds of
 thousands of unrelated cells; their search endpoints and result order remain
 unmodified. A reference-process crash is reported as a failure and ends that
-run. Incremental full-history search and complete resource-driven page changes
-remain uncovered, so the search coverage entry remains partial.
+run. Complete resource-driven page changes remain uncovered, so the search
+coverage entry remains partial.
+
+`--grid --case grid/search/terminal/` compares persistent `TerminalSearch`
+progress and selected matches. `search_feed` copies active contents and a
+bounded history window; `search_tick` searches owned data without terminal
+access. `search_status` reports running, feed-required or complete, the active
+screen as of the last feed, total matches and the selected index/bounds.
+`search_run` first feeds current contents and finishes all available history.
+`search_matches` preserves newest-first ordering and native duplicates;
+`search_match` reads the index in `id`. `search_next`/`search_prev` wrap through
+currently available results, with `scroll=false` disabling viewport movement.
+They leave terminal text selection independent of the selected search result.
+
+The 204 fixtures in `terminal_search.py` cover feed/tick transitions, cached
+reads, ASCII-equivalent needle replacement, both screens, selected-match
+retention/fallback, pruning, resize, reset, partial snapshot history restore,
+restored-width edits and needles crossing several pages. All 612 delivery
+comparisons pass without changing native results. Clean feeds retain physical
+cached match coordinates after line edits; search scrolling also retains the
+native viewport pin's column, mapping that anchor through reflow and clearing
+the column when ordinary scrolling resumes from the active viewport. Cached
+history bounds are compared after same-width line movement, including matches
+crossing a page boundary and incomplete history searches.
+Internal owned tracked points expire with their
+search owner and are reclaimed before later tracking, movement or reflow.
+The Rust tests check that tick still works after terminal destruction and that
+dropping search leaves no pins influencing a later resize. Broader resource
+mutation lifetimes and regex extensions remain separate coverage work.
 
 `--grid --case grid/search/viewport/` checks the persistent `ViewportSearch`
 cache against native `TerminalSearch.feed` and `viewportMatches`. Set a byte
@@ -223,8 +252,8 @@ byte endpoints, resets, both screens, resized/restored pages, and full versus
 partial-width row movement with dirty tracking disabled. Layout changes require
 a feed before resolving cached endpoints against a live screen. A live search
 must be cleared before replacing the oracle terminal with a snapshot, as with
-tracked handles. This slice does not implement full-history tick orchestration
-or selected-match navigation.
+tracked handles. Full-history tick orchestration and selected-match navigation
+are handled by `TerminalSearch` above.
 
 `--page-layout` compares native page/resource offsets, table and bitmap
 capacities, column adjustment, and pooled versus exact allocation charge.
@@ -304,8 +333,9 @@ resets, handle reuse and scrollback limits, including release of an inactive
 screen's tracked handle. Restoring a new terminal while
 the adapter owns tracked handles is explicitly unsupported; those external
 lifetimes need a separate API comparison. Complete selection mutation lifetimes,
-formatter coordinate maps and full terminal-state exports remain uncovered, as do
-incremental search and search selection. These grid cases remain part of `--grid` and `--thorough`.
+formatter coordinate maps, full terminal-state exports and resource-driven
+search invalidation remain uncovered. These grid cases remain part of `--grid`
+and `--thorough`.
 
 Native libghostty-vt updates OSC 133 semantic state without command lifecycle
 callbacks. `Terminal::shell_command_events` explicitly enables Rustty's

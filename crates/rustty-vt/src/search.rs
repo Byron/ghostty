@@ -4,6 +4,9 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+mod terminal;
+pub use terminal::{Direction, SelectScroll, Status, TerminalSearch, Tick};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Match {
     pub start: GridPoint,

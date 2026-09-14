@@ -23,6 +23,7 @@ pub const Operation = struct {
     rectangle: bool = false,
     needle: []const u8 = "",
     active_dirty: ?bool = null,
+    scroll: ?bool = null,
     delta: i32 = 0,
     lines: ?usize = null,
     bytes: ?usize = null,
@@ -66,6 +67,14 @@ const Selection = struct {
     text: ?[]const u8,
 };
 const Match = struct { start: ?Location, end: ?Location };
+const SearchState = struct {
+    status: []const u8,
+    tick: ?[]const u8,
+    total: usize,
+    selected_index: ?usize,
+    selected_match: ?Match,
+    screen: []const u8,
+};
 const Bounds = struct { start: ?Location, end: ?Location, rectangle: bool };
 const Tracked = struct {
     id: u32,
@@ -77,6 +86,7 @@ pub const Result = struct {
     status: []const u8,
     matches: ?[]const Match,
     search_needle: ?[]const u8,
+    search_state: ?SearchState,
     active_screen: []const u8,
     viewport_top: ?[2]u32,
     selection: ?Selection,
@@ -121,6 +131,8 @@ pub const Context = struct {
         var status: []const u8 = "ok";
         var matches: ?[]const Match = null;
         var search_needle: ?[]const u8 = null;
+        var search_state: ?SearchState = null;
+        var search_tick: ?[]const u8 = null;
         var selection_result: ?Bounds = null;
         const screen = terminal.screens.active;
         if (std.mem.eql(u8, op.action, "observe")) {
@@ -306,7 +318,58 @@ pub const Context = struct {
                 }
                 matches = results;
             } else matches = &.{};
+        } else if (std.mem.eql(u8, op.action, "search_status") or std.mem.eql(u8, op.action, "search_selected")) {
+            // Read the cached state below, without feeding.
+        } else if (std.mem.eql(u8, op.action, "search_tick")) {
+            search_tick = if (self.search) |*search| @tagName(search.tick()) else "complete";
+        } else if (std.mem.eql(u8, op.action, "search_run")) {
+            if (self.search) |*search| {
+                search.feed(terminal, true);
+                while (true) switch (search.status()) {
+                    .complete => break,
+                    .running => _ = search.tick(),
+                    .feed_required => search.feed(terminal, true),
+                };
+            }
+        } else if (std.mem.eql(u8, op.action, "search_matches") or std.mem.eql(u8, op.action, "search_match")) {
+            const single = std.mem.eql(u8, op.action, "search_match");
+            const searcher = if (self.search) |*search| search.activeScreenSearch() else null;
+            const total = if (searcher) |search| search.matchesLen() else 0;
+            const count = if (single) @intFromBool(op.id < total) else total;
+            const results = try alloc.alloc(Match, count);
+            for (results, 0..) |*result, index| {
+                const search = searcher.?;
+                const found = search.matchAt(if (single) op.id else index).?.untracked();
+                result.* = .{ .start = location(search.screen, found.start), .end = location(search.screen, found.end) };
+            }
+            if (single and count == 0) status = "no_value";
+            matches = results;
+        } else if (std.mem.eql(u8, op.action, "search_next") or std.mem.eql(u8, op.action, "search_prev")) {
+            const selected = if (self.search) |*search| try search.select(
+                terminal,
+                if (std.mem.eql(u8, op.action, "search_next")) .next else .prev,
+                if (op.scroll orelse true) .if_needed else .none,
+            ) else false;
+            if (!selected) status = "no_value";
         } else return error.UnsupportedGridAction;
+
+        for ([_][]const u8{ "search_status", "search_selected", "search_tick", "search_run", "search_matches", "search_match", "search_next", "search_prev" }) |action| {
+            if (!std.mem.eql(u8, action, op.action)) continue;
+            const searcher = if (self.search) |*search| search.activeScreenSearch() else null;
+            const selected = if (searcher) |search| if (search.selectedMatch()) |found| selected: {
+                const bounds = found.untracked();
+                break :selected Match{ .start = location(search.screen, bounds.start), .end = location(search.screen, bounds.end) };
+            } else null else null;
+            search_state = .{
+                .status = if (self.search) |*search| @tagName(search.status()) else "complete",
+                .tick = search_tick,
+                .total = if (searcher) |search| search.matchesLen() else 0,
+                .selected_index = if (searcher) |search| if (search.selected) |value| value.idx else null else null,
+                .selected_match = selected,
+                .screen = if (self.search) |*search| @tagName(search.active_key) else "primary",
+            };
+            break;
+        }
 
         const tracked = try alloc.alloc(Tracked, self.handles.items.len);
         for (self.handles.items, tracked) |handle, *result| {
@@ -343,6 +406,7 @@ pub const Context = struct {
             .status = status,
             .matches = matches,
             .search_needle = search_needle,
+            .search_state = search_state,
             .active_screen = @tagName(terminal.screens.active_key),
             .viewport_top = coordinate(active, .screen, active.pages.getTopLeft(.viewport)),
             .selection = selection,

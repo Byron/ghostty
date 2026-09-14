@@ -480,12 +480,23 @@ pub(crate) enum Charset {
     DecSpecial,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CharsetState {
     pub slots: [Charset; 4],
     pub gl: usize,
     pub gr: usize,
     pub single: Option<usize>,
+}
+
+impl Default for CharsetState {
+    fn default() -> Self {
+        Self {
+            slots: [Charset::Utf8; 4],
+            gl: 0,
+            gr: 2,
+            single: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

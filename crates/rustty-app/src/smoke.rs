@@ -103,7 +103,7 @@ impl Smoke {
         loaded.config.keybinds.retain(|b| !b.flags.global);
     }
     pub fn record(&mut self, event: &'static str) {
-        if self.stage == 4 {
+        if matches!(self.stage, 4 | 8) {
             *self.events.entry(event).or_default() += 1;
         }
     }
@@ -426,9 +426,15 @@ impl Smoke {
                 }
                 self.hidden_title_frames = host.frames.saturating_sub(self.idle_frames);
                 if self.hidden_title_frames > 4 {
+                    let progress: Vec<_> = app
+                        .panes
+                        .iter()
+                        .map(|(&id, pane)| (id, pane.activity.progress()))
+                        .collect();
                     return Err(format!(
-                        "masked hidden-tab titles caused {} redraws",
-                        self.hidden_title_frames
+                        "masked hidden-tab titles caused {} redraws; events: {:?}; progress: {:?}; deadline: {:?}; repaint causes: {:?}",
+                        self.hidden_title_frames, self.events, progress, host.deadline,
+                        app.context.repaint_causes()
                     )
                     .into());
                 }
@@ -482,6 +488,7 @@ impl Smoke {
                 );
                 host.repaint();
                 self.idle_frames = host.frames;
+                self.events.clear();
                 self.next = Instant::now() + Duration::from_millis(1500);
                 self.stage = 4;
             }

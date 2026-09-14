@@ -101,6 +101,7 @@ impl Smoke {
         loaded.config.working_directory = Some(PathBuf::from("/tmp"));
         loaded.config.window_save_state = config::WindowSaveState::Always;
         loaded.config.cursor_style_blink = Some(false);
+        loaded.config.mouse_shift_capture = config::MouseShiftCapture::False;
         loaded.config.progress_style = true;
         loaded.config.undo_timeout = Duration::from_secs(5);
         loaded.config.keybinds.retain(|b| !b.flags.global);
@@ -739,12 +740,14 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
             return Err("OSC 22 pointer shape leaked into another pane".into());
         }
         host.mouse = host.rects[&hovered].center();
-        for (focused_mode, hovered_mode, shift) in [
-            (0, 0, false),
-            (1000, 0, false),
-            (0, 1000, false),
-            (1000, 1000, false),
-            (0, 1000, true),
+        for (focused_mode, hovered_mode, shift, capture) in [
+            (0, 0, false, false),
+            (1000, 0, false, false),
+            (0, 1000, false, false),
+            (1000, 1000, false, false),
+            (0, 1000, true, false),
+            (0, 1000, true, true),
+            (1000, 1000, true, true),
         ] {
             host.modifiers = if shift {
                 winit::keyboard::ModifiersState::SHIFT
@@ -756,8 +759,13 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
                 let mut terminal = app.panes[&id].session.terminal()?;
                 terminal.mouse_mode = mode;
                 terminal.mouse_format = 1006;
+                terminal.feed(if capture == (id == hovered) {
+                    b"\x1b[>1s"
+                } else {
+                    b"\x1b[>0s"
+                });
             }
-            let reporting = hovered_mode != 0 && !shift;
+            let reporting = hovered_mode != 0 && (!shift || capture);
             let pixels = f64::from(host.fonts.metrics().cell_height);
             for (delta, offset, code) in [
                 (MouseScrollDelta::LineDelta(0.0, 1.0), 3, 64),
@@ -780,11 +788,9 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
                     != if reporting { 0 } else { offset }
                     || pane.input.len() != if reporting { 2 } else { 1 }
                     || reporting
-                        && !pane
-                            .input
-                            .back()
-                            .unwrap()
-                            .starts_with(format!("\x1b[<{code};").as_bytes())
+                        && !pane.input.back().unwrap().starts_with(
+                            format!("\x1b[<{};", code + if shift { 4 } else { 0 }).as_bytes(),
+                        )
                 {
                     return Err(format!("hovered pane did not scroll correctly: {delta:?}, mouse modes {focused_mode}/{hovered_mode}, shift={shift}").into());
                 }

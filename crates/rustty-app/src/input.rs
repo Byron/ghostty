@@ -9,6 +9,21 @@ use winit::{
     platform::modifier_supplement::KeyEventExtModifierSupplement,
 };
 
+/// Share the application's Shift override between mouse buttons and scrolling.
+pub fn mouse_reporting(
+    terminal: &vt::Terminal,
+    modifiers: ModifiersState,
+    policy: config::MouseShiftCapture,
+) -> bool {
+    use config::MouseShiftCapture::{Always, False, Never, True};
+    let capture = match policy {
+        Always => true,
+        Never => false,
+        False | True => terminal.mouse_shift_capture().unwrap_or(policy == True),
+    };
+    terminal.mouse_mode != 0 && (!modifiers.shift_key() || capture)
+}
+
 /// Selection begins on pointer movement, including movement within one cell.
 pub struct SelectionDrag {
     anchor: vt::GridPoint,
@@ -461,6 +476,34 @@ pub fn chord_held(chord: config::Modifiers, current: config::Modifiers) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_mouse_capture_follows_application_requests_and_user_overrides() {
+        use config::MouseShiftCapture::{Always, False, Never, True};
+        for (policy, expected) in [
+            (False, [false, false, true]),
+            (True, [true, false, true]),
+            (Never, [false, false, false]),
+            (Always, [true, true, true]),
+        ] {
+            for (request, expected) in [b"".as_slice(), b"\x1b[>0s", b"\x1b[>1s"]
+                .into_iter()
+                .zip(expected)
+            {
+                let mut terminal = vt::Terminal::new(10, 6, 0);
+                terminal.feed(b"\x1b[?1002h\x1b[?1006h");
+                terminal.feed(request);
+                assert_eq!(
+                    mouse_reporting(&terminal, ModifiersState::SHIFT, policy),
+                    expected,
+                    "{policy:?} {request:?}",
+                );
+                assert!(mouse_reporting(&terminal, ModifiersState::empty(), policy));
+                terminal.feed(b"\x1b[?1002l");
+                assert!(!mouse_reporting(&terminal, ModifiersState::SHIFT, policy));
+            }
+        }
+    }
 
     #[test]
     fn passive_pointer_motion_does_not_restart_egui_repaints_or_discard_clicks() {

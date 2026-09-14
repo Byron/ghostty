@@ -193,6 +193,11 @@ pub struct MouseEncodeOptions<'a> {
 }
 
 impl Terminal {
+    /// Application's XTSHIFTESCAPE request; the host applies its user policy.
+    pub fn mouse_shift_capture(&self) -> Option<bool> {
+        self.metadata.mouse_shift_capture
+    }
+
     /// W3C pointer name selected by OSC 22, also retained in terminal snapshots.
     pub fn mouse_shape(&self) -> &'static str {
         MOUSE_SHAPES[usize::from(self.metadata.mouse_shape)]

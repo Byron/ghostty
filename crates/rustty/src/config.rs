@@ -88,6 +88,7 @@ macro_rules! config_enum {
 
 config_enum!(CursorStyle { Block => "block", Bar => "bar", Underline => "underline", BlockHollow => "block_hollow" });
 config_enum!(CopyOnSelect { None => "none", Primary => "primary", Clipboard => "clipboard", Both => "both" });
+config_enum!(MouseShiftCapture { False => "false", True => "true", Always => "always", Never => "never" });
 config_enum!(WindowSaveState { Default => "default", Never => "never", Always => "always" });
 config_enum!(OptionAsAlt { False => "false", True => "true", Left => "left", Right => "right" });
 config_enum!(NotifyOnCommandFinish { Never => "never", Unfocused => "unfocused", Always => "always" });
@@ -265,6 +266,7 @@ pub struct Config {
     pub title_report: bool,
     pub macos_option_as_alt: OptionAsAlt,
     pub copy_on_select: CopyOnSelect,
+    pub mouse_shift_capture: MouseShiftCapture,
     pub clipboard_read: ClipboardAccess,
     pub clipboard_write: ClipboardAccess,
     pub clipboard_write_limit_bytes: Option<usize>,
@@ -350,6 +352,7 @@ impl Default for Config {
             title_report: false,
             macos_option_as_alt: OptionAsAlt::False,
             copy_on_select: CopyOnSelect::None,
+            mouse_shift_capture: MouseShiftCapture::False,
             clipboard_read: ClipboardAccess::Ask,
             clipboard_write: ClipboardAccess::Allow,
             clipboard_write_limit_bytes: Some(64 * 1024 * 1024),
@@ -567,6 +570,9 @@ impl Config {
             "scrollback-limit-lines" => set!(scrollback_limit_lines, parse_limit(value, None)?),
             "scrollback-compression" => set!(scrollback_compression, parse_bool(value)?),
             "link-url" => set!(link_url, parse_bool(value)?),
+            "mouse-shift-capture" => {
+                set!(mouse_shift_capture, MouseShiftCapture::parse(value)?)
+            }
             "command" => set!(command, Some(Command::parse(value)?)),
             "initial-command" => set!(initial_command, Some(Command::parse(value)?)),
             "working-directory" => set!(

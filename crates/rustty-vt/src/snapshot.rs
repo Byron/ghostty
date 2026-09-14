@@ -18,7 +18,7 @@ use crate::{
     SemanticContent, Style, Terminal, Underline, default_palette,
 };
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 const MAGIC: &[u8; 10] = b"GHOSTSNP\x01\x00";
 
@@ -1531,6 +1531,18 @@ pub fn decode(source: impl Read, options: DecodeOptions) -> io::Result<Terminal>
     let mut terminal = decoder.ready()?;
     while decoder.next_history(&mut terminal)?.is_some() {}
     Ok(terminal)
+}
+
+/// Restore one bounded snapshot and require EOF immediately after FINISH.
+/// Checking EOF may block on a live stream; use `decode` for streaming input.
+/// A rejected trailing byte remains unread in the supplied buffered reader.
+pub fn decode_exact(mut source: impl BufRead, options: DecodeOptions) -> io::Result<Terminal> {
+    let terminal = decode(&mut source, options)?;
+    if source.fill_buf()?.is_empty() {
+        Ok(terminal)
+    } else {
+        Err(invalid("trailing snapshot data"))
+    }
 }
 
 #[derive(Clone, Debug)]

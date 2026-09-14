@@ -179,7 +179,7 @@
     {
       "id": "snapshot.fixtures",
       "status": "partial",
-      "remaining": "Complete-v1, every truncation and selected corruptions are compared. Native restored-cursor bounds are repaired; all 45 mixed-width cursor comparisons, including pending wrap and continued printing, pass. Remaining component fixtures and complete mixed PAGE transitions need coverage."
+      "remaining": "Complete-v1, every truncation, selected corruptions and exact-decode rejection of trailing/concatenated data are compared. Native restored-cursor bounds are repaired; all 45 mixed-width cursor comparisons, including pending wrap and continued printing, pass. Remaining component fixtures and complete mixed PAGE transitions need coverage."
     },
     {
       "id": "fuzz.resource-limits",

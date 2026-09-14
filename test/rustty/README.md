@@ -379,6 +379,10 @@ PAGE permanently discards the rest of that screen's history sequence. Reset,
 alternate-screen recreation, height changes and limits are also compared.
 An expected rejection must be `InvalidSnapshot`; an unrelated adapter error
 or an unexpected successful decode still fails the case.
+`--case snapshot/exact` checks `snapshot::decode_exact`, which requires EOF
+after FINISH for bounded buffered sources. It rejects transport tails and
+concatenated snapshots without consuming the trailing bytes. Streaming users
+keep using `decode`, which stops at FINISH without checking EOF.
 
 `--snapshot-wire --case snapshot/resources/hyperlinks` compares PAGE hyperlink
 table admission, string-pool allocation, duplicate values and wire IDs, invalid

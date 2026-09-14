@@ -825,14 +825,17 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 snapshots.push(hex(&rustty_vt::snapshot::encode_to_vec(&terminal)
                     .map_err(|_| "SnapshotEncodeFailed")?));
             }
-            "restore" => {
+            "restore" | "restore_exact" => {
                 if grid.has_handles() {
                     return Err("UnsupportedGridRestore");
                 }
-                terminal = rustty_vt::snapshot::decode(
-                    &unhex(&operation.data)?[..],
-                    rustty_vt::snapshot::DecodeOptions::default(),
-                )
+                let data = unhex(&operation.data)?;
+                let options = rustty_vt::snapshot::DecodeOptions::default();
+                terminal = if operation.op == "restore_exact" {
+                    rustty_vt::snapshot::decode_exact(data.as_slice(), options)
+                } else {
+                    rustty_vt::snapshot::decode(data.as_slice(), options)
+                }
                 .map_err(|_| "InvalidSnapshot")?;
                 terminal.clipboard_write_limit = host.clipboard_write_limit;
                 host.host.configure(&mut terminal);

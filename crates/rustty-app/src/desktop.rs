@@ -4157,11 +4157,16 @@ impl ApplicationHandler<Event> for App {
                         host.composing = false;
                         host.preedit.clear();
                         host.preedit_selection = None;
-                        if let Some(pane) = self.focused(host.id) {
-                            if !text.is_empty() {
+                        if let Some(pane) = self.focused(host.id)
+                            && let Some(bytes) = self.panes.get(&pane).and_then(|pane| {
+                                let terminal = pane.session.terminal().ok()?;
+                                Some(input::terminal_text(&terminal, text))
+                            })
+                        {
+                            if !bytes.is_empty() {
                                 self.terminal_input(&mut host, pane);
                             }
-                            self.write(pane, text.into_bytes());
+                            self.write(pane, bytes);
                         }
                     }
                     Ime::Disabled => {

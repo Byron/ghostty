@@ -628,7 +628,7 @@ impl Terminal {
             };
             if let Err(error) = result {
                 command.reply(id, 0, error, effects);
-            } else if action == b'p' {
+            } else if matches!(action, b'p' | b'c') {
                 command.reply(id, 0, "OK", effects);
             }
             return;
@@ -989,19 +989,18 @@ impl Terminal {
     }
 
     fn graphics_compose(&mut self, id: u32, cmd: &Command) -> Result<(), &'static str> {
-        let image = self
-            .screen_mut()
-            .graphics
+        let graphics = &mut self.screen_mut().graphics;
+        let image = graphics
             .images
             .get_mut(&id)
             .ok_or("ENOENT: image not found")?;
         let source = image
             .frame(cmd.n(b'r') as usize)
-            .ok_or("EINVAL: source frame not found")?
+            .ok_or("ENOENT: source frame not found")?
             .clone();
         let mut canvas = image
             .frame(cmd.n(b'c') as usize)
-            .ok_or("EINVAL: destination frame not found")?
+            .ok_or("ENOENT: destination frame not found")?
             .to_vec();
         let width = if cmd.n(b'w') == 0 {
             image.width
@@ -1017,12 +1016,11 @@ impl Terminal {
         let sy = cmd.n(b'Y');
         let dx = cmd.n(b'x');
         let dy = cmd.n(b'y');
-        if sx.saturating_add(width) > image.width
-            || dx.saturating_add(width) > image.width
-            || sy.saturating_add(height) > image.height
-            || dy.saturating_add(height) > image.height
-        {
-            return Err("EINVAL: rectangle out of bounds");
+        if dx.saturating_add(width) > image.width || dy.saturating_add(height) > image.height {
+            return Err("EINVAL: destination rectangle out of bounds");
+        }
+        if sx.saturating_add(width) > image.width || sy.saturating_add(height) > image.height {
+            return Err("EINVAL: source rectangle out of bounds");
         }
         if cmd.n(b'r') == cmd.n(b'c')
             && sx.max(dx) < sx.min(dx).saturating_add(width)
@@ -1042,8 +1040,10 @@ impl Terminal {
             }
         }
         image.set_frame(cmd.n(b'c') as usize, canvas.into());
-        image.generation = image.generation.wrapping_add(1);
-        self.screen_mut().graphics.generation = self.graphics().generation.wrapping_add(1);
+        graphics.generation = graphics.generation.wrapping_add(1);
+        if cmd.n(b'c') as usize - 1 == image.current_frame {
+            image.generation = graphics.generation;
+        }
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }

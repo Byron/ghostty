@@ -62,6 +62,14 @@ resized snapshot geometry for both request kinds, including missing/zero cell
 sizes, saturated dimensions and mode-2048 reports. `--artifacts`, `--zig-bin` and
 `--rust-bin` select isolated output and adapter paths for concurrent work.
 
+`--input --case input/mouse` also compares caller-owned motion tracking,
+padding, zero/tiny surfaces and large UTF-8 coordinates. Mouse events accept
+`screen_size`, `cell_size`, left/top/right/bottom `padding`, and an independent
+`any_button_pressed` value. Positions are surface pixels, including padding;
+renderer geometry may differ from terminal dimensions. `track_last_cell`
+retains the last cell across operations; `reset_mouse` explicitly clears it.
+Raw native tracking survives terminal resets, mode changes and screen switches.
+
 `--protocols --case protocol/paste` exercises the state-aware paste entry point:
 text versus clipboard sources, bracketed and Kitty modes, MIME selection and
 listing limits, lazy reader failures, deterministic secure-entropy callbacks,

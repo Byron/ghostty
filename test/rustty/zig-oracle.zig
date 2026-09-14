@@ -550,6 +550,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
     defer stream.deinit();
     var observations: std.ArrayList(Observation) = .empty;
     var mode_results: std.ArrayList(bool) = .empty;
+    var mouse_cell: ?vt.point.Coordinate = null;
     var grid: grid_adapter.Context = .{};
     defer grid.deinit(alloc, &t);
     var grid_results: std.ArrayList(grid_adapter.Result) = .empty;
@@ -655,7 +656,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
         } else if (std.mem.eql(u8, op.op, "grid")) {
             try grid_results.append(alloc, try grid.run(alloc, &t, op.grid orelse return error.MissingGridOperation));
         } else if (std.mem.eql(u8, op.op, "input")) {
-            Context.append("input", try input_adapter.encode(alloc, &t, op.input orelse return error.MissingInput));
+            Context.append("input", try input_adapter.encode(alloc, &t, op.input orelse return error.MissingInput, &mouse_cell));
         } else if (std.mem.eql(u8, op.op, "paste")) {
             try paste_adapter.run(alloc, &stream.handler, op.paste orelse return error.MissingPaste, Context.append);
         } else if (std.mem.eql(u8, op.op, "checkpoint")) {

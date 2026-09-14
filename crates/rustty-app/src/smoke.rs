@@ -306,7 +306,7 @@ impl Smoke {
                 }
                 if capture_path.is_file() {
                     check_pointer_targets(app, host)?;
-                    check_synchronized_output(app, event_loop, host)?;
+                    check_terminal_frames(app, event_loop, host)?;
                     self.idle_frames = host.frames;
                     self.progress_started = Instant::now();
                     app.panes
@@ -344,7 +344,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","reverse-video","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -491,7 +491,7 @@ impl Smoke {
     }
 }
 
-fn check_synchronized_output(
+fn check_terminal_frames(
     app: &mut App,
     event_loop: &ActiveEventLoop,
     host: &mut Host,
@@ -512,6 +512,25 @@ fn check_synchronized_output(
     let prepared = host.prepared.remove(&id);
     let result = (|| -> Result<()> {
         app.draw(event_loop, host)?;
+        let normal = host.prepared[&id].key.options.clone();
+        for (sequence, foreground, background) in [
+            (b"\x1b[?5h".as_slice(), normal.background, normal.foreground),
+            (b"\x1b[?5l", normal.foreground, normal.background),
+        ] {
+            app.panes[&id].session.terminal()?.feed(sequence);
+            app.draw(event_loop, host)?;
+            let prepared = &host.prepared[&id];
+            if prepared.key.options.foreground != foreground
+                || prepared.key.options.background != background
+                || prepared.key.options.palette != normal.palette
+                || prepared.frame.quads.first().map(|quad| quad.color)
+                    != Some(
+                        rustty_render::Color::rgb(background).opacity(normal.background_opacity),
+                    )
+            {
+                return Err("reverse video did not change the rendered default colors".into());
+            }
+        }
         let previous = &host.prepared[&id];
         let generation = previous.key.generation;
         let cursor = previous.key.cursor;
@@ -566,7 +585,7 @@ fn check_synchronized_output(
     host.repaint();
     result?;
     eprintln!(
-        "Native smoke: synchronized output held partial frames and cursors, then released immediately"
+        "Native smoke: reverse video changed default colors; synchronized output held partial frames and cursors, then released immediately"
     );
     Ok(())
 }

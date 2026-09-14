@@ -333,10 +333,9 @@ impl Terminal {
         {
             return Vec::new();
         }
-        let outside = event.x < 0.0
-            || event.y < 0.0
-            || event.x > options.screen_size[0]
-            || event.y > options.screen_size[1];
+        // Native viewport bounds are compared at the surface's f32 precision.
+        let bounds = options.screen_size.map(|size| f64::from(size as f32));
+        let outside = event.x < 0.0 || event.y < 0.0 || event.x > bounds[0] || event.y > bounds[1];
         if event.action != MouseAction::Release
             && outside
             && (!matches!(mode, 1002 | 1003) || !options.any_button_pressed)

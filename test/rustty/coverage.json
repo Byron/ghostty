@@ -149,7 +149,7 @@
     {
       "id": "input.mouse",
       "status": "partial",
-      "remaining": "All modes/formats, buttons, independent held-button state, renderer padding, zero/tiny surfaces, retained cell deduplication, explicit tracking reset and continuation through terminal reset/resize/screen/mode changes pass 1116 comparisons across 372 fixtures. Renderer geometry is independent of terminal dimensions, and UTF-8 coordinates may occupy three or four bytes. Rustty panes own their tracking state and retain fractional renderer bounds. Native reference crashes remain for UTF-8 surrogate coordinates and overflowing grid/pixel conversion; complete coordinate/resource limits remain."
+      "remaining": "All modes/formats, buttons, independent held-button state, renderer padding, zero/tiny/maximum surfaces, retained cell deduplication, explicit tracking reset and continuation through terminal reset/resize/screen/mode changes pass 1266 comparisons across 422 fixtures. Renderer geometry is independent of terminal dimensions, and UTF-8 coordinates may occupy three or four bytes. Rustty panes own their tracking state and retain fractional renderer bounds. Native surrogate-coordinate and grid/pixel overflow crashes are repaired: numeric conversion saturates and unencodable UTF-8 reports emit no partial bytes. Maximum padding and native f32 viewport rounding are compared. Complete malformed host geometry and allocation/writer-failure behavior remain."
     },
     {
       "id": "input.focus-paste",

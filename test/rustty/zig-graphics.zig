@@ -26,13 +26,45 @@ const Placement = struct {
     grid: [2]u32,
     rect: ?struct { start: ?Location, end: ?Location },
 };
-pub const Placements = struct { primary: []Placement, alternate: ?[]Placement };
+const Placeholder = struct {
+    image_id: u32,
+    placement_id: u32,
+    anchor: ?Location,
+    fragment: [2]u32,
+    size: [2]u32,
+    target: ?PlacementId,
+};
+pub const Placements = struct {
+    primary: []Placement,
+    alternate: ?[]Placement,
+    primary_placeholders: []Placeholder,
+    alternate_placeholders: ?[]Placeholder,
+};
 
 pub fn observePlacements(alloc: Allocator, t: *vt.Terminal) !Placements {
     return .{
         .primary = try placements(alloc, t, t.screens.all.get(.primary).?),
         .alternate = if (t.screens.all.get(.alternate)) |alt| try placements(alloc, t, alt) else null,
+        .primary_placeholders = try placeholders(alloc, t.screens.all.get(.primary).?),
+        .alternate_placeholders = if (t.screens.all.get(.alternate)) |alt| try placeholders(alloc, alt) else null,
     };
+}
+
+fn placeholders(alloc: Allocator, owner: *vt.Screen) ![]Placeholder {
+    var result: std.ArrayList(Placeholder) = .empty;
+    var it = vt.kitty.graphics.unicode.placementIterator(owner.pages.getTopLeft(.viewport), owner.pages.getBottomRight(.viewport));
+    while (it.next()) |p| {
+        const target = owner.kitty_images.placeholderTarget(p.image_id, p.placement_id);
+        try result.append(alloc, .{
+            .image_id = p.image_id,
+            .placement_id = p.placement_id,
+            .anchor = location(owner, p.pin),
+            .fragment = .{ p.col, p.row },
+            .size = .{ p.width, p.height },
+            .target = if (target) |v| .{ .internal = v.key.placement_id.tag == .internal, .id = v.key.placement_id.id } else null,
+        });
+    }
+    return result.toOwnedSlice(alloc);
 }
 
 fn location(owner: *vt.Screen, pin: vt.Pin) ?Location {

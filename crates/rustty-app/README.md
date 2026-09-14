@@ -62,7 +62,8 @@ immediately with `TERM_PROGRAM=ghostty cargo check`.
 The terminal port is still undergoing differential compatibility work. A passing
 smoke test does not establish full libghostty-vt parity. The exhaustive coverage
 gate in `test/rustty/coverage.json` records unfinished protocol and snapshot work;
-see [the compatibility checks](../../test/rustty/README.md). Native global shortcuts
+see [the compatibility checks](../../test/rustty/README.md) and the
+[CSI/OSC implementation inventory](../../test/rustty/SEQUENCES.md). Native global shortcuts
 need macOS Accessibility permission. Notifications are available in the bundled
 app; permissions remain under macOS control.
 
@@ -77,7 +78,8 @@ RUSTTY_SMOKE_DIR=/tmp/rustty-native-smoke target/debug/Rustty.app/Contents/MacOS
 
 The opt-in native smoke check starts disposable `/bin/sh` sessions, checks input,
 four split panes, tabs, quadrant focus and zoom, URI directory reports, restoration,
-progress animation, hover scrolling, file-drop targeting, reverse video, synchronized output,
+progress animation, hover scrolling, file-drop targeting, reverse video, DEC column mode,
+text blinking, synchronized output,
 hidden-tab title updates and idle rendering.
 The report records animation frame rate, the monitor's reported refresh rate, and
 window redraws and pane preparations during hidden-tab title updates. It writes

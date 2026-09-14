@@ -171,23 +171,31 @@ fn host_defaults_survive_ris_and_are_reapplied_after_snapshot_restore() {
     terminal.query_defaults.enquiry = b"answer".to_vec();
     terminal.query_defaults.color_scheme = Some(ColorScheme::Dark);
     terminal.query_defaults.device_attributes = None;
+    terminal.query_defaults.size = Some(Size {
+        columns: 20,
+        rows: 3,
+        cell_width: 9,
+        cell_height: 18,
+    });
     terminal.title_report = true;
     terminal.visible = false;
     terminal.terminfo_name = Some(vec![b'r', 255]);
     terminal.feed(b"\x1bc\x1b]2;title\x07");
     assert_eq!(
-        terminal.feed(b"\x05\x1b[c\x1b[>q\x1b[?996n\x1b[?998n\x1b[21t"),
+        terminal.feed(b"\x05\x1b[c\x1b[>q\x1b[?996n\x1b[?998n\x1b[21t\x1b[18t"),
         [
             Effect::Write(b"answer".to_vec()),
             Effect::Write(b"\x1bP>|embedder\x1b\\".to_vec()),
             Effect::Write(b"\x1b[?997;1n".to_vec()),
             Effect::Write(b"\x1b[?999;2n".to_vec()),
             Effect::Write(b"\x1b]ltitle\x1b\\".to_vec()),
+            Effect::Write(b"\x1b[8;3;20t".to_vec()),
         ]
     );
     let bytes = rustty_vt::snapshot::encode_to_vec(&terminal).unwrap();
     let restored = rustty_vt::snapshot::decode(bytes.as_slice(), Default::default()).unwrap();
     assert_ne!(restored.query_defaults, terminal.query_defaults);
+    assert_eq!(restored.query_defaults.size, None);
     assert!(!restored.title_report);
     assert!(restored.visible);
     assert_eq!(restored.terminfo_name, None);

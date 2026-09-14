@@ -674,6 +674,7 @@ pub fn encode_to_vec(terminal: &Terminal) -> io::Result<Vec<u8>> {
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeOptions {
     pub max_record_bytes: usize,
+    /// Bounds incoming replay bytes; the restored parser keeps its normal limit.
     pub max_continuation_bytes: usize,
     pub max_cells: usize,
 }
@@ -1085,9 +1086,6 @@ impl<R: Read> Decoder<R> {
         let continuation = self.record(7)?;
         rustty_parser::Parser::validate_continuation(&continuation).map_err(invalid)?;
         self.marker(5)?;
-        terminal
-            .parser
-            .set_continuation_limit(self.options.max_continuation_bytes);
         if !terminal.feed(&continuation).is_empty() {
             return Err(invalid("snapshot continuation emitted an effect"));
         }

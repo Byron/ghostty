@@ -183,6 +183,12 @@ def boundary_requests(reference):
             parts = [(tag, bytearray(payload)) for tag, payload in base]
             struct.pack_into("<H", parts[index][1], offset, value)
             yield invalid(f"{name}/{value}", parts)
+    for limit in (0, 1, 2, 5, 8 * 1024 * 1024):
+        for operation in ("restore", "restore_exact", "restore_ready"):
+            yield ({"id": f"snapshot/policy-live/{limit}/{operation}", "operations": [
+                {"op": operation, "data": frame(base).hex(), "snapshot_max_continuation_bytes": limit},
+                write(b"\x1b]2;longer title"), {"op": "snapshot"}, write(b"\x07"), {"op": "observe"},
+            ]}, ["snapshot.fixtures", "snapshot.cross-decode"])
     continuation_index = next(i for i, (tag, _) in enumerate(base) if tag == 7)
     for payload in (b"", b"\x1b", b"\x1b[1;", b"\x1b]2;title", b"\xf0\x9f\x98"):
         parts = list(base)

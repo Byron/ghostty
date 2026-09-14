@@ -434,7 +434,36 @@ pub struct TrackedPoint(u64);
 
 /// External handles belong to a live screen, never its copies or snapshots.
 #[derive(Debug, Default)]
-struct TrackedPoints(HashMap<u64, Option<GridPoint>>);
+struct TrackedPoints(
+    HashMap<u64, Option<GridPoint>>,
+    HashMap<u64, std::sync::Weak<()>>,
+);
+
+impl TrackedPoints {
+    fn prune(&mut self) {
+        self.1.retain(|id, owner| {
+            let alive = owner.strong_count() != 0;
+            if !alive {
+                self.0.remove(id);
+            }
+            alive
+        });
+    }
+}
+
+/// An internal pin whose registration expires when its owner is dropped.
+/// Expired entries are reclaimed before tracking or moving points, so they
+/// cannot affect reflow or keep otherwise empty rows alive.
+pub(crate) struct OwnedTrackedPoint {
+    point: TrackedPoint,
+    _owner: std::sync::Arc<()>,
+}
+
+impl OwnedTrackedPoint {
+    pub(crate) fn resolve(&self, screen: &Screen) -> Option<GridPoint> {
+        screen.resolve(self.point)
+    }
+}
 
 impl Clone for TrackedPoints {
     fn clone(&self) -> Self {
@@ -480,6 +509,10 @@ pub struct Screen {
     pub cursor: Cursor,
     pub selection: Option<Selection>,
     pub viewport_offset: usize,
+    /// Native viewport pins retain their column when a search scrolls to a
+    /// match. This is an anchor coordinate, not horizontal scrolling.
+    #[serde(skip)]
+    pub(crate) viewport_pin_column: usize,
     pub kitty_keyboard: KittyKeyboard,
     pub(crate) saved_cursor: Option<SavedCursor>,
     pub(crate) charset: CharsetState,
@@ -530,6 +563,7 @@ impl Screen {
             cursor: Cursor::default(),
             selection: None,
             viewport_offset: 0,
+            viewport_pin_column: 0,
             kitty_keyboard: KittyKeyboard::default(),
             saved_cursor: None,
             charset: CharsetState::default(),
@@ -584,6 +618,7 @@ impl Screen {
             cursor,
             selection: self.selection,
             viewport_offset: 0,
+            viewport_pin_column: 0,
             kitty_keyboard: self.kitty_keyboard.clone(),
             saved_cursor: None,
             charset: self.charset.clone(),
@@ -601,10 +636,31 @@ impl Screen {
     }
 
     pub fn scroll_viewport(&mut self, rows: isize) {
+        if self.viewport_offset == 0
+            || self.viewport_offset.saturating_add_signed(rows) > self.history.len()
+        {
+            self.viewport_pin_column = 0;
+        }
         self.viewport_offset = self
             .viewport_offset
             .saturating_add_signed(rows)
             .min(self.history.len());
+        if self.viewport_offset == 0 {
+            self.viewport_pin_column = 0;
+        }
+    }
+
+    /// The stored viewport anchor, including the column retained by a search
+    /// scroll. Rows are still displayed starting at column zero.
+    pub fn viewport_top(&self) -> GridPoint {
+        GridPoint {
+            row: self.viewport().next().unwrap().id,
+            col: if self.viewport_offset == 0 {
+                0
+            } else {
+                self.viewport_pin_column
+            },
+        }
     }
 
     pub fn row_by_id(&self, id: u64) -> Option<&Row> {
@@ -618,6 +674,7 @@ impl Screen {
 
     pub fn track(&mut self, point: GridPoint) -> TrackedPoint {
         use std::sync::atomic::{AtomicU64, Ordering};
+        self.tracked.prune();
         // Handles must not alias across screens, terminal resets or clones.
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID
@@ -630,12 +687,25 @@ impl Screen {
         TrackedPoint(id)
     }
 
+    pub(crate) fn track_owned(&mut self, point: GridPoint) -> OwnedTrackedPoint {
+        let point = self.track(point);
+        let owner = std::sync::Arc::new(());
+        self.tracked
+            .1
+            .insert(point.0, std::sync::Arc::downgrade(&owner));
+        OwnedTrackedPoint {
+            point,
+            _owner: owner,
+        }
+    }
+
     pub fn resolve(&self, point: TrackedPoint) -> Option<GridPoint> {
         self.tracked.0.get(&point.0).copied().flatten()
     }
 
     pub fn untrack(&mut self, point: TrackedPoint) {
         self.tracked.0.remove(&point.0);
+        self.tracked.1.remove(&point.0);
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -1423,6 +1493,7 @@ impl Screen {
     }
 
     pub(crate) fn grid_points_mut(&mut self) -> impl Iterator<Item = &mut GridPoint> {
+        self.tracked.prune();
         self.tracked.0.values_mut().flatten().chain(
             self.selection
                 .iter_mut()
@@ -1432,6 +1503,7 @@ impl Screen {
 
     pub(crate) fn discard_row(&mut self, id: u64) {
         self.graphics.discard_row(id);
+        self.tracked.prune();
         for point in self.tracked.0.values_mut() {
             if point.is_some_and(|p| p.row == id) {
                 *point = None;
@@ -1492,6 +1564,7 @@ impl Screen {
         self.pages.remove_prefix(self.history.len());
         self.discard_history_prefix(self.history.len());
         self.viewport_offset = 0;
+        self.viewport_pin_column = 0;
     }
 
     pub(crate) fn effective_limits(&self) -> ScrollbackLimits {
@@ -1507,6 +1580,9 @@ impl Screen {
     }
 
     fn discard_history_prefix(&mut self, count: usize) {
+        if count > self.history.len().saturating_sub(self.viewport_offset) {
+            self.viewport_pin_column = 0;
+        }
         for _ in 0..count {
             let row = self.history.pop_front().unwrap();
             self.release_row_styles(&row);
@@ -1567,6 +1643,11 @@ impl Screen {
     }
 
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
+        self.tracked.prune();
+        let mut viewport_point = (self.viewport_offset > 0).then(|| self.viewport_top());
+        if viewport_point.is_none() {
+            self.viewport_pin_column = 0;
+        }
         self.release_cursor_style();
         let old_cols = self.columns;
         let columns_changed = cols != old_cols;
@@ -1642,6 +1723,9 @@ impl Screen {
                     }
                 };
                 if let Some(point) = &mut saved_point {
+                    keep_pin(point);
+                }
+                if let Some(point) = &mut viewport_point {
                     keep_pin(point);
                 }
                 for point in self.tracked.0.values_mut().flatten() {
@@ -1769,6 +1853,7 @@ impl Screen {
                 mapped_cursor = *p;
             }
             saved_point = saved_point.and_then(|p| map.get(&(p.row, p.col)).copied());
+            viewport_point = viewport_point.and_then(|p| map.get(&(p.row, p.col)).copied());
             for point in self.tracked.0.values_mut() {
                 *point = point.and_then(|p| map.get(&(p.row, p.col)).copied());
             }
@@ -1785,6 +1870,7 @@ impl Screen {
                 && output.last().is_some_and(|r| {
                     r.id != mapped_cursor.row
                         && !saved_point.is_some_and(|p| p.row == r.id)
+                        && !viewport_point.is_some_and(|p| p.row == r.id)
                         && !self
                             .tracked
                             .0
@@ -1904,6 +1990,20 @@ impl Screen {
             self.discard_history_prefix(removed);
         }
         self.viewport_offset = self.viewport_offset.min(self.history.len());
+        if let Some(point) = viewport_point {
+            let index = self.all_rows().position(|row| row.id == point.row);
+            if let Some(index) = index {
+                self.viewport_offset = self.history.len().saturating_sub(index);
+                self.viewport_pin_column = if self.viewport_offset > 0 {
+                    point.col.min(cols - 1)
+                } else {
+                    0
+                };
+            } else {
+                self.viewport_offset = self.history.len();
+                self.viewport_pin_column = 0;
+            }
+        }
         // Native resize reattaches the cursor hyperlink to its new page,
         // assigning a new implicit identity while printed links keep theirs.
         if matches!(self.cursor.hyperlink_id, Some(HyperlinkId::Implicit(_))) {

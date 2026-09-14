@@ -99,7 +99,7 @@
     {
       "id": "terminal.search",
       "status": "partial",
-      "remaining": "Literal byte matching, ASCII case folding, formatter coordinates, per-page order/overlap/trimming, no-scrollback prefix pruning and restored history are compared without normalizing results. Persistent viewport feeds, cached reads, needle lifecycle and bounded layout invalidation are compared. The native search-underflow defect is repaired, and all 237 retained page-search comparisons pass. Incremental full-history feed/tick, selected matches, complete resource-driven page changes and regex extension coverage remain."
+      "remaining": "Literal bytes, ASCII folding, formatter coordinates, page order/overlap/trimming and no-scrollback prefix pruning are compared without normalization. Persistent viewport feeds and cached reads are covered. Full-history feed/tick, indexed results, selected-match retention/fallback and wrapping, screen switches, pruning, resize, reset, snapshot prepend and restored-width edits pass 612 comparisons across 204 fixtures, including viewport-pin reflow and cached history after same-width movement. Owned search pins expire on drop; ticks read no terminal state. The repaired native short-window case remains in all 237 page-search comparisons. Complete resource-driven mutation lifetimes and regex extension coverage remain."
     },
     {
       "id": "terminal.page-layout",

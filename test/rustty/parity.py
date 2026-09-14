@@ -23,6 +23,7 @@ import charsets
 import grid_requests
 import search_pages
 import viewport_search
+import terminal_search
 import page_layout_requests
 import page_lifecycle_requests
 import host_queries
@@ -487,6 +488,8 @@ def main():
                 requests.extend((request, covers) for request, covers in parser_requests()
                                 if not args.case or args.case in request["id"])
             if args.grid or args.thorough:
+                requests.extend((request, covers) for request, covers in terminal_search.requests()
+                                if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in viewport_search.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend((request, covers) for request, covers in grid_requests.requests()

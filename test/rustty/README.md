@@ -167,6 +167,15 @@ Partial UTF-8 needles map each endpoint to the cell containing that byte. The
 regex search and link APIs keep their existing semantics. Match order and
 endpoints are compared without sorting, deduplication or normalization.
 
+`--grid --case grid/viewport-retention/` retains 400 fixtures (1,200 delivery
+comparisons) for the internal viewport anchor. Native keeps this pin registered
+even when the view returns to the active area or follows the top of history.
+It can preserve blank cells and affect the saved cursor's reflow position.
+Cases cover empty/written/history rows, viewport movement, line insertion and
+deletion, partial-region indexing, history clearing, narrowing and widening,
+with and without external pins. The minimized `generated/2/187` cursor failure
+also remains in the smoke suite.
+
 `--grid --case grid/selectors/` compares `Screen::select_word`,
 `select_word_between`, `select_line`, `select_all` and `select_output` against
 the native queries.

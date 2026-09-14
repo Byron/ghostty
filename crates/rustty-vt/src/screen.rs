@@ -562,6 +562,10 @@ pub struct Screen {
     /// match. This is an anchor coordinate, not horizontal scrolling.
     #[serde(skip)]
     pub(crate) viewport_pin_column: usize,
+    /// The native viewport anchor remains tracked when the viewport follows
+    /// the active area or the top. Even then it keeps blank cells during reflow.
+    #[serde(skip)]
+    pub(crate) viewport_pin: Option<GridPoint>,
     pub kitty_keyboard: KittyKeyboard,
     pub(crate) saved_cursor: Option<SavedCursor>,
     pub(crate) charset: CharsetState,
@@ -615,6 +619,7 @@ impl Screen {
             selection: None,
             viewport_offset: 0,
             viewport_pin_column: 0,
+            viewport_pin: Some(GridPoint { row: 0, col: 0 }),
             kitty_keyboard: KittyKeyboard::default(),
             saved_cursor: None,
             charset: CharsetState::default(),
@@ -673,6 +678,7 @@ impl Screen {
             selection: self.selection,
             viewport_offset: 0,
             viewport_pin_column: 0,
+            viewport_pin: None,
             kitty_keyboard: self.kitty_keyboard.clone(),
             saved_cursor: None,
             charset: self.charset.clone(),
@@ -691,6 +697,7 @@ impl Screen {
     }
 
     pub fn scroll_viewport(&mut self, rows: isize) {
+        let previous = self.viewport_offset;
         if self.viewport_offset == 0
             || self.viewport_offset.saturating_add_signed(rows) > self.history.len()
         {
@@ -702,6 +709,12 @@ impl Screen {
             .min(self.history.len());
         if self.viewport_offset == 0 {
             self.viewport_pin_column = 0;
+        } else if self.viewport_offset < self.history.len()
+            || previous > 0
+                && previous < self.history.len()
+                && previous.saturating_add_signed(rows) == self.history.len()
+        {
+            self.viewport_pin = Some(self.viewport_top());
         }
     }
 
@@ -2064,15 +2077,28 @@ impl Screen {
 
     pub(crate) fn grid_points_mut(&mut self) -> impl Iterator<Item = &mut GridPoint> {
         self.tracked.prune();
-        self.tracked.0.values_mut().flatten().chain(
-            self.selection
-                .iter_mut()
-                .flat_map(|selection| [&mut selection.start, &mut selection.end]),
-        )
+        self.viewport_pin
+            .iter_mut()
+            .chain(self.tracked.0.values_mut().flatten())
+            .chain(
+                self.selection
+                    .iter_mut()
+                    .flat_map(|selection| [&mut selection.start, &mut selection.end]),
+            )
     }
 
     pub(crate) fn discard_row(&mut self, id: u64) {
         self.graphics.discard_row(id);
+        if self.viewport_pin.is_some_and(|point| point.row == id) {
+            let point = self
+                .all_rows()
+                .find(|row| row.id != id)
+                .map(|row| GridPoint {
+                    row: row.id,
+                    col: 0,
+                });
+            self.viewport_pin = point;
+        }
         self.tracked.prune();
         for point in self.tracked.0.values_mut() {
             if point.is_some_and(|p| p.row == id) {
@@ -2214,8 +2240,20 @@ impl Screen {
 
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, reflow: bool) {
         self.tracked.prune();
-        let mut viewport_point = (self.viewport_offset > 0).then(|| self.viewport_top());
-        if viewport_point.is_none() {
+        let viewport_top = (self.viewport_offset > 0).then(|| self.viewport_top());
+        if self.viewport_offset > 0 && self.viewport_offset < self.history.len() {
+            self.viewport_pin = viewport_top;
+        }
+        if self.viewport_pin.is_none() {
+            let point = self.all_rows().next().map(|row| GridPoint {
+                row: row.id,
+                col: 0,
+            });
+            self.viewport_pin = point;
+        }
+        let viewport_pinned = viewport_top.is_some() && viewport_top == self.viewport_pin;
+        let viewport_at_top = self.viewport_offset > 0 && !viewport_pinned;
+        if viewport_top.is_none() {
             self.viewport_pin_column = 0;
         }
         self.release_cursor_style();
@@ -2293,10 +2331,7 @@ impl Screen {
                         used = used.max(point.col + 1);
                     }
                 };
-                if let Some(point) = &mut saved_point {
-                    keep_pin(point);
-                }
-                if let Some(point) = &mut viewport_point {
+                if let Some(point) = &mut self.viewport_pin {
                     keep_pin(point);
                 }
                 for point in self.tracked.0.values_mut().flatten() {
@@ -2305,6 +2340,9 @@ impl Screen {
                 if let Some(selection) = &mut self.selection {
                     keep_pin(&mut selection.start);
                     keep_pin(&mut selection.end);
+                }
+                if let Some(point) = &mut saved_point {
+                    keep_pin(point);
                 }
                 if old.id == old_cursor.row {
                     used = used.max(old_cursor.col + 1);
@@ -2454,7 +2492,9 @@ impl Screen {
                 mapped_cursor = *p;
             }
             saved_point = saved_point.and_then(|p| map.get(&(p.row, p.col)).copied());
-            viewport_point = viewport_point.and_then(|p| map.get(&(p.row, p.col)).copied());
+            self.viewport_pin = self
+                .viewport_pin
+                .and_then(|p| map.get(&(p.row, p.col)).copied());
             for point in self.tracked.0.values_mut() {
                 *point = point.and_then(|p| map.get(&(p.row, p.col)).copied());
             }
@@ -2471,7 +2511,7 @@ impl Screen {
                 && output.last().is_some_and(|r| {
                     r.id != mapped_cursor.row
                         && !saved_point.is_some_and(|p| p.row == r.id)
-                        && !viewport_point.is_some_and(|p| p.row == r.id)
+                        && !self.viewport_pin.is_some_and(|p| p.row == r.id)
                         && !self
                             .tracked
                             .0
@@ -2528,6 +2568,9 @@ impl Screen {
                 .collect();
             self.resize_owned_columns(&mut contents, cols, &spacer_heads);
             mapped_cursor.col = mapped_cursor.col.min(cols - 1);
+            if let Some(point) = &mut self.viewport_pin {
+                point.col = point.col.min(cols - 1);
+            }
         }
         if !height_first {
             self.resize_height(
@@ -2591,7 +2634,7 @@ impl Screen {
             self.discard_history_prefix(removed);
         }
         self.viewport_offset = self.viewport_offset.min(self.history.len());
-        if let Some(point) = viewport_point {
+        if viewport_pinned && let Some(point) = self.viewport_pin {
             let index = self.all_rows().position(|row| row.id == point.row);
             if let Some(index) = index {
                 self.viewport_offset = self.history.len().saturating_sub(index);
@@ -2604,6 +2647,9 @@ impl Screen {
                 self.viewport_offset = self.history.len();
                 self.viewport_pin_column = 0;
             }
+        } else if viewport_at_top {
+            self.viewport_offset = self.history.len();
+            self.viewport_pin_column = 0;
         }
         // Native resize reattaches the cursor hyperlink to its new page,
         // assigning a new implicit identity while printed links keep theirs.
@@ -2629,6 +2675,7 @@ impl Screen {
             && contents.last().is_some_and(|r| {
                 r.id != cursor.row
                     && !saved.is_some_and(|p| p.row == r.id)
+                    && !self.viewport_pin.is_some_and(|p| p.row == r.id)
                     && !self
                         .tracked
                         .0
@@ -2661,6 +2708,12 @@ impl Screen {
         for row in contents.drain(..removed) {
             self.release_row_resources(&row);
             self.discard_row(row.id);
+        }
+        if self.viewport_pin.is_none() {
+            self.viewport_pin = contents.first().map(|row| GridPoint {
+                row: row.id,
+                col: 0,
+            });
         }
     }
 }

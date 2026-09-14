@@ -85,6 +85,29 @@ def requests():
                    grid("track", id=1, point=point(1, 0, "viewport")),
                    grid("select", start=point(0, 0, "viewport"), end=point(2, 1, "viewport")),
                    b"\r\nsix", observe], ["terminal.selection", "terminal.tracked"])
+
+    # The internal viewport pin stays in the native pin set after scrolling
+    # back to the active area. Its blank cells affect subsequent saved pins.
+    for initial, text in (("empty", b""), ("written", b"abcdefghij"),
+                          ("history", b"\r\n".join(str(n).encode() for n in range(10))),
+                          ("blank-history", b"\n" * 12)):
+        for viewport, deltas in (("active", ()), ("top", (100,)), ("pin", (2,)),
+                                 ("returned", (2, -100)), ("through-top", (2, 100, -100))):
+            for mutation, edit in (("none", b""), ("index", b"\x1b[2;3r\x1b[3H\n\x1b[r"),
+                                   ("delete", b"\x1b[H\x1b[M"), ("insert", b"\x1b[H\x1b[L"),
+                                   ("history-clear", b"\x1b[3J")):
+                for cols in (6, 17):
+                    for tracked in (False, True):
+                        operations = [text, *(grid("viewport", delta=d) for d in deltas),
+                                      edit, b"\x1b[2;9H"]
+                        if tracked:
+                            operations.append(grid("track", id=1, point=point(8, 1)))
+                        operations.extend([b"\x1b[?1049h", {"op": "resize", "cols": cols, "rows": 4},
+                                           b"\x1b[?1049l", observe, b"X"])
+                        yield case(f"viewport-retention/{initial}/{viewport}/{mutation}/{cols}/{tracked}",
+                                   operations, ["terminal.resize", "terminal.cursor", "terminal.tracked"],
+                                   cols=12)
+
     for reset in ({"op": "terminal_reset"}, {"op": "reset"}):
         yield case("tracked/reuse/" + reset["op"], [b"A", grid("track", id=1), reset,
                    b"BC", grid("track", id=2, point=point(1)), observe, grid("untrack", id=2)],

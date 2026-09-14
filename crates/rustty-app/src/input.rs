@@ -183,6 +183,13 @@ pub fn terminal_modifiers(m: ModifiersState) -> vt::Modifiers {
     }
 }
 
+/// IME commits have text but no physical key; use the shared terminal encoder.
+pub fn terminal_text(terminal: &vt::Terminal, text: String) -> Vec<u8> {
+    let mut event = vt::KeyEvent::new(vt::Key::Unidentified);
+    event.text = Some(text);
+    terminal.encode_key(&event)
+}
+
 pub fn terminal_key(
     event: &KeyEvent,
     modifiers: Modifiers,
@@ -933,6 +940,20 @@ mod tests {
         assert_eq!(terminal.encode_key(&event), [0]);
         terminal.feed(b"\x1b[>1u");
         assert_eq!(terminal.encode_key(&event), b"\x1b[32;5u");
+    }
+
+    #[test]
+    fn composed_text_obeys_keyboard_lock_in_legacy_and_kitty_modes() {
+        for mode in [b"".as_slice(), b"\x1b[>31u"] {
+            let mut terminal = vt::Terminal::new(20, 2, 0);
+            terminal.feed(mode);
+            let text = "日本語 e\u{301} ";
+            assert_eq!(terminal_text(&terminal, text.into()), text.as_bytes());
+            terminal.feed(b"\x1b[2h");
+            assert!(terminal_text(&terminal, text.into()).is_empty());
+            terminal.feed(b"\x1b[2l");
+            assert_eq!(terminal_text(&terminal, text.into()), text.as_bytes());
+        }
     }
 
     #[test]

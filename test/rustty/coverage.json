@@ -29,7 +29,7 @@
     {
       "id": "terminal.cells",
       "status": "partial",
-      "remaining": "Cell comparison exists; ECH/EL/DCH wrap resets, next-row continuation and wide spacer cleanup have focused snapshot coverage. Complete grapheme, protection, wide-cell and semantic cases remain."
+      "remaining": "Cell comparison exists; ECH/EL/DCH wrap resets, next-row continuation and wide spacer cleanup have focused snapshot coverage. Non-reflow growth and restored-page edits retain spacer-head attributes and native copied-versus-reused row wrap flags across 96 comparisons. Complete grapheme, protection, wide-cell and semantic cases remain."
     },
     {
       "id": "terminal.styles",

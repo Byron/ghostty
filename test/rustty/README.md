@@ -360,6 +360,14 @@ previously it left an orphan at the right edge and a later insert could assert
 while clearing beyond the shortened row. The native regression also verifies
 that grapheme storage is reclaimed and the tail stays cleared after widening.
 
+`--pages --case pages/widen/` covers 32 cases (96 comparisons) for growing
+without reflow and editing restored narrow pages. A spacer head becomes an
+ordinary blank cell while retaining its style, hyperlink and semantic content.
+Copied rows discard both wrap flags; rows that reuse their existing allocation
+retain them. Cases compare cells, snapshots and page ownership before continued
+printing, insertion, deletion and erasure. The shared row repair handles ordinary
+resize and lazy physical-page growth with the same attribute-preserving behavior.
+
 `--pages --case pages/styles/` exercises live STYLE ownership: each SGR
 attribute, cursor movement, printed and erased cells, page migration, resize,
 restored sparse IDs and mixed-width IND copies. Rustty retains the native set's

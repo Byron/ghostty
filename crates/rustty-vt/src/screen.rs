@@ -294,10 +294,14 @@ impl Row {
 
     pub(crate) fn repair_wide(&mut self, background: Color) {
         for col in 0..self.cells.len() {
+            // A copied spacer head becomes an ordinary blank cell when the
+            // row grows. Its style, hyperlink and semantic content survive.
+            if self.cells[col].spacer_head && col + 1 != self.cells.len() {
+                self.cells[col].spacer_head = false;
+            }
             if self.cells[col].width == 0 && (col == 0 || self.cells[col - 1].width != 2)
                 || self.cells[col].width == 2
                     && (col + 1 == self.cells.len() || self.cells[col + 1].width != 0)
-                || self.cells[col].spacer_head && col + 1 != self.cells.len()
             {
                 self.cells[col] = Cell::blank(background);
             }
@@ -1304,11 +1308,10 @@ impl Screen {
         &mut self,
         contents: &mut [Row],
         columns: usize,
-        old_columns: usize,
         spacer_heads: &[bool],
     ) {
         let old_pages = self.pages.clone();
-        for row in &mut *contents {
+        for (absolute, row) in contents.iter_mut().enumerate() {
             let mut counts: HashMap<u16, isize> = HashMap::new();
             for cell in &row.cells {
                 if cell.style_id != 0 {
@@ -1317,8 +1320,13 @@ impl Screen {
             }
             row.cells.resize(columns, Cell::default());
             row.repair_wide(Color::Default);
-            if columns > old_columns {
+            let index = old_pages.page_index(absolute);
+            let source = &old_pages.pages[index];
+            if columns > usize::from(source.columns)
+                && (columns > usize::from(source.capacity.cols) || spacer_heads[index])
+            {
                 row.wrapped = false;
+                row.wrap_continuation = false;
             }
             for cell in &row.cells {
                 if cell.style_id != 0 {
@@ -1936,7 +1944,7 @@ impl Screen {
                     has_head
                 })
                 .collect();
-            self.resize_owned_columns(&mut contents, cols, old_cols, &spacer_heads);
+            self.resize_owned_columns(&mut contents, cols, &spacer_heads);
             mapped_cursor.col = mapped_cursor.col.min(cols - 1);
         }
         if !height_first {

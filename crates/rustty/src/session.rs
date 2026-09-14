@@ -54,6 +54,7 @@ pub enum SessionEvent {
 
 enum IoCommand {
     Write(Vec<u8>),
+    Linefeed(bool),
     HostReport(Vec<u8>),
     Resize { size: PtySize, reply: Vec<u8> },
     Close,
@@ -119,6 +120,7 @@ impl Session {
         let mut terminal = Terminal::with_limits(cols, rows, scrollback_limits(config));
         terminal.terminfo_name = terminfo_name;
         terminal.shell_command_events = true;
+        terminal.linefeed_mode_events = true;
         terminal.query_defaults.color_scheme = options.color_scheme;
         terminal.query_defaults.focused = Some(options.focused);
         terminal.visible = options.visible;
@@ -149,18 +151,23 @@ impl Session {
             .name("rustty-pty-write".into())
             .spawn(move || {
                 let master = pair.master;
+                let mut linefeed = false;
                 while let Ok(command) = input_rx.recv() {
                     let result = match command {
                         IoCommand::Write(bytes) => {
-                            let result = writer.write_all(&bytes);
+                            let result = write_pty(&mut writer, &bytes, linefeed);
                             writer_pending.release(bytes.len());
                             result
                         }
-                        IoCommand::HostReport(bytes) => writer.write_all(&bytes),
+                        IoCommand::Linefeed(enabled) => {
+                            linefeed = enabled;
+                            continue;
+                        }
+                        IoCommand::HostReport(bytes) => write_pty(&mut writer, &bytes, linefeed),
                         IoCommand::Resize { size, reply } => master
                             .resize(size)
                             .map_err(error)
-                            .and_then(|()| writer.write_all(&reply)),
+                            .and_then(|()| write_pty(&mut writer, &reply, linefeed)),
                         IoCommand::Close => break,
                     };
                     if let Err(e) = result {
@@ -200,6 +207,11 @@ impl Session {
                     };
                     for effect in effects {
                         match effect {
+                            Effect::LinefeedMode(enabled) => {
+                                if read_input.send(IoCommand::Linefeed(enabled)).is_err() {
+                                    return;
+                                }
+                            }
                             Effect::Write(bytes) => {
                                 // Replies use the same bounded byte budget as user
                                 // input. Backpressure cannot silently drop a reply.
@@ -610,6 +622,26 @@ impl PendingInput {
     }
 }
 
+fn write_pty(writer: &mut impl Write, bytes: &[u8], linefeed: bool) -> io::Result<()> {
+    if !linefeed || !bytes.contains(&b'\r') {
+        return writer.write_all(bytes);
+    }
+    let mut expanded = [0; 8192];
+    for chunk in bytes.chunks(expanded.len() / 2) {
+        let mut length = 0;
+        for &byte in chunk {
+            expanded[length] = byte;
+            length += 1;
+            if byte == b'\r' {
+                expanded[length] = b'\n';
+                length += 1;
+            }
+        }
+        writer.write_all(&expanded[..length])?;
+    }
+    Ok(())
+}
+
 fn enqueue(
     input: &mpsc::Sender<IoCommand>,
     pending: &PendingInput,
@@ -742,6 +774,59 @@ fn command(config: &Config, options: &SessionOptions) -> io::Result<CommandBuild
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn linefeed_mode_translates_pty_input_and_keeps_expansion_bounded() {
+        let mut output = Vec::new();
+        write_pty(&mut output, &vec![b'\r'; 4097], true).unwrap();
+        assert_eq!(output, b"\r\n".repeat(4097));
+
+        let session = Session::spawn(
+            &Config::default(),
+            SessionOptions {
+                command: Some(Command::Direct(vec![
+                    "/bin/sh".into(), "-c".into(),
+                    r"stty raw -echo; printf '\033[20h\033]2;linefeed-on\007'; dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -d ' \n'; printf '\r\n\033[20l\033]2;linefeed-off\007'; dd bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n'; printf '\r\n\033]2;linefeed-done\007'".into(),
+                ])),
+                ..SessionOptions::default()
+            },
+            Arc::new(|| {}),
+        ).unwrap();
+        let wait_for_title = |title: &[u8]| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                for event in session.events() {
+                    match event {
+                        SessionEvent::Effect(Effect::Title(value)) if value == title => return,
+                        SessionEvent::Error(error) => panic!("{error}"),
+                        _ => {}
+                    }
+                }
+                assert!(Instant::now() < deadline, "missing title {title:?}");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for_title(b"linefeed-on");
+        session.write(b"a\rb\r").unwrap();
+        wait_for_title(b"linefeed-off");
+        assert!(
+            session
+                .terminal()
+                .unwrap()
+                .plain_text()
+                .contains("610d0a620d0a")
+        );
+        session.write(b"a\rb\r").unwrap();
+        wait_for_title(b"linefeed-done");
+        assert!(
+            session
+                .terminal()
+                .unwrap()
+                .plain_text()
+                .contains("610d620d")
+        );
+    }
 
     #[cfg(unix)]
     #[test]

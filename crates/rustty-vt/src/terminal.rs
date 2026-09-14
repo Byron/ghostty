@@ -12,6 +12,8 @@ pub enum Effect {
     Title(Vec<u8>),
     WorkingDirectory(Vec<u8>),
     Bell,
+    /// PTY input translation, enabled by `Terminal::linefeed_mode_events`.
+    LinefeedMode(bool),
     ClipboardRead(clipboard::Read),
     ClipboardWrite(clipboard::Write),
     /// Drag target registration, acceptance, or drop completion changed.
@@ -111,6 +113,9 @@ pub struct Terminal {
     /// compatibility; application sessions opt in. Retained through reset,
     /// but not persisted in terminal snapshots.
     pub shell_command_events: bool,
+    /// Report ANSI mode 20 changes to the PTY writer, including RIS. Retained
+    /// through reset, but not snapshots; standalone VT clients opt in.
+    pub linefeed_mode_events: bool,
     /// Externally owned view visibility, retained through reset.
     pub visible: bool,
     /// Maximum total decoded bytes in a Kitty clipboard write transaction.
@@ -185,6 +190,7 @@ impl Terminal {
             query_defaults: query::Defaults::default(),
             title_report: false,
             shell_command_events: false,
+            linefeed_mode_events: false,
             visible: true,
             clipboard_write_limit: 64 * 1024 * 1024,
             glyphs: crate::glyph::Glyphs::default(),
@@ -559,6 +565,7 @@ impl Terminal {
         let query_defaults = self.query_defaults.clone();
         let title_report = self.title_report;
         let shell_command_events = self.shell_command_events;
+        let linefeed_mode_events = self.linefeed_mode_events;
         let synchronized_output_generation = self.synchronized_output_generation;
         let visible = self.visible;
         let clipboard = std::mem::take(&mut self.clipboard);
@@ -602,6 +609,7 @@ impl Terminal {
         self.query_defaults = query_defaults;
         self.title_report = title_report;
         self.shell_command_events = shell_command_events;
+        self.linefeed_mode_events = linefeed_mode_events;
         self.synchronized_output_generation = synchronized_output_generation;
         self.visible = visible;
         self.clipboard = clipboard;
@@ -1887,6 +1895,9 @@ impl Terminal {
         effects: &mut Vec<Effect>,
     ) {
         self.set_mode(private, mode, value);
+        if !private && mode == 20 && self.linefeed_mode_events {
+            effects.push(Effect::LinefeedMode(value));
+        }
         if private && value {
             match mode {
                 1004 => {
@@ -1970,6 +1981,9 @@ impl Terminal {
             ([], b'c') => {
                 self.reset();
                 self.clipboard.clear_grants();
+                if self.linefeed_mode_events {
+                    effects.push(Effect::LinefeedMode(self.modes.get(false, 20)));
+                }
                 effects.push(Effect::Progress {
                     state: 0,
                     value: None,

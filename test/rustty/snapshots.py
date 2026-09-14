@@ -39,6 +39,7 @@ def wire_requests(root, reference):
     import snapshot_resources
     yield from snapshot_resources.requests(reference)
     yield from snapshot_resources.style_requests(reference)
+    yield from metadata_requests(reference)
     yield from hyperlink_requests.requests(reference)
 
     data = fixture(root / "src/terminal/snapshot/testdata/complete-v1.hex")
@@ -86,6 +87,22 @@ def wire_requests(root, reference):
             request = {"id": f"snapshot/wire/page-{physical}-terminal-{logical}/{name}",
                 "operations": [{"op": "restore", "data": data.hex()}, {"op": "observe"}] + after}
             yield request, ["snapshot.cross-decode"]
+
+
+def metadata_requests(reference):
+    encoded = reference.request({"id": "snapshot/metadata-source", "cols": 8, "rows": 3,
+        "operations": [write(b"abc"), {"op": "snapshot"}]})
+    if not encoded["ok"] or len(encoded["snapshots"]) != 1:
+        raise RuntimeError("reference could not encode metadata fixture")
+    base = records(bytes.fromhex(encoded["snapshots"][0]))
+    for value in (0, 1, 2, 255):
+        parts = [(tag, bytearray(payload)) for tag, payload in base]
+        parts[0][1][29] = value
+        yield ({"id": f"snapshot/metadata/cursor-default/{value}", "operations": [
+            {"op": "restore", "data": frame(parts).hex()}, {"op": "snapshot"},
+            {"op": "cursor_defaults", "cursor_shape": "bar", "cursor_blink": True},
+            {"op": "observe"}, {"op": "snapshot"},
+        ]}, ["snapshot.fixtures", "snapshot.cross-decode"])
 
 
 def streaming_requests(root):

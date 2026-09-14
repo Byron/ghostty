@@ -976,7 +976,7 @@ impl<R: Read> Decoder<R> {
         }
         let previous_char = char::from_u32(r.u32()?);
         let mut m = TerminalMetadata {
-            cursor_is_default: r.u8()? == 1,
+            cursor_is_default: r.u8()? != 0,
             cursor_default_shape: match r.u8()? {
                 v @ 0..=3 => v,
                 _ => 1,

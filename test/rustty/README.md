@@ -356,9 +356,10 @@ reflow.
 truncation and selected corruptions. It observes READY, each history PAGE and
 FINISH, including source offsets and live writes, resets, screen switches and
 resizes between pages. Following transport bytes must remain unread. It also
-constructs PAGEs whose physical width differs from the terminal width. These
-advanced cases currently expose differences and original Zig assertions;
-`snapshot/reference-limit/` cases retain those failures explicitly. Use
+constructs PAGEs whose physical width differs from the terminal width. Restored
+cursors are bounded by both widths, including pending wrap and subsequent
+printing; all 45 mixed-width cursor comparisons pass against the repaired native
+reference. Physical PAGE widths remain intact until mutation requires growth. Use
 `--case snapshot/streaming` or `--case snapshot/invalid` for isolated checks.
 An expected rejection must be `InvalidSnapshot`; an unrelated adapter error
 or an unexpected successful decode still fails the case.

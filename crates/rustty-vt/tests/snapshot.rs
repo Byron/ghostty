@@ -404,6 +404,30 @@ fn kitty_keyboard_ring_overflows_pops_and_resumes_after_restore() {
 }
 
 #[test]
+fn snapshot_clamps_cursor_to_logical_and_physical_widths() {
+    for (physical, logical, x, expected, pending) in
+        [(4, 8, 3, 3, true), (8, 4, 7, 3, true), (8, 4, 0, 0, false)]
+    {
+        let mut source = Terminal::new(physical, 1, 10);
+        source.feed(&b"ABCDEFGH"[..usize::from(physical)]);
+        let mut stream = records(&encode_to_vec(&source).unwrap());
+        stream[0].1[..2].copy_from_slice(&u16::to_le_bytes(logical));
+        stream[0].1[18..20].copy_from_slice(&u16::to_le_bytes(logical - 1));
+        stream[1].1[12..14].copy_from_slice(&u16::to_le_bytes(x));
+        let mut terminal = decode(frame(&stream).as_slice(), DecodeOptions::default()).unwrap();
+        assert_eq!(terminal.screen().cursor.col, expected);
+        assert_eq!(terminal.screen().cursor.pending_wrap, pending);
+        assert_eq!(terminal.screen().rows[0].cells.len(), usize::from(physical));
+        terminal.feed(b"\x1b[C");
+        assert_eq!(
+            terminal.screen().cursor.col,
+            (expected + 1).min(usize::from(logical) - 1)
+        );
+        assert!(terminal.screen().cursor.col < terminal.screen().rows[0].cells.len());
+    }
+}
+
+#[test]
 fn mixed_physical_widths_survive_observation_and_grow_before_mutation() {
     let mut source = Terminal::new(4, 1, 10);
     source.feed(b"abcd");

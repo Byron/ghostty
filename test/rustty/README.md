@@ -415,8 +415,24 @@ horizontal margins, both screens, widening across page boundaries, reflow,
 mixed-width restored pages, tiny capacities and continued printing. Viewport
 copies remain detached from live resource storage. Rust invariants check that
 each suffix has one owner, allocations do not overlap and erased storage is
-reclaimed. Complete resource limits, reflow splitting and hyperlink lifetimes
-remain separate requirements.
+reclaimed. Complete resource limits and reflow splitting remain separate
+requirements.
+
+`--pages --case pages/hyperlinks/` retains 99 live hyperlink fixtures (297
+delivery comparisons). They cover string and cell-map growth, dead set entries,
+duplicate strings, colliding hashes, cursor page crossings, erasure, line shifts,
+reflow, mixed restored widths and continued writes after snapshot restoration.
+Cursor insertion, ordinary page copies, reflow and PAGE decoding follow their
+different native allocation orders. SU/SD retain temporary cursor crossings,
+including renewed implicit link IDs. Rebuilding any resource also remaps live
+hyperlinks, and detached viewport copies own no string allocations.
+
+Snapshots preserve the live LINK table IDs and cursor-only references, including
+tables with more than 511 entries. Three cross-decode fixtures compare continued
+terminal state with uninterrupted input. Page allocation charges are compared
+separately: PAGE captures populated row counts, so a native snapshot roundtrip
+can legitimately discard unused grid capacity. Complete resource exhaustion,
+reflow splitting, compression and mutation combinations remain incomplete.
 
 `--snapshot-wire --case snapshot/resources/graphemes/` includes 178 fixtures
 (534 delivery comparisons) for bounded suffix admission, malformed and

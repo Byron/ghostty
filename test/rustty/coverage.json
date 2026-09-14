@@ -104,12 +104,12 @@
     {
       "id": "terminal.page-layout",
       "status": "partial",
-      "remaining": "Page/resource capacity and offset arithmetic, column adjustment and pooled/exact allocation charge are compared on macOS ARM64 without backing allocations. Live STYLE and grapheme retention, fragmentation and growth have bounded coverage under terminal.pages; full splitting, resource inheritance and other platform ABIs remain."
+      "remaining": "Page/resource capacity and offset arithmetic, column adjustment and pooled/exact allocation charge are compared on macOS ARM64 without backing allocations. Live STYLE, grapheme and hyperlink/string retention, fragmentation and growth have bounded coverage under terminal.pages; full splitting, resource inheritance and other platform ABIs remain."
     },
     {
       "id": "terminal.pages",
       "status": "partial",
-      "remaining": "Initialization, growth, whole-page pruning, clear/reset, dimension changes, reflow and snapshot admission compare native boundaries, capacities and allocation charges on macOS ARM64. Live STYLE ownership, growth and mixed-width row copies have bounded coverage. Native STYLE splits and narrow-page mutations are repaired; Rust follows corrected growth, padding and cursor metadata across 96 mixed-width comparisons. Live grapheme chunk ownership, fragmentation, projected growth, erasure, row moves/copies, reflow, mixed restored widths, tiny capacities and snapshot continuation pass 777 comparisons across 259 fixtures. Growth rebuilds both resource ledgers atomically, and viewport copies own no allocations. Hyperlink resources, splitting during reflow, compression and complete lifecycle combinations remain."
+      "remaining": "Initialization, growth, whole-page pruning, clear/reset, dimension changes, reflow and snapshot admission compare native boundaries, capacities and allocation charges on macOS ARM64. Live STYLE ownership, growth and mixed-width row copies have bounded coverage. Native STYLE splits and narrow-page mutations are repaired; Rust follows corrected growth, padding and cursor metadata across 96 mixed-width comparisons. Live grapheme chunk ownership, fragmentation, projected growth, erasure, row moves/copies, reflow, mixed restored widths, tiny capacities and snapshot continuation pass 777 comparisons across 259 fixtures. Growth rebuilds both resource ledgers atomically, and viewport copies own no allocations. Live hyperlink/string ownership, delayed reclamation, deduplication, hash collisions, cursor page crossings, temporary SU/SD cursor moves, growth, erasure, reflow, mixed restored widths and snapshot continuation pass 297 comparisons across 99 fixtures. Snapshot encoding preserves native LINK IDs and cursor-only references, including tables above 511 entries. Splitting during reflow, compression and complete lifecycle/resource-exhaustion combinations remain."
     },
     {
       "id": "terminal.tracked",

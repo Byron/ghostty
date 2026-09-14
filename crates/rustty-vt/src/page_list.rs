@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::page_layout::PageCapacity;
-use crate::page_resources::{GraphemeAdmission, StyleAdmission};
+use crate::page_resources::{GraphemeAdmission, HyperlinkAdmission, StyleAdmission};
 use crate::screen::ScrollbackLimits;
 
 /// A live list differs from its clones and replacements even when page serials
@@ -50,6 +50,8 @@ pub(crate) struct Page {
     pub styles: StyleAdmission,
     #[serde(skip)]
     pub graphemes: GraphemeAdmission,
+    #[serde(skip)]
+    pub links: HyperlinkAdmission,
 }
 
 impl Page {
@@ -156,6 +158,11 @@ impl PageList {
             serial: self.next_serial,
             layout_generation: 0,
             styles: StyleAdmission::new(layout.styles_layout),
+            links: HyperlinkAdmission::new(
+                layout.hyperlink_set_layout,
+                layout.string_alloc_layout,
+                layout.hyperlink_map_layout.capacity as usize * 80 / 100,
+            ),
             graphemes: GraphemeAdmission::new(
                 layout.grapheme_alloc_layout,
                 layout.grapheme_map_layout.capacity as usize,
@@ -174,6 +181,11 @@ impl PageList {
             serial: self.next_serial,
             layout_generation: 0,
             styles: StyleAdmission::new(layout.styles_layout),
+            links: HyperlinkAdmission::new(
+                layout.hyperlink_set_layout,
+                layout.string_alloc_layout,
+                layout.hyperlink_map_layout.capacity as usize * 80 / 100,
+            ),
             graphemes: GraphemeAdmission::new(
                 layout.grapheme_alloc_layout,
                 layout.grapheme_map_layout.capacity as usize,
@@ -328,6 +340,7 @@ impl PageList {
                     serial: result.next_serial,
                     layout_generation: 0,
                     styles: StyleAdmission::default(),
+                    links: HyperlinkAdmission::default(),
                     graphemes: GraphemeAdmission::default(),
                 });
                 result.next_serial = result.next_serial.wrapping_add(1);

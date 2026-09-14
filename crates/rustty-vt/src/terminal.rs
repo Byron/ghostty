@@ -443,10 +443,10 @@ impl Terminal {
         self.primary
             .resize(cols.into(), rows.into(), self.modes.dec(7));
         self.primary.clear_prompt_for_redraw(prompt_redraw);
-        self.primary.sync_cursor_style();
+        self.primary.sync_cursor_resources();
         if let Some(alt) = &mut self.alternate {
             alt.resize(cols.into(), rows.into(), false);
-            alt.sync_cursor_style();
+            alt.sync_cursor_resources();
         }
         if cols != self.cols {
             self.tabstops = (0..cols).map(|i| i > 0 && i % 8 == 0).collect();
@@ -655,10 +655,7 @@ impl Terminal {
     }
 
     fn end_hyperlink(&mut self) {
-        let cursor = &mut self.screen_mut().cursor;
-        cursor.hyperlink = None;
-        cursor.hyperlink_id = None;
-        cursor.hyperlink_raw = None;
+        self.screen_mut().end_hyperlink();
     }
 
     pub fn plain_text(&self) -> String {
@@ -682,7 +679,7 @@ impl Terminal {
     }
 
     pub(crate) fn changed(&mut self) {
-        self.screen_mut().sync_cursor_style();
+        self.screen_mut().sync_cursor_resources();
         self.generation = self.generation.wrapping_add(1);
     }
     fn reset_margins(&mut self) {
@@ -995,6 +992,7 @@ impl Terminal {
     }
 
     fn put_cell(&mut self, mut text: String, width: u8, spacer_head: bool) {
+        self.screen_mut().sync_cursor_resources();
         // Map only when writing a cell. Width, combining behavior, and REP
         // use the original scalar; even an empty spacer consumes one shift.
         let charset = &mut self.screen_mut().charset;
@@ -1030,6 +1028,7 @@ impl Terminal {
         let row = &mut self.screen_mut().rows[cursor.row];
         let cell = Cell {
             style_id,
+            link_id: 0,
             grapheme: None,
             text,
             width,
@@ -1050,6 +1049,15 @@ impl Terminal {
             };
         }
         row.dirty = true;
+        if self.screen().rows[cursor.row].cells[cursor.col]
+            .hyperlink
+            .is_some()
+        {
+            self.screen_mut().set_cell_cursor_hyperlink(cursor.col);
+            if width == 2 {
+                self.screen_mut().set_cell_cursor_hyperlink(cursor.col + 1);
+            }
+        }
     }
 
     fn print_wrap(&mut self) {
@@ -1222,7 +1230,7 @@ impl Terminal {
             && cursor.col >= self.margins.left
             && cursor.col <= self.margins.right
         {
-            self.scroll_down(1);
+            self.scroll_region(1, false);
         } else {
             self.cursor_vertical(1, false);
         }
@@ -1348,6 +1356,40 @@ impl Terminal {
         screen.sync_resource_pages(false);
     }
 
+    fn scrolls_above_cursor(&self) -> bool {
+        let m = self.margins;
+        m.top == 0
+            && m.left == 0
+            && m.right + 1 == usize::from(self.cols)
+            && (!self.alternate_active || m.bottom + 1 == usize::from(self.rows))
+    }
+
+    /// SU/SD temporarily move to a margin before doing the row operation.
+    /// Even though the visible cursor returns, those page crossings migrate
+    /// its resources and renew implicit hyperlink identities.
+    fn scroll_region(&mut self, count: usize, up: bool) {
+        let cursor = &self.screen().cursor;
+        let saved = (cursor.col, cursor.row, cursor.pending_wrap);
+        let (col, row) = if up && self.scrolls_above_cursor() {
+            (0, self.margins.bottom)
+        } else {
+            (self.margins.left, self.margins.top)
+        };
+        self.ensure_row_cells(row, col + 1);
+        self.screen_mut().cursor.col = col;
+        self.screen_mut().cursor.row = row;
+        self.screen_mut().sync_cursor_resources();
+        if up {
+            self.scroll_up(count, true)
+        } else {
+            self.scroll_down(count)
+        }
+        self.ensure_row_cells(saved.1, saved.0 + 1);
+        let cursor = &mut self.screen_mut().cursor;
+        (cursor.col, cursor.row, cursor.pending_wrap) = saved;
+        self.screen_mut().sync_cursor_resources();
+    }
+
     fn scroll_up(&mut self, count: usize, history: bool) {
         self.ensure_active_columns();
         let m = self.margins;
@@ -1356,8 +1398,7 @@ impl Terminal {
         let bg = self.screen().cursor.style.background;
         let full = m.left == 0 && m.right == cols - 1;
         let alternate = self.alternate_active;
-        let shift_history =
-            history && m.top == 0 && full && (!alternate || m.bottom + 1 == usize::from(self.rows));
+        let shift_history = history && self.scrolls_above_cursor();
         if !shift_history {
             self.prepare_row_shift();
         }
@@ -1920,7 +1961,7 @@ impl Terminal {
                 };
                 self.screen_mut().release_cursor_style();
                 self.screen_mut().cursor.style = style;
-                self.screen_mut().sync_cursor_style();
+                self.screen_mut().sync_cursor_resources();
                 self.modes.set(true, 6, false);
                 self.reset_margins();
                 self.cursor_position(1, 1);
@@ -1930,7 +1971,7 @@ impl Terminal {
                 }
                 for y in 0..usize::from(self.rows) {
                     self.screen_mut().cursor.row = y;
-                    self.screen_mut().sync_cursor_style();
+                    self.screen_mut().sync_cursor_resources();
                     let count = self.screen().rows[y].cells.len();
                     let mut style_id = 0;
                     for _ in 0..count {
@@ -2094,11 +2135,7 @@ impl Terminal {
             ([], b'S' | b'T') => {
                 // Scrolling defaults to one only when the parameter is omitted.
                 if p.is_empty() || n != 0 {
-                    if byte == b'S' {
-                        self.scroll_up(count, true);
-                    } else {
-                        self.scroll_down(count);
-                    }
+                    self.scroll_region(count, byte == b'S');
                 }
             }
             ([], b'b') => {
@@ -2344,19 +2381,7 @@ impl Terminal {
                     }
                     self.end_hyperlink();
                     if !uri.is_empty() {
-                        let screen = self.screen_mut();
-                        let id = match explicit {
-                            Some(id) => HyperlinkId::Explicit(id.to_vec()),
-                            None => {
-                                let id = screen.metadata.hyperlink_implicit_id;
-                                screen.metadata.hyperlink_implicit_id = id.wrapping_add(1);
-                                HyperlinkId::Implicit(id)
-                            }
-                        };
-                        screen.cursor.hyperlink = Some(String::from_utf8_lossy(uri).into_owned());
-                        screen.cursor.hyperlink_raw =
-                            std::str::from_utf8(uri).is_err().then(|| uri.to_vec());
-                        screen.cursor.hyperlink_id = Some(id);
+                        self.screen_mut().start_hyperlink(uri, explicit);
                     }
                 }
             }

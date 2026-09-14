@@ -996,7 +996,10 @@ impl Terminal {
         let slot = charset.single.take().unwrap_or(charset.gl);
         if let Some(cp) = text.chars().next() {
             let mapped = map_charset(cp, charset.slots[slot]);
-            if cp != mapped {
+            if mapped == '\0' {
+                // Native cells reserve codepoint zero for empty content.
+                text.clear();
+            } else if cp != mapped {
                 text.replace_range(..cp.len_utf8(), &mapped.to_string());
             }
         }

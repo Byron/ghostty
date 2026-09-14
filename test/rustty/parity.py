@@ -439,6 +439,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--generated", type=int, default=0)
+    parser.add_argument("--corpus", action="store_true", help="compare inherited terminal-stream corpus cases")
     parser.add_argument("--input", action="store_true", help="compare keyboard, mouse, focus and paste encoding")
     parser.add_argument("--parser", action="store_true", help="compare raw parser events and inherited parser corpus")
     parser.add_argument("--unicode", action="store_true", help="compare widths of all 1,112,064 Unicode scalars")
@@ -460,7 +461,7 @@ def main():
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     if not args.no_build:
         zig_build = ["zig", "build", "vt-oracle", "-Demit-lib-vt=true", "-Demit-macos-app=false"]
-        if args.pages or args.thorough:
+        if args.pages or args.corpus or args.thorough:
             zig_build.append("-Doptimize=ReleaseSafe")
         subprocess.run(zig_build, cwd=ROOT, check=True)
         subprocess.run(["cargo", "build", "--offline", "-p", "rustty-vt", "--example", "parity"], cwd=ROOT, check=True)
@@ -583,9 +584,11 @@ def main():
                 requests.extend((request, covers) for request, covers in osc_strings.requests()
                                 if not args.case or args.case in request["id"])
                 requests.extend(osc_strings.allocating_requests(args.case))
-            if args.thorough:
-                requests.extend((request, []) for request in corpus_requests())
-            requests.extend((request, []) for request in generated_requests(args.seed, args.generated or (100 if args.thorough else 0)))
+            if args.corpus or args.thorough:
+                requests.extend((request, ["terminal.write"]) for request in corpus_requests()
+                                if not args.case or args.case in request["id"])
+            requests.extend((request, []) for request in generated_requests(args.seed, args.generated or (100 if args.thorough else 0))
+                            if not args.case or args.case in request["id"])
         for base, covers in requests:
             success = True
             baseline = None

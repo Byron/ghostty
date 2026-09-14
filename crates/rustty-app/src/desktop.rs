@@ -2860,6 +2860,10 @@ impl App {
                             let Some(prepared) = host.prepared.get(&id) else {
                                 continue;
                             };
+                            needs_blink |= !synchronized
+                                && is_focused
+                                && !pane.exited
+                                && prepared.frame.blinking_text;
                             if composed
                                 .append_clipped(
                                     &prepared.frame,

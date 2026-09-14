@@ -204,6 +204,24 @@ fn resize_remaps_saved_cursor_separately_from_the_live_cursor() {
 }
 
 #[test]
+fn widening_without_reflow_preserves_spacer_attributes() {
+    for initial_columns in [4, 8] {
+        let mut terminal = Terminal::new(initial_columns, 3, 100);
+        terminal.feed(b"\x1b[?1049h");
+        terminal.resize(4, 3);
+        terminal.feed("\x1b[1;31;44m\x1b]8;id=wide;https://example.org\x1b\\abc界".as_bytes());
+        let mut expected = terminal.screen().rows[0].cells[3].clone();
+        assert!(expected.spacer_head);
+        expected.spacer_head = false;
+
+        terminal.resize(6, 3);
+        assert_eq!(terminal.screen().rows[0].cells[3], expected);
+        assert!(!terminal.screen().rows[1].wrap_continuation);
+        invariant(&terminal);
+    }
+}
+
+#[test]
 fn insertion_preserves_soft_wrap_and_edits_remove_stale_wide_padding() {
     let mut t = Terminal::new(4, 3, 100);
     t.feed(b"abcdef\x1b[H\x1b[@");

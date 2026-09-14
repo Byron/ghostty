@@ -2227,6 +2227,9 @@ impl Terminal {
                     self.modes.save(true, mode);
                 }
             }
+            ([b'>'], b's') if p.len() <= 1 && n <= 1 => {
+                self.metadata.mouse_shift_capture = Some(n == 1);
+            }
             ([b'?'], b'r') => {
                 for &mode in p {
                     let value = self.modes.restore(true, mode);

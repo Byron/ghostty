@@ -43,6 +43,7 @@ significant. Values describe the recognized operations, not arbitrary parameters
 | `>4;2m`, `>...n` | Enable/disable the supported xterm modify-other-keys mode; consumed by key encoding. Other modify-other-keys levels do not enable level 2. |
 | `h`, `l`, `?h`, `?l` | Set/reset the supported ANSI/DEC modes listed below. |
 | `?s`, `?r` | Save/restore supported DEC modes; restore performs their transitions and initial host reports. |
+| `>s`, `>0s`, `>1s` | XTSHIFTESCAPE requests whether the application captures Shift with mouse input. The desktop applies `mouse-shift-capture` policy to both buttons and scrolling; snapshots preserve the request and RIS resets it. |
 | `r` | Top/bottom scrolling margins, consumed by indexing, scrolling, erasure, and origin-relative positioning. |
 | `s` | Left/right margins while mode 69 is enabled; otherwise saves the cursor. |
 | `u` | Restore the saved cursor, attributes, origin, and character-set state. |
@@ -155,10 +156,10 @@ but do not drive editor click forwarding in the desktop. Prompt `redraw` and `k`
 options do affect terminal behavior. OSC 3008 context signals are not dispatched
 by Rustty; Ghostty recognizes their metadata but also has no terminal callback.
 
-Native XTSHIFTESCAPE (`CSI >0s` / `CSI >1s`) is another unsupported command in
-Rustty, rather than an implemented mode: Shift continues to override mouse
-reporting for local selection. This inventory does not equate arbitrary parser
-events, snapshot-only fields, or native parser recognition with Rustty support.
+Shift overrides mouse reporting for local selection by default. XTSHIFTESCAPE
+can change that preference unless `mouse-shift-capture` is `always` or `never`.
+This inventory does not equate arbitrary parser events, snapshot-only fields,
+or native parser recognition with Rustty support.
 
 ## Regression coverage
 

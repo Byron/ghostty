@@ -3424,9 +3424,17 @@ impl App {
             let mouse = self
                 .panes
                 .get(&id)
-                .and_then(|p| p.session.terminal().ok().map(|t| t.mouse_mode != 0))
+                .and_then(|p| {
+                    p.session.terminal().ok().map(|terminal| {
+                        input::mouse_reporting(
+                            &terminal,
+                            host.modifiers.state(),
+                            self.config().mouse_shift_capture,
+                        )
+                    })
+                })
                 .unwrap_or(false);
-            if mouse && !host.modifiers.state().shift_key() {
+            if mouse {
                 for _ in 0..lines.abs().ceil().min(128.0) as usize {
                     self.mouse(
                         host,
@@ -3603,7 +3611,11 @@ impl App {
         let Ok(mut terminal) = pane.session.terminal() else {
             return;
         };
-        if terminal.mouse_mode != 0 && !host.modifiers.state().shift_key() {
+        if input::mouse_reporting(
+            &terminal,
+            host.modifiers.state(),
+            config.mouse_shift_capture,
+        ) {
             let bytes = terminal.encode_mouse(
                 vt::MouseEvent {
                     action,

@@ -70,6 +70,27 @@ fn action(config: &Config, trigger: &str) -> Option<Action> {
 }
 
 #[test]
+fn mouse_shift_capture_loads_ghostty_policy_and_resets_to_the_default() {
+    let home = TestHome::new();
+    for (value, expected) in [
+        ("false", MouseShiftCapture::False),
+        ("true", MouseShiftCapture::True),
+        ("always", MouseShiftCapture::Always),
+        ("never", MouseShiftCapture::Never),
+        ("", MouseShiftCapture::False),
+    ] {
+        home.local(&format!("mouse-shift-capture={value}\n"));
+        let loaded = home.loader.load();
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.config.mouse_shift_capture, expected);
+    }
+    home.local("mouse-shift-capture=invalid\n");
+    let loaded = home.loader.load();
+    assert_eq!(loaded.diagnostics.len(), 1);
+    assert_eq!(loaded.config.mouse_shift_capture, MouseShiftCapture::False);
+}
+
+#[test]
 fn no_config_returns_defaults_without_creating_any_settings() {
     let home = TestHome::new();
     let loaded = home.loader.load();

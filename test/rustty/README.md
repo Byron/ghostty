@@ -130,7 +130,8 @@ creation. The default right-hand slot is G2 in all of these paths.
 `--grid` compares direct selection, literal search and tracked-reference APIs.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,
 `clear_selection`, `select_word`, `select_word_between`, `select_line`,
-`select_all`, `select_output`, `adjust_selection`, `format_selection`, `track`, `untrack`, `viewport`, `limits`, `search`,
+`select_all`, `select_output`, `adjust_selection`, `format_selection`, `format_screen`,
+`format_terminal`, `track`, `untrack`, `viewport`, `limits`, `search`,
 `search_needle`, `search_feed`, `search_viewport`, `search_status`, `search_tick`,
 `search_run`, `search_matches`, `search_match`, `search_selected`, `search_next`,
 `search_prev`, `observe` and the `gesture_*`
@@ -201,8 +202,26 @@ HTML retains native page wrappers, escaping and hyperlink identity boundaries;
 VT retains native SGR ordering. The 121 fixtures exercise all 12 option
 combinations, including rectangles, wide/grapheme cells, colors and attributes,
 opaque hyperlink bytes, empty rows, cross-page wrapping and restored mixed-width
-pages. These are selection exports; full terminal-state serialization and
-formatter coordinate maps remain separate requirements.
+pages. Formatter coordinate maps remain a separate requirement.
+
+`--grid --case grid/terminal-format/` compares `Screen::formatter` and
+`Terminal::formatter` through the `format_screen` and `format_terminal` actions.
+`format_content` selects `all`, `none`, or the current `selection`. Full exporters
+preserve soft-wrapped rows by default; the selection convenience method keeps
+its existing unwrapping default. `screen_extra` controls cursor, style, link,
+protection, Kitty keyboard and charset state; `terminal_extra` also controls
+palette, modes, margins, tabstops, PWD and ModifyOtherKeys. Rust callers can use
+the `NONE`, `STYLES` and `ALL` constants to select these extras.
+
+The 93 fixtures pass 279 delivery comparisons across all formats and trim/unwrap
+combinations, history, alternate screens, restored mixed-width pages and extras
+individually or together. Exports preserve native ordering, including replaying
+the pending-wrap edge cell before restoring cursor attributes. Direct Rust tests
+also replay full and state-only exports into another terminal and check that
+exporting leaves the source unchanged. The native PWD formatter now omits its
+internal NUL terminator; all export bytes are compared directly. Explicit
+foreground/background/palette options, codepoint substitutions and coordinate
+maps remain separate coverage work.
 
 Literal search formats each retained page separately and follows native active
 and history traversal, including repeated soft-wrap matches and trimmed blank

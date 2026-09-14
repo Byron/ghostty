@@ -1,6 +1,6 @@
 use rustty_vt::{
     Selection, Terminal,
-    formatter::{Format, Options},
+    formatter::{Content, Format, Options, TerminalExtra},
 };
 
 #[test]
@@ -50,4 +50,83 @@ fn selection_formats_preserve_styles_utf8_bytes_and_leave_the_terminal_unchanged
         before
     );
     assert!(terminal.screen().selection.is_none());
+}
+
+#[test]
+fn full_exports_include_history_and_preserve_wrapped_rows_by_default() {
+    let mut terminal = Terminal::new(4, 2, 100);
+    terminal.feed(b"abcdefghi");
+    let mut formatter = terminal.screen().formatter(Format::Plain);
+    assert_eq!(formatter.format().unwrap(), b"abcd\nefgh\ni");
+    formatter.options.unwrap = true;
+    assert_eq!(formatter.format().unwrap(), b"abcdefghi");
+    formatter.content = Content::None;
+    assert!(formatter.format().unwrap().is_empty());
+}
+
+#[test]
+fn full_vt_export_restores_pending_wrap_before_the_active_cursor_attributes() {
+    let mut terminal = Terminal::new(4, 3, 100);
+    terminal
+        .feed(b"\x1b[31mabcd\x1b[32m\x1b]8;id=current;https://example.org\x07\x1b[1\"q\x1b[=21;1u");
+    let before = rustty_vt::snapshot::encode_to_vec(&terminal).unwrap();
+    let mut formatter = terminal.formatter(Format::Vt);
+    formatter.extra = TerminalExtra::ALL;
+    let output = formatter.format().unwrap();
+    assert_eq!(
+        rustty_vt::snapshot::encode_to_vec(&terminal).unwrap(),
+        before
+    );
+
+    let mut replayed = Terminal::new(4, 3, 100);
+    replayed.feed(&output);
+    assert!(replayed.screen().cursor.pending_wrap);
+    assert_eq!(replayed.screen().cursor, terminal.screen().cursor);
+    assert_eq!(replayed.screen().kitty_keyboard.current(), 21);
+    terminal.feed(b"e");
+    replayed.feed(b"e");
+    assert_eq!(replayed.screen().rows, terminal.screen().rows);
+    assert_eq!(replayed.screen().cursor, terminal.screen().cursor);
+}
+
+#[test]
+fn state_only_vt_export_restores_terminal_settings_without_printing_content() {
+    let mut terminal = Terminal::new(8, 4, 100);
+    terminal.feed(b"text\x1b[?1h\x1b[?7l\x1b[?69h\x1b[2;7s\x1b[2;3r\x1b[3g\x1b[2G\x1bH\x1b[6G\x1bH\x1b[>4;2m\x1b]7;file://host/\xffpath\x07\x1b[2;4H");
+    let mut formatter = terminal.formatter(Format::Vt);
+    formatter.content = Content::None;
+    formatter.extra = TerminalExtra::ALL;
+    let mut replayed = Terminal::new(8, 4, 100);
+    replayed.feed(&formatter.format().unwrap());
+    assert!(
+        replayed
+            .screen()
+            .rows
+            .iter()
+            .all(|row| row.text().is_empty())
+    );
+    assert_eq!(replayed.screen().cursor, terminal.screen().cursor);
+    for mode in [1, 7, 69] {
+        assert_eq!(replayed.modes.dec(mode), terminal.modes.dec(mode));
+    }
+    assert_eq!(replayed.tabstops(), terminal.tabstops());
+    assert!(replayed.modify_other_keys);
+    assert_eq!(
+        replayed.working_directory_bytes(),
+        terminal.working_directory_bytes()
+    );
+    assert_eq!(
+        (
+            replayed.margins.top,
+            replayed.margins.bottom,
+            replayed.margins.left,
+            replayed.margins.right
+        ),
+        (
+            terminal.margins.top,
+            terminal.margins.bottom,
+            terminal.margins.left,
+            terminal.margins.right
+        )
+    );
 }

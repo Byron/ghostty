@@ -10,21 +10,69 @@ use rustty_vt::{GridPoint, Screen, ScrollbackLimits, Selection, Terminal, Tracke
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FormatOptions {
     emit: rustty_vt::formatter::Format,
     unwrap: Option<bool>,
     trim: Option<bool>,
+    background: Option<[u8; 3]>,
+    foreground: Option<[u8; 3]>,
+    palette: Option<Vec<[u8; 3]>>,
+    codepoint_map: Vec<FormatMap>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FormatMap {
+    range: [u32; 2],
+    replacement: FormatReplacement,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FormatReplacement {
+    Codepoint(u32),
+    String(String),
 }
 
 impl FormatOptions {
-    fn options(self, selection: bool) -> rustty_vt::formatter::Options {
-        rustty_vt::formatter::Options {
+    fn maps(&self) -> Result<Vec<rustty_vt::formatter::CodepointMap<'_>>, &'static str> {
+        use rustty_vt::formatter::{CodepointMap, Replacement};
+        let cp = |value| char::from_u32(value).ok_or("InvalidCodepoint");
+        self.codepoint_map
+            .iter()
+            .map(|rule| {
+                Ok(CodepointMap {
+                    range: [cp(rule.range[0])?, cp(rule.range[1])?],
+                    replacement: match &rule.replacement {
+                        FormatReplacement::Codepoint(value) => Replacement::Codepoint(cp(*value)?),
+                        FormatReplacement::String(value) => Replacement::String(value),
+                    },
+                })
+            })
+            .collect()
+    }
+
+    fn options<'a>(
+        &'a self,
+        selection: bool,
+        maps: &'a [rustty_vt::formatter::CodepointMap<'a>],
+    ) -> Result<rustty_vt::formatter::Options<'a>, &'static str> {
+        Ok(rustty_vt::formatter::Options {
             emit: self.emit,
             unwrap: self.unwrap.unwrap_or(selection),
             trim: self.trim.unwrap_or(true),
-        }
+            background: self.background,
+            foreground: self.foreground,
+            palette: self
+                .palette
+                .as_deref()
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|_| "InvalidFormatPalette")?,
+            codepoint_map: maps,
+        })
     }
 }
 
@@ -443,45 +491,51 @@ impl Context {
                 "screen": if self.search.is_alternate_screen() { "alternate" } else { "primary" },
             }));
         }
-        let formatted = if op.action == "format_selection" {
-            terminal
-                .screen()
-                .selection
-                .and_then(|selection| {
-                    terminal
-                        .format_selection(selection, op.format.unwrap_or_default().options(true))
-                })
-                .map(|bytes| super::hex(&bytes))
-        } else if matches!(op.action.as_str(), "format_screen" | "format_terminal") {
+        let formatted = if matches!(
+            op.action.as_str(),
+            "format_selection" | "format_screen" | "format_terminal"
+        ) {
             use rustty_vt::formatter::Content;
-            let content = match op.format_content.as_deref().unwrap_or("all") {
+            let selection = op.action == "format_selection";
+            let tag = if selection {
+                "selection"
+            } else {
+                op.format_content.as_deref().unwrap_or("all")
+            };
+            let content = match tag {
                 "all" => Some(Content::All),
                 "none" => Some(Content::None),
                 "selection" => terminal.screen().selection.map(Content::Selection),
                 _ => return Err("InvalidFormatContent"),
             };
-            content
-                .and_then(|content| {
-                    let options = op.format.unwrap_or_default().options(false);
-                    if op.action == "format_terminal" {
-                        let mut formatter = terminal.formatter(options.emit);
-                        formatter.options = options;
-                        formatter.content = content;
-                        if let Some(extra) = op.terminal_extra {
-                            formatter.extra = extra;
-                        }
-                        formatter.format()
-                    } else {
-                        let mut formatter = terminal.screen().formatter(options.emit);
-                        formatter.options = options;
-                        formatter.content = content;
-                        if let Some(extra) = op.screen_extra {
-                            formatter.extra = extra;
-                        }
-                        formatter.format()
+            if let Some(content) = content {
+                let default = FormatOptions::default();
+                let format = op.format.as_ref().unwrap_or(&default);
+                let maps = format.maps()?;
+                let options = format.options(selection, &maps)?;
+                let bytes = if selection {
+                    terminal.format_selection(terminal.screen().selection.unwrap(), options)
+                } else if op.action == "format_terminal" {
+                    let mut formatter = terminal.formatter(options.emit);
+                    formatter.options = options;
+                    formatter.content = content;
+                    if let Some(extra) = op.terminal_extra {
+                        formatter.extra = extra;
                     }
-                })
-                .map(|bytes| super::hex(&bytes))
+                    formatter.format()
+                } else {
+                    let mut formatter = terminal.screen().formatter(options.emit);
+                    formatter.options = options;
+                    formatter.content = content;
+                    if let Some(extra) = op.screen_extra {
+                        formatter.extra = extra;
+                    }
+                    formatter.format()
+                };
+                bytes.map(|bytes| super::hex(&bytes))
+            } else {
+                None
+            }
         } else {
             None
         };

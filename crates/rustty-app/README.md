@@ -75,7 +75,8 @@ RUSTTY_SMOKE_DIR=/tmp/rustty-native-smoke target/debug/Rustty.app/Contents/MacOS
 
 The opt-in native smoke check starts disposable `/bin/sh` sessions, checks input,
 four split panes, tabs, quadrant focus and zoom, URI directory reports, restoration,
-progress animation, hover scrolling, hidden-tab title updates and idle rendering.
+progress animation, hover scrolling, file-drop targeting, hidden-tab title updates
+and idle rendering.
 The report records animation frame rate, the monitor's reported refresh rate, and
 window redraws and pane preparations during hidden-tab title updates. It writes
 `result.json`, `workspace.json` and a WGPU readback `window.png` into the specified

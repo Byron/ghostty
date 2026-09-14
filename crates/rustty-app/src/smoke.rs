@@ -305,7 +305,7 @@ impl Smoke {
                     }
                 }
                 if capture_path.is_file() {
-                    check_hover_scrolling(app, host)?;
+                    check_pointer_targets(app, host)?;
                     self.idle_frames = host.frames;
                     self.progress_started = Instant::now();
                     app.panes
@@ -343,7 +343,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -490,7 +490,7 @@ impl Smoke {
     }
 }
 
-fn check_hover_scrolling(app: &mut App, host: &mut Host) -> Result<()> {
+fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
     let focused = app
         .focused(host.id)
         .ok_or("no focused pane for scrolling")?;
@@ -606,6 +606,44 @@ fn check_hover_scrolling(app: &mut App, host: &mut Host) -> Result<()> {
                 return Err("scrolling outside panes kept a terminal target".into());
             }
         }
+
+        // A Finder drag can enter without updating the ordinary pointer state.
+        let _ = Platform::cursor_position(&host.window)?;
+        let _ = host.egui.on_window_event(
+            &host.window,
+            &WindowEvent::CursorLeft {
+                device_id: winit::event::DeviceId::dummy(),
+            },
+        );
+        let position = host.rects[&hovered].center();
+        let path = Path::new("/tmp/rustty's dropped file.txt");
+        for bracketed in [false, true] {
+            for (id, enabled) in [(focused, !bracketed), (hovered, bracketed)] {
+                app.panes[&id].session.terminal()?.feed(if enabled {
+                    b"\x1b[?2004h"
+                } else {
+                    b"\x1b[?2004l"
+                });
+            }
+            app.drop_file(host, position, path);
+            app.drop_file(host, Pos2::ZERO, path);
+            let expected: &[u8] = if bracketed {
+                b"\x1b[200~'/tmp/rustty'\\''s dropped file.txt' \x1b[201~"
+            } else {
+                b"'/tmp/rustty'\\''s dropped file.txt' "
+            };
+            if app.focused(host.id) != Some(focused) || app.panes[&focused].input.len() != 1 {
+                return Err("file drop affected the focused pane".into());
+            }
+            let pane = app.panes.get_mut(&hovered).unwrap();
+            if pane.input.len() != 2 || pane.input.back().unwrap() != expected {
+                return Err(
+                    "file drop did not use the target pane's paste mode and quoted path".into(),
+                );
+            }
+            pane.input.pop_back();
+            pane.input_bytes = 0;
+        }
         Ok(())
     })();
     for (id, terminal, input, input_bytes, mouse_cell) in saved {
@@ -630,7 +668,7 @@ fn check_hover_scrolling(app: &mut App, host: &mut Host) -> Result<()> {
     };
     let _ = host.egui.on_window_event(&host.window, &event);
     result?;
-    eprintln!("Native smoke: trackpad and wheel scrolling followed hover without changing focus");
+    eprintln!("Native smoke: scrolling and file drops followed the pointer without changing focus");
     Ok(())
 }
 

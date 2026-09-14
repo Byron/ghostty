@@ -174,6 +174,93 @@ enum LayoutCommand {
     Close,
 }
 
+// Host viewport and selection changes do not advance the terminal generation.
+#[derive(PartialEq)]
+struct PaneRenderKey {
+    generation: u64,
+    viewport_offset: usize,
+    selection: Option<vt::Selection>,
+    cursor: (usize, usize, vt::screen::CursorShape, bool, bool),
+    options: RenderOptions,
+    rect: egui::Rect,
+    scale: f32,
+}
+
+impl PaneRenderKey {
+    fn new(terminal: &vt::Terminal, options: RenderOptions, rect: egui::Rect, scale: f32) -> Self {
+        let screen = terminal.screen();
+        let cursor = &screen.cursor;
+        Self {
+            generation: terminal.generation,
+            viewport_offset: screen.viewport_offset,
+            selection: screen.selection,
+            cursor: (
+                cursor.col,
+                cursor.row,
+                cursor.shape,
+                cursor.visible,
+                cursor.blink,
+            ),
+            options,
+            rect,
+            scale,
+        }
+    }
+}
+
+struct PreparedPane {
+    key: PaneRenderKey,
+    frame: Frame,
+    text: TerminalText,
+    ime_rect: egui::Rect,
+}
+
+impl PreparedPane {
+    fn matches(&self, key: &PaneRenderKey, fonts: &rustty_render::Renderer) -> bool {
+        self.key == *key && self.frame.generation == fonts.generation()
+    }
+
+    fn new(
+        pane: Id,
+        key: PaneRenderKey,
+        screen: &vt::Screen,
+        fonts: &mut rustty_render::Renderer,
+    ) -> std::result::Result<Self, rustty_render::RenderError> {
+        let metrics = fonts.metrics();
+        let frame = fonts.prepare(screen, &key.options)?;
+        let origin = [key.rect.left(), key.rect.top()];
+        let padding = key.options.padding;
+        let text = TerminalText::new(
+            pane,
+            screen,
+            [
+                origin[0] + padding[0] / key.scale,
+                origin[1] + padding[1] / key.scale,
+            ],
+            [
+                metrics.cell_width as f32 / key.scale,
+                metrics.cell_height as f32 / key.scale,
+            ],
+        );
+        let [x, y, width, height] = frame.ime_cursor.unwrap_or([
+            padding[0] + screen.cursor.col as f32 * metrics.cell_width as f32,
+            padding[1] + screen.cursor.row as f32 * metrics.cell_height as f32,
+            metrics.cell_width as f32,
+            metrics.cell_height as f32,
+        ]);
+        let ime_rect = egui::Rect::from_min_size(
+            Pos2::new(origin[0] + x / key.scale, origin[1] + y / key.scale),
+            Vec2::new(width / key.scale, height / key.scale),
+        );
+        Ok(Self {
+            key,
+            frame,
+            text,
+            ime_rect,
+        })
+    }
+}
+
 struct Host {
     id: Id,
     viewport: ViewportId,
@@ -181,7 +268,8 @@ struct Host {
     egui: egui_winit::State,
     fonts: rustty_render::Renderer,
     rects: BTreeMap<Id, egui::Rect>,
-    accessibility: BTreeMap<Id, TerminalText>,
+    prepared: BTreeMap<Id, PreparedPane>,
+    pane_prepares: u64,
     content: Rect,
     divider_drag: Option<(Id, Axis, Rect)>,
     modifiers: Modifiers,
@@ -861,7 +949,8 @@ impl App {
             egui,
             fonts,
             rects: BTreeMap::new(),
-            accessibility: BTreeMap::new(),
+            prepared: BTreeMap::new(),
+            pane_prepares: 0,
             content: Rect::UNIT,
             divider_drag: None,
             modifiers: Modifiers::default(),
@@ -2405,7 +2494,6 @@ impl App {
             })
             .unwrap_or_else(|| "Rustty".into());
         host.window.set_title(&format!("{title} — Rustty"));
-        host.accessibility.clear();
         let mut output = context.run_ui(raw, |root_ui| {
             let ctx = &context;
             root_ui.visuals_mut().selection.bg_fill = accent;
@@ -2573,6 +2661,7 @@ impl App {
                             )
                         })
                         .collect();
+                    host.prepared.retain(|id, _| host.rects.contains_key(id));
                     let mut composed = Frame::empty([size.width, size.height]);
                     let mut accessible = Vec::new();
                     let mut terminal_ime_rect = None;
@@ -2619,53 +2708,56 @@ impl App {
                                 render_error = Some(error.to_string());
                                 continue;
                             }
-                            if let Ok(mut terminal) = pane.session.terminal() {
-                                let now_ms =
-                                    self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                                if let Some(next) = terminal.tick_graphics(now_ms) {
-                                    let deadline = Instant::now()
-                                        + Duration::from_millis(next.saturating_sub(now_ms));
-                                    animation_deadline = Some(
-                                        animation_deadline
-                                            .map_or(deadline, |old| old.min(deadline)),
-                                    );
-                                }
-                            }
-                            let snapshot = match pane.session.snapshot() {
-                                Ok(snapshot) => snapshot,
+                            let mut terminal = match pane.session.terminal() {
+                                Ok(terminal) => terminal,
                                 Err(error) => {
                                     render_error = Some(error.to_string());
                                     continue;
                                 }
                             };
+                            let now_ms =
+                                self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                            if let Some(next) = terminal.tick_graphics(now_ms) {
+                                let deadline = Instant::now()
+                                    + Duration::from_millis(next.saturating_sub(now_ms));
+                                animation_deadline = Some(
+                                    animation_deadline.map_or(deadline, |old| old.min(deadline)),
+                                );
+                            }
                             let is_focused = host.focused && id == focused && host.peek.is_none();
                             needs_blink |= is_focused
                                 && !pane.exited
                                 && !host.composing
-                                && snapshot.screen.cursor.visible
-                                && snapshot.screen.cursor.blink;
-                            let cursor_color = snapshot.cursor_color.unwrap_or(snapshot.foreground);
+                                && terminal.screen().cursor.visible
+                                && terminal
+                                    .screen()
+                                    .cursor
+                                    .row
+                                    .saturating_add(terminal.screen().viewport_offset)
+                                    < terminal.rows as usize
+                                && terminal.screen().cursor.blink;
+                            let cursor_color = terminal.cursor_color.unwrap_or(terminal.foreground);
                             let resolve = |color: config::TerminalColor| match color {
                                 config::TerminalColor::Rgb(color) => [color.r, color.g, color.b],
-                                config::TerminalColor::CellForeground => snapshot.foreground,
-                                config::TerminalColor::CellBackground => snapshot.background,
+                                config::TerminalColor::CellForeground => terminal.foreground,
+                                config::TerminalColor::CellBackground => terminal.background,
                             };
                             let options = RenderOptions {
                                 size: [physical.x.max(1.0) as u32, physical.y.max(1.0) as u32],
                                 padding,
-                                foreground: snapshot.foreground,
-                                background: snapshot.background,
+                                foreground: terminal.foreground,
+                                background: terminal.background,
                                 cursor_color,
                                 cursor_text: config
                                     .cursor_text
                                     .map(resolve)
-                                    .unwrap_or(snapshot.background),
+                                    .unwrap_or(terminal.background),
                                 selection_background: config
                                     .selection_background
                                     .map(resolve)
                                     .unwrap_or([65, 85, 120]),
                                 selection_foreground: config.selection_foreground.map(resolve),
-                                palette: snapshot
+                                palette: terminal
                                     .palette
                                     .as_slice()
                                     .try_into()
@@ -2681,28 +2773,42 @@ impl App {
                                     }
                                 }),
                             };
-                            let mut ime_cursor = None;
-                            match host.fonts.prepare(&snapshot.screen, &options) {
-                                Ok(frame) => {
-                                    ime_cursor = frame.ime_cursor;
-                                    if composed
-                                        .append_clipped(
-                                            &frame,
-                                            [rect.left() * scale, rect.top() * scale],
-                                            [
-                                                rect.left() * scale,
-                                                rect.top() * scale,
-                                                physical.x,
-                                                physical.y,
-                                            ],
-                                        )
-                                        .is_err()
-                                    {
-                                        retry = true;
-                                        break;
+                            let key = PaneRenderKey::new(&terminal, options, rect, scale);
+                            let snapshot = (!host
+                                .prepared
+                                .get(&id)
+                                .is_some_and(|pane| pane.matches(&key, &host.fonts)))
+                            .then(|| terminal.screen().snapshot_viewport());
+                            drop(terminal);
+                            if let Some(snapshot) = snapshot {
+                                match PreparedPane::new(id, key, &snapshot, &mut host.fonts) {
+                                    Ok(prepared) => {
+                                        host.prepared.insert(id, prepared);
+                                        host.pane_prepares += 1;
+                                    }
+                                    Err(error) => {
+                                        host.prepared.remove(&id);
+                                        render_error = Some(error.to_string());
+                                        continue;
                                     }
                                 }
-                                Err(error) => render_error = Some(error.to_string()),
+                            }
+                            let prepared = &host.prepared[&id];
+                            if composed
+                                .append_clipped(
+                                    &prepared.frame,
+                                    [rect.left() * scale, rect.top() * scale],
+                                    [
+                                        rect.left() * scale,
+                                        rect.top() * scale,
+                                        physical.x,
+                                        physical.y,
+                                    ],
+                                )
+                                .is_err()
+                            {
+                                retry = true;
+                                break;
                             }
                             if id != focused && config.unfocused_split_opacity < 1.0 {
                                 let color =
@@ -2718,34 +2824,9 @@ impl App {
                                         .opacity(1.0 - config.unfocused_split_opacity),
                                 ));
                             }
-                            host.accessibility.insert(
-                                id,
-                                TerminalText::new(
-                                    id,
-                                    &snapshot.screen,
-                                    [
-                                        rect.left() + padding[0] / scale,
-                                        rect.top() + padding[1] / scale,
-                                    ],
-                                    [
-                                        metrics.cell_width as f32 / scale,
-                                        metrics.cell_height as f32 / scale,
-                                    ],
-                                ),
-                            );
                             accessible.push((id, rect));
                             if id == focused && !pane.exited {
-                                let cursor = &snapshot.screen.cursor;
-                                let [x, y, width, height] = ime_cursor.unwrap_or([
-                                    padding[0] + cursor.col as f32 * metrics.cell_width as f32,
-                                    padding[1] + cursor.row as f32 * metrics.cell_height as f32,
-                                    metrics.cell_width as f32,
-                                    metrics.cell_height as f32,
-                                ]);
-                                terminal_ime_rect = Some(egui::Rect::from_min_size(
-                                    Pos2::new(rect.left() + x / scale, rect.top() + y / scale),
-                                    Vec2::new(width / scale, height / scale),
-                                ));
+                                terminal_ime_rect = Some(prepared.ime_rect);
                             }
                         }
                         if !retry {
@@ -3133,8 +3214,8 @@ impl App {
             self.layout_command(host, command);
         }
         if let Some(update) = &mut output.platform_output.accesskit_update {
-            for text in host.accessibility.values() {
-                text.append_to(update);
+            for pane in host.prepared.values() {
+                pane.text.append_to(update);
             }
         }
         host.egui.handle_platform_output_with_event_loop(
@@ -3643,9 +3724,9 @@ impl ApplicationHandler<Event> for App {
                     match event.window_event {
                         AccessEvent::ActionRequested(request) => {
                             let pane = host
-                                .accessibility
+                                .prepared
                                 .iter()
-                                .find(|(_, text)| text.contains(request.target_node))
+                                .find(|(_, pane)| pane.text.contains(request.target_node))
                                 .map(|(&id, _)| id);
                             let mut handled = false;
                             if let Some(id) = pane {
@@ -3675,7 +3756,7 @@ impl ApplicationHandler<Event> for App {
                                         if let Some(ActionData::SetTextSelection(range)) =
                                             &request.data
                                             && let Some(selection) =
-                                                host.accessibility[&id].selection(*range)
+                                                host.prepared[&id].text.selection(*range)
                                             && let Some(pane) = self.panes.get(&id)
                                             && let Ok(mut terminal) = pane.session.terminal()
                                         {
@@ -4520,6 +4601,101 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_panes_follow_terminal_view_and_atlas_changes() {
+        let mut fonts = rustty_render::Renderer::new(font_config(&Config::default(), 1.0)).unwrap();
+        let rect = egui::Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(320.0, 160.0));
+        let options = RenderOptions {
+            size: [320, 160],
+            ..Default::default()
+        };
+        let key =
+            |terminal: &vt::Terminal| PaneRenderKey::new(terminal, options.clone(), rect, 1.0);
+        let mut terminal = vt::Terminal::new(20, 3, 64);
+        terminal.feed(b"first\r\nsecond\r\nthird\r\nfourth");
+        let prepared = PreparedPane::new(
+            1,
+            key(&terminal),
+            &terminal.screen().snapshot_viewport(),
+            &mut fonts,
+        )
+        .unwrap();
+        assert!(
+            prepared.matches(&key(&terminal), &fonts),
+            "an unchanged pane reuses its prepared content"
+        );
+
+        // Host scrolling and selection mutate the screen without advancing the
+        // terminal's stream generation, so both must participate in reuse.
+        terminal.screen_mut().scroll_viewport(1);
+        assert!(!prepared.matches(&key(&terminal), &fonts));
+        terminal.screen_mut().scroll_viewport(-1);
+        let point = vt::GridPoint {
+            row: terminal.screen().rows[0].id,
+            col: 0,
+        };
+        terminal.screen_mut().selection = Some(vt::Selection {
+            start: point,
+            end: point,
+            rectangular: false,
+        });
+        assert!(!prepared.matches(&key(&terminal), &fonts));
+        terminal.screen_mut().selection = None;
+        assert!(prepared.matches(&key(&terminal), &fonts));
+
+        let mut composition = key(&terminal);
+        composition.options.preedit = Some(rustty_render::Preedit {
+            text: "日本".into(),
+            selection: Some((3, 6)),
+        });
+        assert!(!prepared.matches(&composition, &fonts));
+        let moved = rect.translate(Vec2::new(30.0, 0.0));
+        let moved_key = PaneRenderKey::new(&terminal, options.clone(), moved, 1.0);
+        assert!(!prepared.matches(&moved_key, &fonts));
+        let moved_pane = PreparedPane::new(
+            1,
+            moved_key,
+            &terminal.screen().snapshot_viewport(),
+            &mut fonts,
+        )
+        .unwrap();
+        assert_eq!(
+            moved_pane.ime_rect,
+            prepared.ime_rect.translate(Vec2::new(30.0, 0.0))
+        );
+        terminal.feed(b"!");
+        assert!(!prepared.matches(&key(&terminal), &fonts));
+        let prepared = PreparedPane::new(
+            1,
+            key(&terminal),
+            &terminal.screen().snapshot_viewport(),
+            &mut fonts,
+        )
+        .unwrap();
+        fonts.clear_cache();
+        assert!(
+            !prepared.matches(&key(&terminal), &fonts),
+            "an atlas reset invalidates even unchanged panes"
+        );
+
+        terminal.feed(b"\x1b_Gi=1,s=1,v=1,f=32;/wAA/w==\x1b\\\x1b_Ga=f,i=1,s=1,v=1,f=32,z=50;AP8A/w==\x1b\\\x1b_Ga=a,i=1,r=1,z=50,s=3\x1b\\\x1b_Ga=p,i=1,C=1\x1b\\");
+        assert_eq!(terminal.tick_graphics(100), Some(150));
+        let prepared = PreparedPane::new(
+            1,
+            key(&terminal),
+            &terminal.screen().snapshot_viewport(),
+            &mut fonts,
+        )
+        .unwrap();
+        assert_eq!(terminal.tick_graphics(125), Some(150));
+        assert!(prepared.matches(&key(&terminal), &fonts));
+        assert_eq!(terminal.tick_graphics(150), Some(200));
+        assert!(
+            !prepared.matches(&key(&terminal), &fonts),
+            "a Kitty animation frame must invalidate retained graphics"
+        );
+    }
 
     #[test]
     fn determinate_progress_does_not_blend_into_the_focused_split_outline() {

@@ -125,6 +125,8 @@ impl Default for Request {
 struct Operation {
     op: String,
     #[serde(default)]
+    snapshot_max_continuation_bytes: Option<usize>,
+    #[serde(default)]
     glyph_max_bytes: Option<usize>,
     #[serde(default)]
     data: String,
@@ -830,7 +832,12 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                     return Err("UnsupportedGridRestore");
                 }
                 let data = unhex(&operation.data)?;
-                let options = rustty_vt::snapshot::DecodeOptions::default();
+                let options = rustty_vt::snapshot::DecodeOptions {
+                    max_continuation_bytes: operation
+                        .snapshot_max_continuation_bytes
+                        .unwrap_or(8 * 1024 * 1024),
+                    ..Default::default()
+                };
                 terminal = if operation.op == "restore_exact" {
                     rustty_vt::snapshot::decode_exact(data.as_slice(), options)
                 } else {
@@ -851,7 +858,12 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                         data: io::Cursor::new(unhex(&operation.data)?),
                         offset: snapshot_offset.clone(),
                     },
-                    rustty_vt::snapshot::DecodeOptions::default(),
+                    rustty_vt::snapshot::DecodeOptions {
+                        max_continuation_bytes: operation
+                            .snapshot_max_continuation_bytes
+                            .unwrap_or(8 * 1024 * 1024),
+                        ..Default::default()
+                    },
                 );
                 terminal = decoder.ready().map_err(|_| "InvalidSnapshot")?;
                 terminal.clipboard_write_limit = host.clipboard_write_limit;

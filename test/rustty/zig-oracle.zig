@@ -59,6 +59,7 @@ const capabilities = [_][]const u8{
 
 const Operation = struct {
     op: []const u8,
+    snapshot_max_continuation_bytes: ?usize = null,
     data: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
@@ -673,9 +674,9 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             if (grid.hasHandles()) return error.UnsupportedGridRestore;
             var source: std.Io.Reader = .fixed(try hexDecode(alloc, op.data));
             var decoded = (if (std.mem.eql(u8, op.op, "restore_exact"))
-                vt.snapshot.decodeExact(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 })
+                vt.snapshot.decodeExact(alloc, io, &source, .{ .max_continuation_bytes = op.snapshot_max_continuation_bytes orelse 8 * 1024 * 1024 })
             else
-                vt.snapshot.decode(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 })) catch return error.InvalidSnapshot;
+                vt.snapshot.decode(alloc, io, &source, .{ .max_continuation_bytes = op.snapshot_max_continuation_bytes orelse 8 * 1024 * 1024 })) catch return error.InvalidSnapshot;
             defer decoded.deinit(alloc);
             restoreTerminal(alloc, &t, &stream, &decoded);
             snapshot_decoder = null;
@@ -683,7 +684,7 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
             if (grid.hasHandles()) return error.UnsupportedGridRestore;
             snapshot_source = .fixed(try hexDecode(alloc, op.data));
             snapshot_decoder = .init(&snapshot_source);
-            var decoded = snapshot_decoder.?.ready(alloc, io, .{ .max_continuation_bytes = 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
+            var decoded = snapshot_decoder.?.ready(alloc, io, .{ .max_continuation_bytes = op.snapshot_max_continuation_bytes orelse 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
             defer decoded.deinit(alloc);
             restoreTerminal(alloc, &t, &stream, &decoded);
             try snapshot_progress.append(alloc, .{

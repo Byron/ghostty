@@ -179,7 +179,7 @@
     {
       "id": "snapshot.fixtures",
       "status": "partial",
-      "remaining": "Complete-v1, every truncation, selected corruptions and exact-decode rejection of trailing/concatenated data are compared. Native restored-cursor bounds are repaired; all 45 mixed-width cursor comparisons, including pending wrap and continued printing, pass. Remaining component fixtures and complete mixed PAGE transitions need coverage."
+      "remaining": "Complete-v1, every truncation, selected corruptions, exact-decode tails, terminal/screen metadata fallbacks and malformed record structure are compared. Shared continuation decode budgets are checked through full/exact/ready APIs; Rust reader/writer failures are injected at record boundaries. Native cursor bounds are repaired and 45 mixed-width cursor comparisons pass. Allocation-failure injection, remaining component fields and complete mixed PAGE transitions need coverage."
     },
     {
       "id": "fuzz.resource-limits",

@@ -426,6 +426,15 @@ after FINISH for bounded buffered sources. It rejects transport tails and
 concatenated snapshots without consuming the trailing bytes. Streaming users
 keep using `decode`, which stops at FINISH without checking EOF.
 
+`--case snapshot/metadata` compares terminal and screen flags, enum fallbacks,
+margins, colors, mode bits, keyboard flags and scrollback limits. Unknown
+cursor-default flags retain host preferences, and a restored NUL repeat writes
+native empty cells. `--case snapshot/boundary` checks malformed record shapes,
+ordering, duplicates, required dimensions and continuation budgets through
+full, exact and incremental decoding. Rust tests inject reader and writer errors
+at record headers, payload middles and boundaries, checking the returned error
+and exact written prefix. Allocation-failure injection remains uncovered.
+
 `--snapshot-wire --case snapshot/resources/hyperlinks` compares PAGE hyperlink
 table admission, string-pool allocation, duplicate values and wire IDs, invalid
 entries, collision limits and the linked-cell map limit. Explicit IDs allocate

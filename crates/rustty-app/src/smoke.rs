@@ -21,6 +21,8 @@ fn hover_measurement_restarts_for_motion_and_leaving_but_not_duplicate_events() 
         progress_frames: 0,
         progress_seconds: 0.0,
         hidden_title_frames: 0,
+        header_frames: 0,
+        header_prepares: 0,
         events: BTreeMap::new(),
     };
     let position = Some(Pos2::new(100.0, 100.0));
@@ -50,6 +52,8 @@ pub(super) struct Smoke {
     progress_frames: u64,
     progress_seconds: f64,
     hidden_title_frames: u64,
+    header_frames: u64,
+    header_prepares: u64,
     events: BTreeMap<&'static str, u64>,
 }
 impl Smoke {
@@ -82,6 +86,8 @@ impl Smoke {
             progress_frames: 0,
             progress_seconds: 0.0,
             hidden_title_frames: 0,
+            header_frames: 0,
+            header_prepares: 0,
             events: BTreeMap::new(),
         }))
     }
@@ -337,7 +343,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","hidden-tab-titles","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -428,6 +434,50 @@ impl Smoke {
                 eprintln!(
                     "Native smoke: 20 masked hidden-tab titles caused {} settling frames",
                     self.hidden_title_frames
+                );
+                let index = app.index(host.id).unwrap();
+                let window = &mut app.workspace.windows[index];
+                let hidden = window
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.title.as_deref() == Some("Background agent"))
+                    .unwrap();
+                hidden.title = None;
+                let id = hidden.focused;
+                self.header_frames = host.frames;
+                self.header_prepares = host.pane_prepares;
+                app.write(id, b"i=0; while [ \"$i\" -lt 20 ]; do printf '\\033]2;visible-agent-%s\\007' \"$i\"; i=$((i+1)); sleep 0.1; done\r".to_vec());
+                host.repaint();
+                self.next = Instant::now() + Duration::from_secs(3);
+                self.stage = 9;
+            }
+            9 => {
+                self.header_frames = host.frames.saturating_sub(self.header_frames);
+                self.header_prepares = host.pane_prepares.saturating_sub(self.header_prepares);
+                let window = &app.workspace.windows[app.index(host.id).unwrap()];
+                let hidden = window
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .find(|(index, _)| *index != window.active_tab)
+                    .unwrap()
+                    .1;
+                if app.panes[&hidden.focused].title != "visible-agent-19" || self.header_frames < 10
+                {
+                    return Err("visible tab-label updates stopped repainting".into());
+                }
+                // The focused pane can rebuild as its blink phase changes; the
+                // other panes must retain their content throughout title updates.
+                if self.header_prepares > 8 {
+                    return Err(format!(
+                        "{} tab-header frames rebuilt panes {} times",
+                        self.header_frames, self.header_prepares
+                    )
+                    .into());
+                }
+                eprintln!(
+                    "Native smoke: {} tab-header frames needed only {} pane preparations",
+                    self.header_frames, self.header_prepares
                 );
                 host.repaint();
                 self.idle_frames = host.frames;

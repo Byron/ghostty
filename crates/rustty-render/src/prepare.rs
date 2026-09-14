@@ -25,7 +25,7 @@ mod graphics;
 mod preedit;
 pub use preedit::Preedit;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderOptions {
     pub size: [u32; 2],
     pub padding: [f32; 2],
@@ -138,6 +138,10 @@ impl Renderer {
 
     pub fn metrics(&self) -> FontMetrics {
         self.fonts.metrics()
+    }
+    /// Atlas identity; retained frames from another generation must be rebuilt.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
     pub fn missing_families(&self) -> &[String] {
         self.fonts.missing_families()

@@ -102,6 +102,7 @@ impl Smoke {
         loaded.config.window_save_state = config::WindowSaveState::Always;
         loaded.config.cursor_style_blink = Some(false);
         loaded.config.mouse_shift_capture = config::MouseShiftCapture::False;
+        loaded.config.link_url = true;
         loaded.config.progress_style = true;
         loaded.config.undo_timeout = Duration::from_secs(5);
         loaded.config.keybinds.retain(|b| !b.flags.global);
@@ -366,7 +367,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","reverse-video","dec-column-mode","text-blink","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","command-hover-links","reverse-video","dec-column-mode","text-blink","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -697,6 +698,8 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
         .ok_or("no unfocused pane for scrolling")?;
     let mouse = host.mouse;
     let modifiers = host.modifiers;
+    let link_hit = host.link_hit.take();
+    let hovered_link = host.hovered_link.take();
     let pointer_in_window = host.egui.is_pointer_in_window();
     let mut saved = Vec::new();
     for id in [focused, hovered] {
@@ -739,6 +742,7 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
         if app.pointer_cursor(host) != Some(CursorIcon::Wait) {
             return Err("OSC 22 pointer shape leaked into another pane".into());
         }
+        check_link_hover(app, host, focused, hovered)?;
         host.mouse = host.rects[&hovered].center();
         for (focused_mode, hovered_mode, shift, capture) in [
             (0, 0, false, false),
@@ -905,6 +909,8 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
     }
     host.mouse = mouse;
     host.modifiers = modifiers;
+    host.link_hit = link_hit;
+    host.hovered_link = hovered_link;
     let event = if pointer_in_window {
         WindowEvent::CursorMoved {
             device_id: winit::event::DeviceId::dummy(),
@@ -919,6 +925,86 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
     let _ = host.egui.on_window_event(&host.window, &event);
     result?;
     eprintln!("Native smoke: scrolling and file drops followed the pointer without changing focus");
+    Ok(())
+}
+
+fn check_link_hover(app: &mut App, host: &mut Host, focused: Id, hovered: Id) -> Result<()> {
+    use winit::keyboard::ModifiersState;
+    let scale = host.window.scale_factor() as f32;
+    let metrics = host.fonts.metrics();
+    let cell = Vec2::new(metrics.cell_width as f32, metrics.cell_height as f32) / scale;
+    let padding = host.prepared[&hovered].key.options.padding;
+    let origin = host.rects[&hovered].min + Vec2::new(padding[0], padding[1]) / scale;
+    app.panes[&hovered].session.terminal()?.feed(
+        "\x1b[H\x1b[2J\x1b]8;;https://target.example\x07go你\x1b]8;;\x07\r\nhttps://example.org"
+            .as_bytes(),
+    );
+    // The final half of a wide glyph still belongs to the clickable label.
+    host.mouse = origin + Vec2::new(3.5 * cell.x, 0.5 * cell.y);
+    host.modifiers = ModifiersState::empty().into();
+    app.update_hover_link(host);
+    if host.hovered_link.is_some() || host.link_hit.is_some() {
+        return Err("ordinary mouse hover started link detection".into());
+    }
+    host.modifiers = ModifiersState::SUPER.into();
+    if !app.update_hover_link(host)
+        || !host.hovered_link.as_ref().is_some_and(|link| {
+            link.pane == hovered
+                && link.uri == "https://target.example"
+                && link.bounds.len() == 1
+                && link.bounds[0].width() == 4.0 * cell.x
+        })
+        || app.pointer_cursor(host) != Some(CursorIcon::Pointer)
+        || app.focused(host.id) != Some(focused)
+    {
+        return Err("Command-hover did not underline the hovered pane's OSC 8 link".into());
+    }
+    for offset in [3.6, 2.5, 1.5, 0.5] {
+        host.mouse.x = origin.x + offset * cell.x;
+        if app.update_hover_link(host) {
+            return Err("moving within one link requested another redraw".into());
+        }
+    }
+    host.mouse.y += cell.y;
+    app.update_hover_link(host);
+    if !host
+        .hovered_link
+        .as_ref()
+        .is_some_and(|link| link.uri == "https://example.org")
+    {
+        return Err("Command-hover did not recognize a plain URL".into());
+    }
+    host.modifiers = ModifiersState::empty().into();
+    if !app.update_hover_link(host) || host.hovered_link.is_some() {
+        return Err("releasing Command retained a link underline".into());
+    }
+    host.modifiers = ModifiersState::SUPER.into();
+    app.update_hover_link(host);
+    app.panes[&hovered]
+        .session
+        .terminal()?
+        .feed(b"\x1b[?1000h\x1b[>1s");
+    if !app.update_hover_link(host) || host.hovered_link.is_some() {
+        return Err("mouse-captured text was advertised as Command-clickable".into());
+    }
+    host.modifiers = (ModifiersState::SUPER | ModifiersState::SHIFT).into();
+    app.panes[&hovered].session.terminal()?.feed(b"\x1b[>0s");
+    if !app.update_hover_link(host) || host.hovered_link.is_none() {
+        return Err("Shift did not make the locally clickable URL discoverable".into());
+    }
+    app.panes[&hovered]
+        .session
+        .terminal()?
+        .feed(b"\x1b[2;1H\x1b[2Kplain text");
+    if !app.update_hover_link(host) || host.hovered_link.is_some() {
+        return Err("changed terminal text retained a stale link target".into());
+    }
+    app.panes[&hovered].session.terminal()?.feed(b"\x1b[?1000l");
+    host.modifiers = ModifiersState::empty().into();
+    app.update_hover_link(host);
+    eprintln!(
+        "Native smoke: Command-hover links followed the pane, modifiers, wide cells, capture policy, and changed text without repeat redraws"
+    );
     Ok(())
 }
 

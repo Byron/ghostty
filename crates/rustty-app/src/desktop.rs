@@ -240,6 +240,13 @@ struct PreparedPane {
     ime_rect: egui::Rect,
 }
 
+#[derive(PartialEq)]
+struct HoveredLink {
+    pane: Id,
+    uri: String,
+    bounds: Vec<egui::Rect>,
+}
+
 impl PreparedPane {
     fn matches(&self, key: &PaneRenderKey, fonts: &rustty_render::Renderer) -> bool {
         self.key == *key && self.frame.generation == fonts.generation()
@@ -308,6 +315,8 @@ struct Host {
     navigation_warning: Option<(Id, Instant)>,
     mouse: Pos2,
     deferred_pointer: Option<Pos2>,
+    link_hit: Option<(Id, u64, usize, vt::GridPoint, egui::Rect, Vec2)>,
+    hovered_link: Option<HoveredLink>,
     mouse_button: Option<vt::MouseButton>,
     selection_drag: Option<input::SelectionDrag>,
     focused: bool,
@@ -1006,6 +1015,8 @@ impl App {
             navigation_warning: None,
             mouse: Pos2::ZERO,
             deferred_pointer: None,
+            link_hit: None,
+            hovered_link: None,
             mouse_button: None,
             selection_drag: None,
             focused: false,
@@ -3014,6 +3025,25 @@ impl App {
                             ui.painter().galley(bounds.min, galley, Color32::WHITE);
                         }
                     }
+                    self.update_hover_link(host);
+                    if let Some(link) = &host.hovered_link
+                        && let Some(prepared) = host.prepared.get(&link.pane)
+                    {
+                        let metrics = host.fonts.metrics();
+                        let thickness = metrics.underline_thickness.ceil();
+                        let offset = (metrics.baseline + metrics.underline_position)
+                            .min(metrics.cell_height as f32 - thickness)
+                            / scale;
+                        let [r, g, b] = prepared.key.options.foreground;
+                        let painter = ui.painter().with_clip_rect(host.rects[&link.pane]);
+                        for bounds in &link.bounds {
+                            painter.hline(
+                                bounds.left()..=bounds.right(),
+                                bounds.top() + offset,
+                                egui::Stroke::new(thickness / scale, Color32::from_rgb(r, g, b)),
+                            );
+                        }
+                    }
                     let mut quadrants = BTreeMap::<Id, egui::Rect>::new();
                     for (&pane, &rect) in &host.rects {
                         if let Some(quadrant) = active.root.quadrant(pane) {
@@ -3477,6 +3507,103 @@ impl App {
         }
         host.repaint();
     }
+    /// Resolve the same target used by Command-click. Passive motion stays cheap:
+    /// without Command there is no scan, and an unchanged cell reuses its hit.
+    fn update_hover_link(&mut self, host: &mut Host) -> bool {
+        let result = (|| {
+            if !host.modifiers.state().super_key()
+                || !self.config().link_url
+                || host.ui_input()
+                || host.peek.is_some()
+                || host.divider_drag.is_some()
+                || self.platform.is_none()
+                || self
+                    .context
+                    .layer_id_at(host.mouse)
+                    .is_some_and(|layer| layer.order != egui::Order::Background)
+            {
+                return None;
+            }
+            let tab = self.tab(host.id)?;
+            if tab
+                .visible_tree(false)
+                .divider_at(host.content, [host.mouse.x, host.mouse.y], 3.0)
+                .is_some()
+            {
+                return None;
+            }
+            let header = if tab.panes.len() > 1 { 18.0 } else { 0.0 };
+            let id = host.hovered_pane()?;
+            let rect = host.rects[&id];
+            let config = &self.loaded.config;
+            let pane = self.panes.get_mut(&id)?;
+            let terminal = pane.session.terminal().ok()?;
+            if input::mouse_reporting(
+                &terminal,
+                host.modifiers.state(),
+                config.mouse_shift_capture,
+            ) || terminal.modes.dec(2026)
+            {
+                return None;
+            }
+            let text = egui::Rect::from_min_max(
+                rect.min
+                    + Vec2::new(
+                        config.window_padding_x.start,
+                        config.window_padding_y.start + header,
+                    ),
+                rect.max - Vec2::new(config.window_padding_x.end, config.window_padding_y.end),
+            );
+            if !text.contains(host.mouse) {
+                return None;
+            }
+            let metrics = host.fonts.metrics();
+            let cell = Vec2::new(metrics.cell_width as f32, metrics.cell_height as f32)
+                / host.window.scale_factor() as f32;
+            let position = host.mouse - text.min;
+            let screen = terminal.screen();
+            let row = screen.viewport().nth((position.y / cell.y) as usize)?;
+            let mut col = (position.x / cell.x) as usize;
+            if row.cells.get(col)?.spacer_head {
+                return None;
+            }
+            if row.cells[col].width == 0 && col > 0 {
+                col -= 1;
+            }
+            let point = vt::GridPoint { row: row.id, col };
+            let key = (
+                id,
+                terminal.generation,
+                screen.viewport_offset,
+                point,
+                text,
+                cell,
+            );
+            if host.link_hit == Some(key) {
+                return Some(false);
+            }
+            let screen = screen.snapshot_viewport();
+            let next = pane
+                .links
+                .links(&screen)
+                .into_iter()
+                .find(|link| link.contains(&screen, point))
+                .map(|link| HoveredLink {
+                    pane: id,
+                    bounds: link_bounds(&screen, &link, text.min, cell),
+                    uri: link.uri,
+                });
+            host.link_hit = Some(key);
+            let changed = host.hovered_link != next;
+            host.hovered_link = next;
+            Some(changed)
+        })();
+        result.unwrap_or_else(|| {
+            host.link_hit = None;
+            host.hovered_link.take().is_some()
+        })
+    }
+
     fn pointer_cursor(&self, host: &Host) -> Option<CursorIcon> {
         if host.ui_input()
             || host.peek.is_some()
@@ -3500,11 +3627,22 @@ impl App {
                 Axis::Vertical => CursorIcon::RowResize,
             });
         }
-        let pane = self.panes.get(&host.hovered_pane()?)?;
+        let id = host.hovered_pane()?;
+        if host
+            .hovered_link
+            .as_ref()
+            .is_some_and(|link| link.pane == id)
+        {
+            return Some(CursorIcon::Pointer);
+        }
+        let pane = self.panes.get(&id)?;
         pane.session.terminal().ok()?.mouse_shape().parse().ok()
     }
 
     fn mouse(&mut self, host: &mut Host, action: vt::MouseAction, button: Option<vt::MouseButton>) {
+        if self.update_hover_link(host) {
+            host.repaint();
+        }
         if let Some(cursor) = self.pointer_cursor(host) {
             host.window.set_cursor(cursor);
         }
@@ -3660,8 +3798,8 @@ impl App {
         if let Some(point) = point {
             if action == vt::MouseAction::Press && button == Some(vt::MouseButton::Left) {
                 if host.modifiers.state().super_key() && config.link_url {
-                    let links = pane.links.links(&screen.snapshot_viewport());
-                    if let Some(link) = links.iter().find(|link| link.contains(screen, point))
+                    if let Some(link) = &host.hovered_link
+                        && link.pane == id
                         && let Some(platform) = &self.platform
                         && let Err(error) = platform.open_url(&link.uri)
                     {
@@ -3702,6 +3840,39 @@ impl App {
         }
         host.repaint();
     }
+}
+
+fn link_bounds(
+    screen: &vt::Screen,
+    link: &vt::search::Link,
+    origin: Pos2,
+    cell: Vec2,
+) -> Vec<egui::Rect> {
+    let rows: Vec<_> = screen.viewport().collect();
+    let Some(start) = rows.iter().position(|row| row.id == link.start.row) else {
+        return Vec::new();
+    };
+    let Some(end) = rows.iter().position(|row| row.id == link.end.row) else {
+        return Vec::new();
+    };
+    (start..=end)
+        .map(|index| {
+            let left = if index == start { link.start.col } else { 0 };
+            let right = if index == end {
+                link.end.col
+                    + rows[index]
+                        .cells
+                        .get(link.end.col)
+                        .map_or(1, |cell| usize::from(cell.width.max(1)))
+            } else {
+                rows[index].cells.len()
+            };
+            egui::Rect::from_min_size(
+                origin + Vec2::new(left as f32 * cell.x, index as f32 * cell.y),
+                Vec2::new(right.saturating_sub(left) as f32 * cell.x, cell.y),
+            )
+        })
+        .collect()
 }
 
 fn rgb(color: config::Rgb) -> Color32 {
@@ -4732,6 +4903,30 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hovered_link_bounds_cover_wrapped_text_and_the_whole_wide_cell() {
+        let origin = Pos2::new(8.0, 20.0);
+        let cell = Vec2::new(7.0, 16.0);
+        let mut terminal = vt::Terminal::new(10, 4, 0);
+        terminal.feed(b"xx https://example.org/path");
+        let mut matcher = vt::search::LinkMatcher::default();
+        let link = matcher.links(terminal.screen()).pop().unwrap();
+        assert_eq!(
+            link_bounds(terminal.screen(), &link, origin, cell),
+            [
+                egui::Rect::from_min_size(Pos2::new(29.0, 20.0), Vec2::new(49.0, 16.0)),
+                egui::Rect::from_min_size(Pos2::new(8.0, 36.0), Vec2::new(70.0, 16.0)),
+                egui::Rect::from_min_size(Pos2::new(8.0, 52.0), Vec2::new(49.0, 16.0)),
+            ],
+        );
+        terminal.feed("\x1b[2J\x1b[H\x1b]8;;https://target.example\x07go你\x1b]8;;\x07".as_bytes());
+        let link = matcher.links(terminal.screen()).pop().unwrap();
+        assert_eq!(
+            link_bounds(terminal.screen(), &link, origin, cell),
+            [egui::Rect::from_min_size(origin, Vec2::new(28.0, 16.0))],
+        );
+    }
 
     #[test]
     fn synchronized_output_releases_on_end_and_restarts_the_bounded_timeout() {

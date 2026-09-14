@@ -638,6 +638,9 @@ impl App {
         let scheme = color_scheme(self.config_loader.dark_mode);
         for (&id, pane) in &mut self.panes {
             let state = (visible.contains(&id), scheme);
+            if !state.0 {
+                pane.activity.reset_progress_animation();
+            }
             if !pane.exited && pane.host_state != state {
                 match pane.session.set_host_state(state.0, state.1) {
                     Ok(()) => pane.host_state = state,
@@ -2805,20 +2808,18 @@ impl App {
                             paint_pane_frame(ui.painter(), rect, color);
                         }
                         if config.progress_style
-                            && let Some(progress) =
-                                self.panes.get(&id).and_then(|p| p.activity.progress())
-                            && paint_progress(
+                            && let Some(pane) = self.panes.get_mut(&id)
+                            && let Some(progress) = pane.activity.progress()
+                            && !paint_progress(
                                 ui,
                                 id,
                                 rect,
                                 progress,
                                 accent,
-                                now.duration_since(self.started),
+                                pane.activity.progress_offset(now),
                             )
                         {
-                            let deadline = now + Duration::from_millis(33);
-                            animation_deadline =
-                                Some(animation_deadline.map_or(deadline, |old| old.min(deadline)));
+                            pane.activity.reset_progress_animation();
                         }
                     }
                     for (&id, &rect) in &host.rects {
@@ -4413,7 +4414,7 @@ fn paint_progress(
     bounds: egui::Rect,
     progress: Progress,
     accent: Color32,
-    elapsed: Duration,
+    offset: f32,
 ) -> bool {
     // Keep a static fill separate from the focused split's same-color outline.
     let bounds = bounds.shrink(2.0);
@@ -4430,18 +4431,23 @@ fn paint_progress(
     let (offset, fraction) = if let Some(value) = percentage {
         (0.0, f32::from(value) / 100.0)
     } else {
+        // Metal presentation already supplies vsync backpressure. Ask for its
+        // next frame instead of imposing a timer that caps animation at 30 FPS.
+        ui.ctx().request_repaint();
         ui.painter()
             .rect_filled(bar, 0.0, color.gamma_multiply(0.3));
-        let phase = elapsed.as_secs_f32() * std::f32::consts::PI / 1.2;
-        (0.375 * (1.0 - phase.cos()), 0.25)
+        (offset, 0.25)
     };
-    ui.painter().rect_filled(
-        egui::Rect::from_min_size(
-            bar.min + Vec2::new(offset * bar.width(), 0.0),
-            Vec2::new(fraction * bar.width(), bar.height()),
-        ),
-        0.0,
-        color,
+    ui.painter().add(
+        egui::epaint::RectShape::filled(
+            egui::Rect::from_min_size(
+                bar.min + Vec2::new(offset * bar.width(), 0.0),
+                Vec2::new(fraction * bar.width(), bar.height()),
+            ),
+            0.0,
+            color,
+        )
+        .with_round_to_pixels(percentage.is_some()),
     );
     let response = ui.interact(
         bar,
@@ -4504,7 +4510,7 @@ mod tests {
                         value: Some(percentage)
                     },
                     accent,
-                    Duration::ZERO
+                    0.0
                 ));
             });
             output.textures_delta.clear();
@@ -4531,6 +4537,91 @@ mod tests {
     }
 
     #[test]
+    fn indefinite_progress_matches_swiftui_motion_and_requests_the_next_frame() {
+        let context = egui::Context::default();
+        let bounds = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(204.0, 100.0));
+        let started = Instant::now();
+        let mut activity = Activity::default();
+        activity.progress_reported(3, None, started);
+        // Values sampled from SwiftUI's UnitCurve.easeInOut. Ghostty traverses
+        // 75% of the pane in 1.2 seconds, then automatically reverses.
+        for (millis, position) in [
+            (0, 0.0),
+            (150, 0.0311136246),
+            (300, 0.1291618347),
+            (600, 0.5),
+            (900, 0.8708381653),
+            (1200, 1.0),
+            (1500, 0.8708381653),
+            (1800, 0.5),
+            (2400, 0.0),
+        ] {
+            let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+                assert!(paint_progress(
+                    ui,
+                    1,
+                    bounds,
+                    Progress {
+                        state: 3,
+                        value: None
+                    },
+                    Color32::BLUE,
+                    activity.progress_offset(started + Duration::from_millis(millis)),
+                ));
+            });
+            output.textures_delta.clear();
+            let fill = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) => Some(rect),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap();
+            assert!(
+                (f64::from(fill.rect.left()) - (2.0 + 150.0 * position)).abs() < 0.001,
+                "position at {millis}ms differs from SwiftUI: {:?}",
+                fill.rect
+            );
+            assert_eq!(fill.rect.width(), 50.0);
+            assert_eq!(
+                output.viewport_output[&ViewportId::ROOT].repaint_delay,
+                Duration::ZERO
+            );
+        }
+        // Stop requesting frames after the bar becomes determinate or is clipped.
+        // Allow egui's already queued repaint to drain before checking idleness.
+        for visible in [true, false] {
+            for frame in 0..3 {
+                let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+                    if !visible {
+                        ui.set_clip_rect(egui::Rect::NOTHING);
+                    }
+                    assert!(!paint_progress(
+                        ui,
+                        1,
+                        bounds,
+                        Progress {
+                            state: 3,
+                            value: visible.then_some(50)
+                        },
+                        Color32::BLUE,
+                        0.0,
+                    ));
+                });
+                output.textures_delta.clear();
+                if frame == 2 {
+                    assert_eq!(
+                        output.viewport_output[&ViewportId::ROOT].repaint_delay,
+                        Duration::MAX
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn progress_bars_render_percentages_and_only_animate_without_a_value() {
         let context = egui::Context::default();
         let bounds = egui::Rect::from_min_size(Pos2::new(20.0, 30.0), Vec2::new(200.0, 100.0));
@@ -4543,14 +4634,7 @@ mod tests {
         ] {
             let mut output = context.run_ui(egui::RawInput::default(), |ui| {
                 assert_eq!(
-                    paint_progress(
-                        ui,
-                        1,
-                        bounds,
-                        Progress { state, value },
-                        Color32::BLUE,
-                        Duration::ZERO
-                    ),
+                    paint_progress(ui, 1, bounds, Progress { state, value }, Color32::BLUE, 0.0),
                     animated,
                 );
             });

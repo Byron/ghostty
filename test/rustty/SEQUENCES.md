@@ -179,10 +179,12 @@ hidden-tab and idle checks guard against extra pane work and wakeups.
 Offscreen Metal capture checks prepared rendering, not physical presentation.
 
 One audit smoke run produced 360 redraws during the three-second masked-title
-phase after indeterminate progress stopped. The sequence assertions passed, and
-the next run passed with two settling frames and one idle frame. The intermittent
-failure remains unexplained; a passing retry is not a scheduling fix. Failures
-now include event counts, pane progress, the host deadline, and egui repaint
+phase. Changing pane focus during the animation reproduces this failure: the
+check stopped progress on the newly focused pane and left the original pane
+animating. The smoke check now retains its animation target and deliberately
+changes focus before stopping progress. This reproduction needed no production
+scheduling change; the original run lacked diagnostics to establish its cause.
+Failures include event counts, pane progress, the host deadline, and egui repaint
 causes so a recurrence can identify its source without production tracing.
 
 Run focused checks from the repository root, without Zig:

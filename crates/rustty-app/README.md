@@ -78,9 +78,9 @@ RUSTTY_SMOKE_DIR=/tmp/rustty-native-smoke target/debug/Rustty.app/Contents/MacOS
 
 The opt-in native smoke check starts disposable `/bin/sh` sessions, checks input,
 four split panes, tabs, quadrant focus and zoom, URI directory reports, restoration,
-progress animation, hover scrolling, file-drop targeting, reverse video, DEC column mode,
-text blinking, synchronized output,
-hidden-tab title updates and idle rendering.
+progress animation across pane focus changes, hover scrolling, file-drop targeting,
+reverse video, DEC column mode, text blinking, synchronized output, hidden-tab title
+updates and idle rendering.
 The report records animation frame rate, the monitor's reported refresh rate, and
 window redraws and pane preparations during hidden-tab title updates. It writes
 `result.json`, `workspace.json` and a WGPU readback `window.png` into the specified
@@ -90,6 +90,7 @@ restore or overwrite the regular app workspace.
 On a locked or headless Mac, set `RUSTTY_SMOKE_OFFSCREEN=1` for an offscreen
 Metal capture of the same host primitives. The report labels this mode; it does
 not verify that macOS presents the window on a physical display.
+Offscreen smoke checks keep the test host rendering if macOS occludes its window.
 The native smoke report includes event counts during its idle phase, distinguishing
 unchanged cursor events, actual pointer movement and egui repaint requests.
 Set `RUSTTY_SMOKE_HOVER=1` to require a stationary pointer over a shell pane

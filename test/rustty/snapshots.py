@@ -87,6 +87,18 @@ def streaming_requests(root):
         "switch-screen": [write(b"\x1b[?1047l")], "reset": [{"op": "reset"}],
         "resize-width": [{"op": "resize", "cols": 3, "rows": 3}],
         "resize-height": [{"op": "resize", "cols": 2, "rows": 5}],
+        "resize-width-back": [{"op": "resize", "cols": 3, "rows": 3},
+                              {"op": "resize", "cols": 2, "rows": 3}],
+        "resize-width-back-after-drop": [{"op": "resize", "cols": 3, "rows": 3},
+                                         {"op": "restore_next"},
+                                         {"op": "resize", "cols": 2, "rows": 3}],
+        "reset-resize-width-back": [{"op": "reset"},
+                                    {"op": "resize", "cols": 3, "rows": 3},
+                                    {"op": "resize", "cols": 2, "rows": 3}],
+        "resize-height-back": [{"op": "resize", "cols": 2, "rows": 5},
+                               {"op": "resize", "cols": 2, "rows": 3}],
+        "recreate-alternate": [write(b"\x1b[?1047l\x1b[?1047h")],
+        "shrink-limits": [{"op": "grid", "grid": {"action": "limits", "bytes": 0}}],
     }
     for name, mutation in mutations.items():
         for after_pages in (0, 1):

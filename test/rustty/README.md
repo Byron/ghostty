@@ -373,6 +373,10 @@ cursors are bounded by both widths, including pending wrap and subsequent
 printing; all 45 mixed-width cursor comparisons pass against the repaired native
 reference. Physical PAGE widths remain intact until mutation requires growth. Use
 `--case snapshot/streaming` or `--case snapshot/invalid` for isolated checks.
+Streaming history checks the current width when each PAGE arrives: resizing
+away and back before delivery preserves admission, but skipping an incompatible
+PAGE permanently discards the rest of that screen's history sequence. Reset,
+alternate-screen recreation, height changes and limits are also compared.
 An expected rejection must be `InvalidSnapshot`; an unrelated adapter error
 or an unexpected successful decode still fails the case.
 

@@ -348,6 +348,14 @@ runtime safety remains enabled, while debug-only full-page integrity scans on
 every edit would make large boundary cases quadratic. When reusing binaries with
 `--no-build`, build the oracle with `-Doptimize=ReleaseSafe` for these cases.
 
+`--pages --case pages/wide-cut/` retains 48 cases (144 comparisons) for
+non-reflow shrinking through a wide character on either screen, active or
+inactive. Cells, graphemes, links, styles, snapshots and later insertion agree.
+The native reference now clears both halves of a truncated wide character;
+previously it left an orphan at the right edge and a later insert could assert
+while clearing beyond the shortened row. The native regression also verifies
+that grapheme storage is reclaimed and the tail stays cleared after widening.
+
 `--pages --case pages/styles/` exercises live STYLE ownership: each SGR
 attribute, cursor movement, printed and erased cells, page migration, resize,
 restored sparse IDs and mixed-width IND copies. Rustty retains the native set's

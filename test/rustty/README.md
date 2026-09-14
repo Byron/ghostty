@@ -202,7 +202,7 @@ HTML retains native page wrappers, escaping and hyperlink identity boundaries;
 VT retains native SGR ordering. The 121 fixtures exercise all 12 option
 combinations, including rectangles, wide/grapheme cells, colors and attributes,
 opaque hyperlink bytes, empty rows, cross-page wrapping and restored mixed-width
-pages. Formatter coordinate maps remain a separate requirement.
+pages.
 
 `--grid --case grid/terminal-format/` compares `Screen::formatter` and
 `Terminal::formatter` through the `format_screen` and `format_terminal` actions.
@@ -219,8 +219,7 @@ individually or together. Exports preserve native ordering, including replaying
 the pending-wrap edge cell before restoring cursor attributes. Direct Rust tests
 also replay full and state-only exports into another terminal and check that
 exporting leaves the source unchanged. The native PWD formatter now omits its
-internal NUL terminator; all export bytes are compared directly. Coordinate maps
-remain separate coverage work.
+internal NUL terminator; all export bytes are compared directly.
 
 `--grid --case grid/terminal-format/options` checks explicit foreground/background
 colors, resolution of palette indices to RGB, and codepoint replacements for all
@@ -232,6 +231,17 @@ is unchanged. Cases include empty strings, NUL and combining characters, overlap
 and inverted ranges, long strings, trim/unwrap combinations, page boundaries and
 pending-wrap cursor replay. The adapters reject invalid Unicode scalars and
 incorrect palette sizes before constructing the native options.
+
+All formatter fixtures also request `format_map: true`. The result of the same
+name contains a `[page_index, x, y]` for every output byte, compared directly
+without resolving or normalizing the native coordinates. Rust's
+`format_with_map()` returns the bytes and a borrowed `ByteMap`: `get()` retains
+raw page coordinates, while `point()` resolves valid coordinates to a `GridPoint`.
+It returns `None` when native carried blank-line coordinates extend beyond a
+physical page. The borrow prevents mutation while the map is live. Maps include
+UTF-8, escaped/replaced text, style/link boundaries, palette and state extras,
+reversed blank-cell runs and page-local newline inheritance. Normal `format()`
+exports allocate no coordinate map and share the same output path.
 
 Literal search formats each retained page separately and follows native active
 and history traversal, including repeated soft-wrap matches and trimmed blank
@@ -376,9 +386,8 @@ Grid cases cover live writes, erasure, reflow, height changes, screen switches,
 resets, handle reuse and scrollback limits, including release of an inactive
 screen's tracked handle. Restoring a new terminal while
 the adapter owns tracked handles is explicitly unsupported; those external
-lifetimes need a separate API comparison. Complete selection mutation lifetimes,
-formatter coordinate maps, full terminal-state exports and resource-driven
-search invalidation remain uncovered. These grid cases remain part of `--grid`
+lifetimes need a separate API comparison. Complete selection mutation lifetimes
+and resource-driven search invalidation remain uncovered. These grid cases remain part of `--grid`
 and `--thorough`.
 
 Native libghostty-vt updates OSC 133 semantic state without command lifecycle

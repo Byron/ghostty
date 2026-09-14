@@ -115,6 +115,7 @@ pub struct Operation {
     semantic_prompt_boundary: Option<bool>,
     adjustment: Option<Adjustment>,
     format: Option<FormatOptions>,
+    format_map: bool,
     format_content: Option<String>,
     screen_extra: Option<rustty_vt::formatter::ScreenExtra>,
     terminal_extra: Option<rustty_vt::formatter::TerminalExtra>,
@@ -491,6 +492,7 @@ impl Context {
                 "screen": if self.search.is_alternate_screen() { "alternate" } else { "primary" },
             }));
         }
+        let mut format_map = None;
         let formatted = if matches!(
             op.action.as_str(),
             "format_selection" | "format_screen" | "format_terminal"
@@ -513,16 +515,30 @@ impl Context {
                 let format = op.format.as_ref().unwrap_or(&default);
                 let maps = format.maps()?;
                 let options = format.options(selection, &maps)?;
-                let bytes = if selection {
-                    terminal.format_selection(terminal.screen().selection.unwrap(), options)
-                } else if op.action == "format_terminal" {
+                let mut mapped = |(bytes, map): (Vec<u8>, rustty_vt::formatter::ByteMap<'_>)| {
+                    assert_eq!(bytes.len(), map.len());
+                    format_map = Some(
+                        (0..map.len())
+                            .map(|offset| {
+                                let point = map.get(offset).unwrap();
+                                [point.page, point.x as usize, point.y as usize]
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    bytes
+                };
+                let bytes = if op.action != "format_screen" {
                     let mut formatter = terminal.formatter(options.emit);
                     formatter.options = options;
                     formatter.content = content;
-                    if let Some(extra) = op.terminal_extra {
+                    if !selection && let Some(extra) = op.terminal_extra {
                         formatter.extra = extra;
                     }
-                    formatter.format()
+                    if op.format_map {
+                        formatter.format_with_map().map(&mut mapped)
+                    } else {
+                        formatter.format()
+                    }
                 } else {
                     let mut formatter = terminal.screen().formatter(options.emit);
                     formatter.options = options;
@@ -530,7 +546,11 @@ impl Context {
                     if let Some(extra) = op.screen_extra {
                         formatter.extra = extra;
                     }
-                    formatter.format()
+                    if op.format_map {
+                        formatter.format_with_map().map(&mut mapped)
+                    } else {
+                        formatter.format()
+                    }
                 };
                 bytes.map(|bytes| super::hex(&bytes))
             } else {
@@ -559,6 +579,7 @@ impl Context {
             json!({"action": op.action, "status": status, "matches": matches, "search_needle": search_needle,
             "search_state": search_state,
             "formatted": formatted,
+            "format_map": format_map,
             "active_screen": if terminal.is_alternate_screen() { "alternate" } else { "primary" },
             "viewport_top": [screen.viewport_top().col, screen.history.len().saturating_sub(screen.viewport_offset)],
             "selection": selection, "selection_result": selection_result, "tracked": handles,

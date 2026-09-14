@@ -65,6 +65,75 @@ fn full_exports_include_history_and_preserve_wrapped_rows_by_default() {
 }
 
 #[test]
+fn byte_maps_cover_utf8_escapes_replacements_and_terminal_extras() {
+    let mut terminal = Terminal::new(8, 3, 100);
+    terminal.feed("A  \x1b[31mé\x1b[0m\r\nZ".as_bytes());
+    let screen = terminal.screen();
+    let (bytes, map) = screen.formatter(Format::Plain).format_with_map().unwrap();
+    assert_eq!(bytes, "A  é\nZ".as_bytes());
+    let expected = [(0, 0), (2, 0), (1, 0), (3, 0), (3, 0), (3, 0), (0, 1)];
+    assert_eq!(map.len(), expected.len());
+    for (offset, (x, y)) in expected.into_iter().enumerate() {
+        assert_eq!(map.point(offset), screen.point(y, x));
+    }
+    assert!(map.get(bytes.len()).is_none());
+    assert!(map.point(usize::MAX).is_none());
+
+    let replacements = [CodepointMap {
+        range: ['é', 'é'],
+        replacement: Replacement::String("<&é"),
+    }];
+    for (emit, text) in [(Format::Vt, "<&é"), (Format::Html, "&lt;&amp;&#233;")] {
+        let mut formatter = terminal.formatter(emit);
+        formatter.options.codepoint_map = &replacements;
+        formatter.extra = TerminalExtra::ALL;
+        let (bytes, map) = formatter.format_with_map().unwrap();
+        assert_eq!(bytes, formatter.format().unwrap());
+        assert_eq!(bytes.len(), map.len());
+        let start = bytes
+            .windows(text.len())
+            .position(|bytes| bytes == text.as_bytes())
+            .unwrap();
+        for offset in start..start + text.len() {
+            assert_eq!(map.point(offset), screen.point(0, 3));
+        }
+        assert_eq!(map.point(0), screen.point(0, 0));
+        assert_eq!(map.point(bytes.len() - 1), screen.point(1, 0));
+        formatter.content = Content::None;
+        let (bytes, map) = formatter.format_with_map().unwrap();
+        assert_eq!(bytes.len(), map.len());
+        assert!((0..map.len()).all(|offset| map.point(offset) == screen.point(0, 0)));
+        formatter.extra = TerminalExtra::NONE;
+        let (bytes, map) = formatter.format_with_map().unwrap();
+        assert!(bytes.is_empty());
+        assert!(map.is_empty());
+    }
+}
+
+#[test]
+fn byte_maps_keep_native_blank_line_coordinates_without_resolving_invalid_cells() {
+    let mut terminal = Terminal::new(1024, 3, 100);
+    terminal.feed(b"first\r\n");
+    terminal.feed(&b"\r\n".repeat(80));
+    terminal.feed(b"last");
+    let screen = terminal.screen();
+    let formatter = screen.formatter(Format::Plain);
+    let (bytes, map) = formatter.format_with_map().unwrap();
+    assert_eq!(bytes, formatter.format().unwrap());
+    assert_eq!(bytes.len(), map.len());
+    // Blank rows carried from the preceding page are attributed to the next
+    // page, even when their coordinates exceed that page's physical height.
+    let last_newline = bytes.iter().rposition(|&byte| byte == b'\n').unwrap();
+    let position = map.get(last_newline).unwrap();
+    assert_eq!((position.page, position.x, position.y), (1, 0, 80));
+    assert!(map.point(last_newline).is_none());
+    assert_eq!(
+        map.point(bytes.len() - 1),
+        screen.point(screen.history.len() + 2, 3)
+    );
+}
+
+#[test]
 fn formatter_options_borrow_colors_and_replace_text_without_changing_the_source() {
     let mut terminal = Terminal::new(8, 2, 100);
     terminal.feed(b"\x1b[31;44;58;5;2ma b");

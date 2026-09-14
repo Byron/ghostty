@@ -14,6 +14,32 @@ def requests(reference):
         return ({"id": "pages/" + name, "kind": "input", "cols": cols, "rows": rows,
                  "operations": [observe, *operations]}, ["terminal.pages"])
 
+    # Shrinking without reflow must retire a wide glyph whose tail is cut
+    # off, including its style, hyperlink and grapheme resources. Inserting
+    # into the shortened row used to crash the native reference.
+    for mode, setup in (("primary", b"\x1b[?7l"), ("alternate", b"\x1b[?1049h")):
+        for columns in (1, 2, 3, 4):
+            for name, glyph in (("wide", "界".encode()),
+                                ("grapheme", "界\u0301".encode()),
+                                ("linked-style", b"\x1b[1;31m\x1b]8;id=wide;https://example.org\x1b\\"
+                                 + "界\u0301".encode() + b"\x1b]8;;\x1b\\\x1b[0m")):
+                for inactive in (False, True):
+                    data = setup + f"\x1b[1;{columns}H".encode() + glyph
+                    if inactive:
+                        data += b"\x1b[?1049l" if mode == "alternate" else b"\x1b[?47h"
+                    resume = b""
+                    if inactive:
+                        resume = b"\x1b[?47h" if mode == "alternate" else b"\x1b[?47l"
+                    request, covers = case(f"wide-cut/{mode}/{columns}/{name}/{inactive}", 6, 2, [
+                        {"op": "write", "data": data.hex()},
+                        {"op": "resize", "cols": columns, "rows": 2, "cell_size": [8, 16]},
+                        {"op": "observe"}, {"op": "snapshot"}, observe,
+                        {"op": "write", "data": (resume + b"\x1b[H\x1b[@X").hex()},
+                        {"op": "resize", "cols": 6, "rows": 2, "cell_size": [8, 16]},
+                        {"op": "observe"}, {"op": "snapshot"}, observe,
+                    ])
+                    yield request, covers + ["terminal.resize", "terminal.cells", "terminal.screens"]
+
     capacities = {}
     pool_bytes = None
     for cols in (2, 8, 80, 215, 1024):

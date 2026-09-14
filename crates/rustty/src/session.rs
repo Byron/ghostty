@@ -1,5 +1,7 @@
 //! PTY ownership and background IO. No windowing or GPU dependency.
-use crate::config::{Command, Config, CursorStyle, ShellIntegration, TerminalColor};
+use crate::config::{
+    Command, Config, CursorStyle, GraphemeWidthMethod, ShellIntegration, TerminalColor,
+};
 use portable_pty::{Child, CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use rustty_vt::{CursorShape, Effect, Screen, ScrollbackLimits, Terminal, query};
 use std::io::{self, Read, Write};
@@ -118,6 +120,12 @@ impl Session {
         let mut writer = pair.master.take_writer().map_err(error)?;
 
         let mut terminal = Terminal::with_limits(cols, rows, scrollback_limits(config));
+        // Like Ghostty, this policy applies to new sessions, not config reloads.
+        terminal.set_default_mode(
+            true,
+            2027,
+            config.grapheme_width_method == GraphemeWidthMethod::Unicode,
+        );
         terminal.terminfo_name = terminfo_name;
         terminal.shell_command_events = true;
         terminal.linefeed_mode_events = true;
@@ -777,6 +785,62 @@ fn command(config: &Config, options: &SessionOptions) -> io::Result<CommandBuild
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn emoji_presentation_keeps_the_background_of_both_cells() {
+        for legacy in [false, true] {
+            let mut config = Config::default();
+            if legacy {
+                config.grapheme_width_method = GraphemeWidthMethod::Legacy;
+            }
+            let default_wide = !legacy;
+            let session = Session::spawn(
+                &config,
+                SessionOptions {
+                    command: Some(Command::Direct(vec!["/bin/sleep".into(), "30".into()])),
+                    ..SessionOptions::default()
+                },
+                Arc::new(|| {}),
+            )
+            .unwrap();
+            for (prefix, wide) in [
+                ("", default_wide),
+                ("\x1b[?2027h", true),
+                ("\x1b[?2027l", false),
+                ("\x1bc", default_wide),
+            ] {
+                let mut terminal = session.terminal().unwrap();
+                terminal.feed(b"\x1b[0m\x1b[2J\x1b[H");
+                terminal.feed(prefix.as_bytes());
+                // A TUI skips the second cell of an emoji when positioning its next run.
+                terminal.feed("\x1b[30;107m  ✔️\x1b[5G  > selected row\x1b[0m".as_bytes());
+                let cells = &terminal.screen().rows[0].cells;
+                assert_eq!(
+                    cells[3].style.background,
+                    if wide {
+                        rustty_vt::Color::Indexed(15)
+                    } else {
+                        rustty_vt::Color::Default
+                    },
+                );
+                assert_eq!(cells[2].text, "✔️");
+                assert_eq!(
+                    (cells[2].width, cells[3].width),
+                    if wide { (2, 0) } else { (1, 1) }
+                );
+            }
+            config.grapheme_width_method = if default_wide {
+                GraphemeWidthMethod::Legacy
+            } else {
+                GraphemeWidthMethod::Unicode
+            };
+            session.apply_config(&config).unwrap();
+            let terminal = session.terminal().unwrap();
+            assert_eq!(terminal.modes.get_default(true, 2027), Some(default_wide));
+            assert_eq!(terminal.modes.dec(2027), default_wide);
+        }
+    }
 
     #[test]
     fn title_reporting_follows_configuration_reload_and_survives_reset() {

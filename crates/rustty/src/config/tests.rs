@@ -70,6 +70,28 @@ fn action(config: &Config, trigger: &str) -> Option<Action> {
 }
 
 #[test]
+fn grapheme_width_method_loads_ghostty_policy_and_defaults_to_unicode() {
+    let home = TestHome::new();
+    for (value, expected) in [
+        ("legacy", GraphemeWidthMethod::Legacy),
+        ("unicode", GraphemeWidthMethod::Unicode),
+        ("", GraphemeWidthMethod::Unicode),
+    ] {
+        home.local(&format!("grapheme-width-method={value}\n"));
+        let loaded = home.loader.load();
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.config.grapheme_width_method, expected);
+    }
+    home.local("grapheme-width-method=invalid\n");
+    let loaded = home.loader.load();
+    assert_eq!(loaded.diagnostics.len(), 1);
+    assert_eq!(
+        loaded.config.grapheme_width_method,
+        GraphemeWidthMethod::Unicode
+    );
+}
+
+#[test]
 fn mouse_shift_capture_loads_ghostty_policy_and_resets_to_the_default() {
     let home = TestHome::new();
     for (value, expected) in [

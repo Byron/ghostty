@@ -95,12 +95,13 @@ impl Smoke {
         }))
     }
     pub(super) fn configure(loaded: &mut LoadedConfig) {
-        let command = config::Command::Direct(vec!["/bin/sh".into(),"-c".into(),r"printf '\033[2J\033[H\033[1;36mRustty native smoke\033[0m\n\033]7;file://localhost/tmp\007\033]9;4;1;65\007'; exec /bin/sh -i".into()]);
+        let command = config::Command::Direct(vec!["/bin/sh".into(),"-c".into(),r"printf '\033[2J\033[H\033[30;107m  ✔️\033[5G  > selected row\033[0m\n\033[1;36mRustty native smoke\033[0m\n\033]7;file://localhost/tmp\007\033]9;4;1;65\007'; exec /bin/sh -i".into()]);
         loaded.config.command = Some(command.clone());
         loaded.config.initial_command = Some(command);
         loaded.config.working_directory = Some(PathBuf::from("/tmp"));
         loaded.config.window_save_state = config::WindowSaveState::Always;
         loaded.config.cursor_style_blink = Some(false);
+        loaded.config.grapheme_width_method = config::GraphemeWidthMethod::Unicode;
         loaded.config.mouse_shift_capture = config::MouseShiftCapture::False;
         loaded.config.link_url = true;
         loaded.config.progress_style = true;
@@ -194,6 +195,16 @@ impl Smoke {
             0 => {
                 if host.frames == 0 || !text(app, pane).contains("Rustty native smoke") {
                     return Ok(false);
+                }
+                {
+                    let terminal = app.panes[&pane].session.terminal()?;
+                    let cells = &terminal.screen().rows[0].cells;
+                    if cells[2].text != "✔️"
+                        || (cells[2].width, cells[3].width) != (2, 0)
+                        || cells[3].style.background != vt::Color::Indexed(15)
+                    {
+                        return Err("emoji checkmark lost its second cell's background".into());
+                    }
                 }
                 self.original = Some(pane);
                 app.write(pane, b"printf '\\122USTTY_INPUT_OK\\n'\r".to_vec());
@@ -367,7 +378,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","command-hover-links","reverse-video","dec-column-mode","text-blink","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","unicode-grapheme-width","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","command-hover-links","reverse-video","dec-column-mode","text-blink","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,

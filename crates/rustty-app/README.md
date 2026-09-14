@@ -31,6 +31,9 @@ reload keeps the original command-line overrides. Terminal appearance and visibi
 queries reflect the OS scheme and whether the pane is currently shown.
 `title-report = true` enables CSI 21 t replies with the terminal title; it is
 disabled by default and follows configuration reloads.
+New terminals default to `grapheme-width-method = unicode`, matching Ghostty's
+emoji widths. The `legacy` setting remains available; changing this setting
+applies only to new terminals.
 Tabs, splits, zoom, quadrant navigation, clipboard and
 search use the configured Ghostty keybindings. Window layouts and pane directories
 are saved separately under `com.rustty.app`.

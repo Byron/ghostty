@@ -87,6 +87,7 @@ macro_rules! config_enum {
 }
 
 config_enum!(CursorStyle { Block => "block", Bar => "bar", Underline => "underline", BlockHollow => "block_hollow" });
+config_enum!(GraphemeWidthMethod { Unicode => "unicode", Legacy => "legacy" });
 config_enum!(CopyOnSelect { None => "none", Primary => "primary", Clipboard => "clipboard", Both => "both" });
 config_enum!(MouseShiftCapture { False => "false", True => "true", Always => "always", Never => "never" });
 config_enum!(WindowSaveState { Default => "default", Never => "never", Always => "always" });
@@ -242,6 +243,7 @@ pub struct Config {
     pub font_thicken: bool,
     /// Zero is the lightest thickening; `font_thicken` controls whether it is used.
     pub font_thicken_strength: u8,
+    pub grapheme_width_method: GraphemeWidthMethod,
     pub background: Rgb,
     pub foreground: Rgb,
     pub palette: [Rgb; 256],
@@ -323,6 +325,7 @@ impl Default for Config {
             font_synthetic_style: [true; 3],
             font_thicken: false,
             font_thicken_strength: 255,
+            grapheme_width_method: GraphemeWidthMethod::Unicode,
             background: Rgb::new(0x28, 0x2c, 0x34),
             foreground: Rgb::new(255, 255, 255),
             palette: default_palette(),
@@ -454,6 +457,9 @@ impl Config {
                     .try_into()
                     .map_err(|_| "font thickening strength must be 0 through 255")?
             ),
+            "grapheme-width-method" => {
+                set!(grapheme_width_method, GraphemeWidthMethod::parse(value)?)
+            }
             "foreground" => set!(foreground, Rgb::parse(value)?),
             "background" => set!(background, Rgb::parse(value)?),
             "palette" => {

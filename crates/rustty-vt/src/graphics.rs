@@ -1265,7 +1265,14 @@ fn decode_image(cmd: &Command, mut data: Vec<u8>) -> Result<(u32, u32, Vec<u8>),
             32 => 4,
             _ => return Err("EINVAL: unsupported format"),
         };
-        if data.len() != width as usize * height as usize * bpp {
+        let expected = width as usize * height as usize * bpp;
+        if cmd.action() == b'f' {
+            if data.len() < expected {
+                return Err("ENODATA: insufficient data");
+            }
+            // Kitty accepts excess raw animation data, unlike ordinary images.
+            data.truncate(expected);
+        } else if data.len() != expected {
             return Err("EINVAL: invalid data");
         }
         if bpp == 3 {

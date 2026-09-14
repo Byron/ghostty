@@ -1361,7 +1361,7 @@ impl Terminal {
         m.top == 0
             && m.left == 0
             && m.right + 1 == usize::from(self.cols)
-            && (!self.alternate_active || m.bottom + 1 == usize::from(self.rows))
+            && (self.screen().limits.bytes != Some(0) || m.bottom + 1 == usize::from(self.rows))
     }
 
     /// SU/SD temporarily move to a margin before doing the row operation.
@@ -1397,7 +1397,7 @@ impl Terminal {
         let cols = self.cols as usize;
         let bg = self.screen().cursor.style.background;
         let full = m.left == 0 && m.right == cols - 1;
-        let alternate = self.alternate_active;
+        let no_scrollback = self.screen().limits.bytes == Some(0);
         let shift_history = history && self.scrolls_above_cursor();
         if !shift_history {
             self.prepare_row_shift();
@@ -1421,7 +1421,7 @@ impl Terminal {
                             )
                         })
                         .collect()
-                } else if alternate {
+                } else if no_scrollback {
                     // The no-scrollback fast path clamps pins scrolled off
                     // the top to the first surviving row.
                     [(

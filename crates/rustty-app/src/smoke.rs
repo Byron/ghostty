@@ -455,8 +455,10 @@ impl Smoke {
                     .iter()
                     .find(|tab| tab.title.as_deref() == Some("Background agent"))
                     .unwrap();
-                if app.panes[&hidden.focused].title != "hidden-agent-19" {
-                    return Err("hidden-tab title stream did not finish".into());
+                if app.panes[&hidden.focused].title != "hidden-agent-19"
+                    || hidden.panes[&hidden.focused].title.as_deref() != Some("hidden-agent-19")
+                {
+                    return Err("hidden-tab titles did not update live and saved state".into());
                 }
                 self.hidden_title_frames = host.frames.saturating_sub(self.idle_frames);
                 if self.hidden_title_frames > 4 {

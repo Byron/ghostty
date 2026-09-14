@@ -3025,6 +3025,7 @@ dependencies = [
  "portable-pty",
  "rustty-parser",
  "rustty-vt",
+ "serde_json",
 ]
 
 [[package]]

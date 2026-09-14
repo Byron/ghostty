@@ -418,6 +418,16 @@ each suffix has one owner, allocations do not overlap and erased storage is
 reclaimed. Complete resource limits, reflow splitting and hyperlink lifetimes
 remain separate requirements.
 
+`--snapshot-wire --case snapshot/resources/graphemes/` includes 178 fixtures
+(534 delivery comparisons) for bounded suffix admission, malformed and
+duplicate entries, map and arena exhaustion, and packed-page roundtrips.
+Both decoders reserve a complete suffix once, using at most 64 valid scalars.
+The native decoder previously grew suffixes incrementally, requiring temporary
+replacement space: a valid packed page with 32 five-codepoint suffixes restored
+only 31. A native encode/decode regression and three reflow cross-decode cases
+retain that repair. Insufficient capacity still drops a whole suffix, and a
+later entry may retry a target whose earlier suffix could not fit.
+
 `pages/styles/mixed-edit/` adds 114 comparisons for cursor motion, direct row
 and cell edits, margins and linked/wide printing on restored pages.
 `pages/styles/wrap-reset/` adds 24 comparisons for ordinary wraps and wide-cell

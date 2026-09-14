@@ -357,8 +357,7 @@ fn encoding_capacity(
         link.validate()?;
     }
     // ponytail: live hyperlink growth is not yet in the page ledger. Keep
-    // emitted hints sufficient for decode, including detached cell styles and
-    // the transient replacement space needed when appending grapheme suffixes.
+    // emitted hints sufficient for decode, including detached cell resources.
     let link_hashes: Vec<_> = links
         .iter()
         .map(|link| hyperlink_hash(&link.id, &link.uri))
@@ -394,21 +393,13 @@ fn encoding_capacity(
             capacity.string_bytes = grow(capacity.string_bytes, u32::MAX)?;
             changed = true;
         }
-        let mut graphemes = BitmapAllocator::<16>::new(layout.grapheme_alloc_layout);
-        if suffixes.len() > layout.grapheme_map_layout.capacity as usize
-            || !suffixes.iter().all(|(_, _, cps)| {
-                let mut previous = None;
-                for count in (1..=cps.len()).step_by(4) {
-                    let Some(offset) = graphemes.alloc(count * 4) else {
-                        return false;
-                    };
-                    if let Some(previous) = previous {
-                        graphemes.free(previous, (count - 1) * 4);
-                    }
-                    previous = Some(offset);
-                }
-                true
-            })
+        let mut graphemes = GraphemeAdmission::new(
+            layout.grapheme_alloc_layout,
+            layout.grapheme_map_layout.capacity as usize,
+        );
+        if !suffixes
+            .iter()
+            .all(|(_, _, cps)| graphemes.acquire(cps.len() as u8).is_ok())
         {
             capacity.grapheme_bytes = grow(capacity.grapheme_bytes, u32::MAX)?;
             changed = true;
@@ -1379,24 +1370,24 @@ impl<R: Read> Decoder<R> {
                 && !cell.text.is_empty()
                 && !assigned.contains(&(row, col))
             {
-                let base_len = cell.text.len();
-                for bytes in bytes.as_chunks::<4>().0.iter() {
-                    if let Some(cp) = char::from_u32(u32::from_le_bytes(*bytes))
-                        && cp != '\0'
-                        && cell.grapheme.is_none_or(|allocation| allocation.len < 64)
-                    {
-                        let Ok(allocation) = graphemes.append(cell.grapheme) else {
-                            if let Some(allocation) = cell.grapheme.take() {
-                                graphemes.release(allocation);
-                            }
-                            cell.text.truncate(base_len);
-                            break;
-                        };
-                        cell.grapheme = Some(allocation);
-                        cell.text.push(cp);
-                    }
+                let mut suffix = ['\0'; 64];
+                let mut len = 0;
+                for cp in bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter_map(|bytes| char::from_u32(u32::from_le_bytes(*bytes)))
+                    .filter(|&cp| cp != '\0')
+                    .take(suffix.len())
+                {
+                    suffix[len] = cp;
+                    len += 1;
                 }
-                if cell.grapheme.is_some() {
+                if len > 0
+                    && let Ok(allocation) = graphemes.acquire(len as u8)
+                {
+                    cell.grapheme = Some(allocation);
+                    cell.text.extend(&suffix[..len]);
                     assigned.insert((row, col));
                 }
             }

@@ -306,6 +306,7 @@ impl Smoke {
                 }
                 if capture_path.is_file() {
                     check_pointer_targets(app, host)?;
+                    check_synchronized_output(app, event_loop, host)?;
                     self.idle_frames = host.frames;
                     self.progress_started = Instant::now();
                     app.panes
@@ -343,7 +344,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -488,6 +489,86 @@ impl Smoke {
         }
         Ok(false)
     }
+}
+
+fn check_synchronized_output(
+    app: &mut App,
+    event_loop: &ActiveEventLoop,
+    host: &mut Host,
+) -> Result<()> {
+    let id = app
+        .focused(host.id)
+        .ok_or("no pane for synchronized-output check")?;
+    let pane = app.panes.get_mut(&id).unwrap();
+    let original = {
+        let mut terminal = pane.session.terminal()?;
+        let mut fixture = vt::Terminal::new(terminal.cols, terminal.rows, 0);
+        fixture.set_pixel_size(terminal.width_px, terminal.height_px);
+        fixture.screen_mut().cursor.blink = false;
+        fixture.feed(b"\x1b[2;3Hcomplete frame");
+        std::mem::replace(&mut *terminal, fixture)
+    };
+    let sync = std::mem::take(&mut pane.sync_output);
+    let prepared = host.prepared.remove(&id);
+    let result = (|| -> Result<()> {
+        app.draw(event_loop, host)?;
+        let previous = &host.prepared[&id];
+        let generation = previous.key.generation;
+        let cursor = previous.key.cursor;
+        let ime_rect = previous.ime_rect;
+        for chunk in [
+            b"\x1b[?2026h\x1b[2J\x1b[H".as_slice(),
+            b"\x1b[3;1Hpartial frame",
+        ] {
+            app.panes[&id].session.terminal()?.feed(chunk);
+            app.draw(event_loop, host)?;
+            let held = &host.prepared[&id];
+            if held.key.generation != generation
+                || held.key.cursor != cursor
+                || held.ime_rect != ime_rect
+            {
+                return Err("synchronized output displayed a partial frame or cursor".into());
+            }
+        }
+        for chunk in [b"\x1b[Hfinished\x1b[?2026l".as_slice(), b"!"] {
+            let generation = {
+                let mut terminal = app.panes[&id].session.terminal()?;
+                terminal.feed(chunk);
+                terminal.generation
+            };
+            app.draw(event_loop, host)?;
+            if host.prepared[&id].key.generation != generation
+                || app.panes[&id].sync_output.deadline.is_some()
+            {
+                return Err("completed or ordinary output waited for another frame".into());
+            }
+        }
+        app.panes[&id]
+            .session
+            .terminal()?
+            .feed(b"\x1b[?2026h\x1b[2J");
+        host.fonts.clear_cache();
+        app.draw(event_loop, host)?;
+        if app.panes[&id].session.terminal()?.modes.dec(2026)
+            || host.prepared[&id].frame.generation != host.fonts.generation()
+        {
+            return Err("atlas replacement retained an invalid synchronized frame".into());
+        }
+        Ok(())
+    })();
+    let pane = app.panes.get_mut(&id).unwrap();
+    *pane.session.terminal()? = original;
+    pane.sync_output = sync;
+    host.prepared.remove(&id);
+    if let Some(prepared) = prepared {
+        host.prepared.insert(id, prepared);
+    }
+    host.repaint();
+    result?;
+    eprintln!(
+        "Native smoke: synchronized output held partial frames and cursors, then released immediately"
+    );
+    Ok(())
 }
 
 fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {

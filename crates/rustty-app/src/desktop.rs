@@ -72,6 +72,7 @@ struct Pane {
     exit_message: Option<String>,
     links: vt::search::LinkMatcher,
     mouse_cell: Option<[u16; 2]>,
+    sync_output: SynchronizedOutput,
 }
 impl Pane {
     fn update_saved(&self, saved: &mut SavedPane) -> bool {
@@ -111,6 +112,30 @@ impl Pane {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct SynchronizedOutput {
+    generation: u64,
+    deadline: Option<Instant>,
+}
+
+impl SynchronizedOutput {
+    fn update(&mut self, terminal: &mut vt::Terminal, now: Instant) -> Option<Instant> {
+        if !terminal.modes.dec(2026) {
+            self.deadline = None;
+        } else if self.deadline.is_none()
+            || self.generation != terminal.synchronized_output_generation
+        {
+            self.generation = terminal.synchronized_output_generation;
+            // Match Ghostty's failsafe for an application that never ends a batch.
+            self.deadline = Some(now + Duration::from_secs(1));
+        } else if self.deadline.is_some_and(|deadline| deadline <= now) {
+            terminal.set_mode(true, 2026, false);
+            self.deadline = None;
+        }
+        self.deadline
     }
 }
 
@@ -881,6 +906,7 @@ impl App {
                 exit_message: None,
                 links: vt::search::LinkMatcher::default(),
                 mouse_cell: None,
+                sync_output: SynchronizedOutput::default(),
             },
         );
         Ok(())
@@ -1269,10 +1295,13 @@ impl App {
         {
             self.errors.push(error.to_string());
         }
-        if let Ok(terminal) = pane.session.terminal()
-            && let Some(directory) = directory_from_osc(&terminal.working_directory)
-        {
-            pane.cwd = directory;
+        if let Ok(mut terminal) = pane.session.terminal() {
+            pane.sync_output.update(&mut terminal, Instant::now());
+            if let Some(directory) = directory_from_osc(&terminal.working_directory) {
+                pane.cwd = directory;
+            }
+        } else {
+            pane.sync_output.deadline = None;
         }
         let events = pane.session.events().collect::<Vec<_>>();
         for event in events {
@@ -2696,7 +2725,7 @@ impl App {
                         accessible.clear();
                         let mut retry = false;
                         for (&id, &rect) in &host.rects {
-                            let Some(pane) = self.panes.get(&id) else {
+                            let Some(pane) = self.panes.get_mut(&id) else {
                                 continue;
                             };
                             let physical = rect.size() * scale;
@@ -2739,9 +2768,20 @@ impl App {
                                     continue;
                                 }
                             };
+                            if terminal.modes.dec(2026)
+                                && host.prepared.get(&id).is_some_and(|prepared| {
+                                    prepared.frame.generation != host.fonts.generation()
+                                })
+                            {
+                                // Like resize, atlas replacement ends a batch: old
+                                // texture coordinates cannot mix with the new atlas.
+                                terminal.set_mode(true, 2026, false);
+                            }
+                            let synchronized =
+                                pane.sync_output.update(&mut terminal, now).is_some();
                             let now_ms =
                                 self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                            if let Some(next) = terminal.tick_graphics(now_ms) {
+                            if !synchronized && let Some(next) = terminal.tick_graphics(now_ms) {
                                 let deadline = Instant::now()
                                     + Duration::from_millis(next.saturating_sub(now_ms));
                                 animation_deadline = Some(
@@ -2749,7 +2789,8 @@ impl App {
                                 );
                             }
                             let is_focused = host.focused && id == focused && host.peek.is_none();
-                            needs_blink |= is_focused
+                            needs_blink |= !synchronized
+                                && is_focused
                                 && !pane.exited
                                 && !host.composing
                                 && terminal.screen().cursor.visible
@@ -2798,10 +2839,11 @@ impl App {
                                 }),
                             };
                             let key = PaneRenderKey::new(&terminal, options, rect, scale);
-                            let snapshot = (!host
-                                .prepared
-                                .get(&id)
-                                .is_some_and(|pane| pane.matches(&key, &host.fonts)))
+                            let snapshot = (!synchronized
+                                && !host
+                                    .prepared
+                                    .get(&id)
+                                    .is_some_and(|pane| pane.matches(&key, &host.fonts)))
                             .then(|| terminal.screen().snapshot_viewport());
                             drop(terminal);
                             if let Some(snapshot) = snapshot {
@@ -2817,7 +2859,9 @@ impl App {
                                     }
                                 }
                             }
-                            let prepared = &host.prepared[&id];
+                            let Some(prepared) = host.prepared.get(&id) else {
+                                continue;
+                            };
                             if composed
                                 .append_clipped(
                                     &prepared.frame,
@@ -4152,6 +4196,19 @@ impl ApplicationHandler<Event> for App {
             }
         }
         let now = Instant::now();
+        let sync_expired: Vec<_> = self
+            .panes
+            .iter()
+            .filter(|(_, pane)| {
+                pane.sync_output
+                    .deadline
+                    .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in sync_expired {
+            self.drain(id);
+        }
         let expired = self
             .panes
             .iter_mut()
@@ -4188,11 +4245,12 @@ impl ApplicationHandler<Event> for App {
             .save_at
             .into_iter()
             .chain(self.close_at)
-            .chain(
-                self.panes
-                    .values()
-                    .filter_map(|pane| pane.activity.deadline()),
-            )
+            .chain(self.panes.values().flat_map(|pane| {
+                pane.activity
+                    .deadline()
+                    .into_iter()
+                    .chain(pane.sync_output.deadline)
+            }))
             .chain((!self.closing.is_empty()).then_some(now + Duration::from_millis(20)))
             .chain(
                 self.history
@@ -4616,6 +4674,52 @@ fn ui_theme(config: &Config) -> egui::ThemePreference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synchronized_output_releases_on_end_and_restarts_the_bounded_timeout() {
+        let mut terminal = vt::Terminal::new(20, 3, 0);
+        let mut sync = SynchronizedOutput::default();
+        let start = Instant::now();
+        let later = start + Duration::from_millis(500);
+        assert_eq!(sync.update(&mut terminal, start), None);
+        terminal.feed(b"\x1b[?2026h\x1b[2J\x1b[H");
+        assert_eq!(
+            sync.update(&mut terminal, start),
+            Some(start + Duration::from_secs(1))
+        );
+        terminal.feed(b"partial");
+        assert_eq!(
+            sync.update(&mut terminal, later),
+            Some(start + Duration::from_secs(1))
+        );
+        terminal.feed(b"\x1b[?2026h");
+        assert_eq!(
+            sync.update(&mut terminal, later),
+            Some(later + Duration::from_secs(1))
+        );
+        terminal.feed(b" complete\x1b[?2026l");
+        assert_eq!(sync.update(&mut terminal, later), None);
+
+        terminal.feed(b"\x1b[?2026h");
+        let deadline = sync.update(&mut terminal, later).unwrap();
+        assert!(
+            sync.update(&mut terminal, deadline - Duration::from_nanos(1))
+                .is_some()
+        );
+        assert_eq!(sync.update(&mut terminal, deadline), None);
+        assert!(!terminal.modes.dec(2026));
+        terminal.feed(b"\x1b[?2026h");
+        sync.update(&mut terminal, later);
+        terminal.resize(21, 3);
+        assert_eq!(sync.update(&mut terminal, later), None);
+        terminal.feed(b"\x1b[?2026h");
+        sync.update(&mut terminal, start);
+        terminal.feed(b"\x1bc\x1b[?2026h");
+        assert_eq!(
+            sync.update(&mut terminal, later),
+            Some(later + Duration::from_secs(1))
+        );
+    }
 
     #[test]
     fn prepared_panes_follow_terminal_view_and_atlas_changes() {

@@ -123,6 +123,9 @@ pub struct Terminal {
     pub title: String,
     pub working_directory: String,
     pub generation: u64,
+    /// Changes on every synchronized-output enable so hosts can restart their
+    /// timeout without putting a wall clock in the terminal or its snapshots.
+    pub synchronized_output_generation: u64,
     pub modify_other_keys: bool,
     pub mouse_mode: u16,
     pub mouse_format: u16,
@@ -190,6 +193,7 @@ impl Terminal {
             title: String::new(),
             working_directory: String::new(),
             generation: 0,
+            synchronized_output_generation: 0,
             modify_other_keys: false,
             mouse_mode: 0,
             mouse_format: 0,
@@ -555,6 +559,7 @@ impl Terminal {
         let query_defaults = self.query_defaults.clone();
         let title_report = self.title_report;
         let shell_command_events = self.shell_command_events;
+        let synchronized_output_generation = self.synchronized_output_generation;
         let visible = self.visible;
         let clipboard = std::mem::take(&mut self.clipboard);
         // RIS interrupts chunking while retaining the drag registration and data.
@@ -597,6 +602,7 @@ impl Terminal {
         self.query_defaults = query_defaults;
         self.title_report = title_report;
         self.shell_command_events = shell_command_events;
+        self.synchronized_output_generation = synchronized_output_generation;
         self.visible = visible;
         self.clipboard = clipboard;
         self.kitty_dnd = kitty_dnd;
@@ -1863,6 +1869,10 @@ impl Terminal {
                 }
                 9 | 1000 | 1002 | 1003 => self.mouse_mode = if value { mode } else { 0 },
                 1005 | 1006 | 1015 | 1016 => self.mouse_format = if value { mode } else { 0 },
+                2026 if value => {
+                    self.synchronized_output_generation =
+                        self.synchronized_output_generation.wrapping_add(1);
+                }
                 _ => {}
             }
         }

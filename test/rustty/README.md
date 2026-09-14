@@ -123,6 +123,9 @@ and DEC graphics mappings through G0–G3, cell-write single shifts, repeat and
 snapshot continuation. Combining characters and wide-cell spacers exercise
 shift consumption separately from input-scalar dispatch. Smoke cases also keep
 minimized inherited failures with their original corpus source identifiers.
+`--case protocol/charsets/defaults` additionally compares snapshot bytes through
+initialization, reset, saved and unsaved cursor restoration, and alternate-screen
+creation. The default right-hand slot is G2 in all of these paths.
 
 `--grid` compares direct selection, literal search and tracked-reference APIs.
 Each `grid` operation appends its result to `grid_results`; actions are `select`,

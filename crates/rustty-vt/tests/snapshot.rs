@@ -80,6 +80,29 @@ fn frame(records: &[(u16, Vec<u8>)]) -> Vec<u8> {
 }
 
 #[test]
+fn default_right_charset_is_preserved_by_cursor_and_screen_lifecycles() {
+    for (input, expected) in [
+        (b"".as_slice(), 2),
+        (b"\x1b~\x1b8", 2),
+        (b"\x1b|\x1bc", 2),
+        (b"\x1b7\x1b~\x1b8", 2),
+        (b"\x1b~\x1b7\x1b|\x1b8", 1),
+        (b"\x1b[?1047h", 2),
+        (b"\x1b[?1047h\x1b|\x1b8", 2),
+    ] {
+        let mut terminal = Terminal::new(8, 3, 0);
+        terminal.feed(input);
+        for (_, screen) in records(&encode_to_vec(&terminal).unwrap())
+            .into_iter()
+            .filter(|(tag, _)| *tag == 2)
+        {
+            let charset = u16::from_le_bytes(screen[38..40].try_into().unwrap());
+            assert_eq!((charset >> 10) & 3, expected, "input={input:?}");
+        }
+    }
+}
+
+#[test]
 fn unknown_cursor_default_flags_preserve_host_cursor_preferences() {
     for (flag, expected) in [
         (0, CursorShape::Block),

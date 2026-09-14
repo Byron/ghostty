@@ -90,9 +90,21 @@ replacement/deletion, history, resets and screen switches. Retransmitting an
 explicit image deletes its old placements as soon as transmission starts, even
 if the replacement fails. Terminal clears reclaim unplaced image data while
 preserving placements outside the active area. Basic parent-orphan and virtual
-clear cases are included; full parent chains, placeholder rendering, margin
+clear cases are included; full placeholder rendering, margin
 clipping, pruning, transports and animation clocks remain incomplete. Rust's
 renderer and terminal now share integer placement sizing from `rustty-vt`.
+
+`--protocols --case protocol/graphics/placements/relative/` covers ordinary
+parent references and chains with 64 fixtures (192 delivery comparisons).
+Cases compare explicit/fallback parent choice, missing images versus placements,
+self-parent and cycle errors, the eight-link limit, rejected replacements,
+cursor invariance and transitive deletion. The optional placement observation
+also exposes the resolved chain root, anchor and accumulated cell offset using
+native `resolveChain` and the Rust resolver shared with the renderer. Offsets
+saturate as i32 at each link. Replacing an ancestor may deepen existing children
+beyond eight links; those children remain stored but cannot resolve or render.
+Virtual-plus-parent validation is checked; virtual-root positioning remains
+part of the separate placeholder work.
 
 `--protocols --case protocol/charsets` retains a bounded matrix of ASCII, UK
 and DEC graphics mappings through G0–G3, cell-write single shifts, repeat and

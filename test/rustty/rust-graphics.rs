@@ -37,10 +37,17 @@ fn placements(screen: &Screen, cell: [u32; 2]) -> Vec<Value> {
     placements.into_iter().map(|p| {
         let image = &screen.graphics.images[&p.image_id];
         let kind = if p.virtual_placement { "virtual" } else if p.parent.is_some() { "relative" } else { "pin" };
+        let chain = p.parent.and_then(|_| p.resolve_chain(|key| screen.graphics.placements.iter()
+            .find(|p| (p.image_id,p.placement_id) == key))).map(|(root,offset)| {
+                json!({"image_id":root.image_id,"placement_id":placement_id(root.placement_id),
+                    "anchor":if root.virtual_placement { None } else { location(screen,GridPoint { row:root.row,col:root.col }) },
+                    "offset":offset})
+            });
         json!({"image_id":p.image_id, "placement_id":placement_id(p.placement_id),
             "location":kind,
             "anchor":if kind == "pin" { location(screen, GridPoint { row:p.row, col:p.col }) } else { None },
             "parent":p.parent.map(|(id,key)| json!({"image_id":id,"placement_id":placement_id(key),"offset":p.parent_offset})),
+            "chain":chain,
             "requested_size":[p.columns,p.rows], "requested_source":p.source, "stored_offset":p.offset,
             "z":p.z,"source":p.source_rect(image),"offset":p.cell_offset(cell),
             "pixels":p.pixel_size(image,cell),"grid":p.grid_size(image,cell),

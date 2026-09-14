@@ -9,6 +9,7 @@ use std::{
 
 const MAX_DATA: usize = 400 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 10000;
+const PARENT_CHAIN_LIMIT: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct Image {
@@ -104,6 +105,28 @@ pub enum PlacementId {
 }
 
 impl Placement {
+    /// Resolve a live parent chain, preserving native per-link i32 saturation.
+    /// Replacing an ancestor can make an existing descendant exceed the limit.
+    pub fn resolve_chain<'a>(
+        &'a self,
+        mut lookup: impl FnMut((u32, PlacementId)) -> Option<&'a Placement>,
+    ) -> Option<(&'a Placement, [i32; 2])> {
+        let mut current = self;
+        let mut offset = [0i32; 2];
+        for depth in 0..=PARENT_CHAIN_LIMIT {
+            let Some(parent) = current.parent else {
+                return Some((current, offset));
+            };
+            if depth == PARENT_CHAIN_LIMIT {
+                return None;
+            }
+            offset[0] = offset[0].saturating_add(current.parent_offset[0]);
+            offset[1] = offset[1].saturating_add(current.parent_offset[1]);
+            current = lookup(parent)?;
+        }
+        None
+    }
+
     pub fn source_rect(&self, image: &Image) -> [u32; 4] {
         let [x, y, width, height] = self.source;
         let x = x.min(image.width);
@@ -235,6 +258,52 @@ impl Default for Graphics {
 }
 
 impl Graphics {
+    fn resolve_parent(
+        &self,
+        child: Option<(u32, PlacementId)>,
+        image_id: u32,
+        placement_id: u32,
+    ) -> Result<(u32, PlacementId), &'static str> {
+        if !self.images.contains_key(&image_id) {
+            return Err("ENOPARENT: parent image not found");
+        }
+        let parent = self
+            .placements
+            .iter()
+            .filter(|p| {
+                p.image_id == image_id
+                    && (placement_id == 0 || p.placement_id == PlacementId::External(placement_id))
+            })
+            .min_by_key(|p| match p.placement_id {
+                PlacementId::External(id) => (false, id),
+                PlacementId::Internal(id) => (true, id),
+            })
+            .ok_or("ENOPARENT: parent placement not found")?;
+        let parent_key = (parent.image_id, parent.placement_id);
+        if child == Some(parent_key) {
+            return Err("EINVAL: placement cannot be its own parent");
+        }
+        let mut key = parent_key;
+        for depth in 1..=PARENT_CHAIN_LIMIT {
+            if child == Some(key) {
+                return Err("ECYCLE: parent chain creates a cycle");
+            }
+            let placement = self
+                .placements
+                .iter()
+                .find(|p| (p.image_id, p.placement_id) == key)
+                .ok_or("ENOENT: parent chain ancestor not found")?;
+            let Some(next) = placement.parent else {
+                return Ok(parent_key);
+            };
+            if depth == PARENT_CHAIN_LIMIT {
+                return Err("ETOODEEP: parent chain too deep");
+            }
+            key = next;
+        }
+        unreachable!("the bounded parent walk always returns")
+    }
+
     pub(crate) fn snapshot(&self, screen: &Screen) -> Self {
         let mut placements = self.placements.clone();
         if !placements.is_empty() {
@@ -506,6 +575,19 @@ impl Terminal {
             self.graphics_delete(&command);
             return;
         }
+        if action == b'p' {
+            let error = if id == 0 && command.n(b'I') == 0 {
+                Some("EINVAL: image ID or number required")
+            } else if command.n(b'U') != 0 && command.n(b'P') != 0 {
+                Some("EINVAL: virtual placement cannot refer to a parent")
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                command.reply(id, 0, error, effects);
+                return;
+            }
+        }
         if matches!(action, b'p' | b'a' | b'c') {
             let Some(resolved) = self.graphics().resolve_id(id, command.n(b'I')) else {
                 command.reply(id, 0, "ENOENT: image not found", effects);
@@ -665,11 +747,12 @@ impl Terminal {
     }
 
     fn graphics_place(&mut self, id: u32, cmd: &Command) -> Result<(), &'static str> {
-        let image = self
-            .graphics()
-            .images
-            .get(&id)
-            .ok_or("ENOENT: image not found")?;
+        if cmd.n(b'U') != 0 && cmd.n(b'P') != 0 {
+            return Err("EINVAL: virtual placement cannot refer to a parent");
+        }
+        if !self.graphics().images.contains_key(&id) {
+            return Err("ENOENT: image not found");
+        }
         let cell = [
             self.width_px / u32::from(self.cols),
             self.height_px / u32::from(self.rows),
@@ -681,40 +764,12 @@ impl Terminal {
             }
         }
         let parent = if cmd.n(b'P') != 0 {
-            let parent = self
-                .graphics()
-                .placements
-                .iter()
-                .filter(|p| {
-                    p.image_id == cmd.n(b'P')
-                        && (cmd.n(b'Q') == 0
-                            || p.placement_id == PlacementId::External(cmd.n(b'Q')))
-                })
-                .min_by_key(|p| match p.placement_id {
-                    PlacementId::External(id) => (false, id),
-                    PlacementId::Internal(id) => (true, id),
-                })
-                .ok_or("ENOPARENT: parent placement not found")?;
-            if id == parent.image_id && PlacementId::External(cmd.n(b'p')) == parent.placement_id {
-                return Err("EINVAL: placement cannot be its own parent");
-            }
-            let mut current = Some((parent.image_id, parent.placement_id));
-            let mut seen = HashSet::new();
-            while let Some(key) = current {
-                if key == (id, PlacementId::External(cmd.n(b'p'))) || !seen.insert(key) {
-                    return Err("ECYCLE: parent chain creates a cycle");
-                }
-                if seen.len() > 64 {
-                    return Err("ETOODEEP: parent chain too deep");
-                }
-                current = self
-                    .graphics()
-                    .placements
-                    .iter()
-                    .find(|p| (p.image_id, p.placement_id) == key)
-                    .and_then(|p| p.parent);
-            }
-            Some((parent.image_id, parent.placement_id))
+            self.screen_mut().graphics.reap_orphans();
+            Some(self.graphics().resolve_parent(
+                (cmd.n(b'p') != 0).then_some((id, PlacementId::External(cmd.n(b'p')))),
+                cmd.n(b'P'),
+                cmd.n(b'Q'),
+            )?)
         } else {
             None
         };
@@ -735,7 +790,7 @@ impl Terminal {
             parent,
             parent_offset: [cmd.signed(b'H'), cmd.signed(b'V')],
         };
-        let [columns, rows] = placement.grid_size(image, cell);
+        let [columns, rows] = placement.grid_size(&self.graphics().images[&id], cell);
         let graphics = &mut self.screen_mut().graphics;
         let placement_id = if cmd.n(b'p') != 0 {
             PlacementId::External(cmd.n(b'p'))
@@ -1283,6 +1338,67 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_parent_validation_preserves_placements_on_failure() {
+        let mut terminal = Terminal::new(8, 4, 100);
+        terminal.feed(b"\x1b_Ga=T,i=1,p=1,C=1,f=32,s=1,v=1;AQID/w==\x1b\\");
+        for id in 2..=9 {
+            let result =
+                terminal.feed(format!("\x1b_Ga=p,i=1,p={id},P=1,Q={}\x1b\\", id - 1).as_bytes());
+            assert_eq!(
+                result,
+                [Effect::Write(
+                    format!("\x1b_Gi=1,p={id};OK\x1b\\").into_bytes()
+                )]
+            );
+        }
+        for (options, error) in [
+            ("p=10,P=7,Q=1", "ENOPARENT: parent image not found"),
+            ("p=10,P=1,Q=77", "ENOPARENT: parent placement not found"),
+            ("p=10,P=1,Q=9", "ETOODEEP: parent chain too deep"),
+            ("p=1,P=1,Q=1", "EINVAL: placement cannot be its own parent"),
+            ("p=1,P=1,Q=2", "ECYCLE: parent chain creates a cycle"),
+        ] {
+            let result = terminal.feed(format!("\x1b_Ga=p,i=1,{options}\x1b\\").as_bytes());
+            let placement = options.split(',').next().unwrap();
+            assert_eq!(
+                result,
+                [Effect::Write(
+                    format!("\x1b_Gi=1,{placement};{error}\x1b\\").into_bytes()
+                )]
+            );
+            assert_eq!(terminal.graphics().placements.len(), 9);
+            assert_eq!(terminal.graphics().placements[0].parent, None);
+        }
+    }
+
+    #[test]
+    fn relative_chain_saturates_each_link_and_rejects_missing_ancestors() {
+        let mut terminal = Terminal::new(8, 4, 100);
+        terminal.feed(b"\x1b_Ga=T,i=1,p=1,C=1,f=32,s=1,v=1;AQID/w==\x1b\\");
+        for (id, offset) in [(2, -1), (3, 1), (4, i32::MAX)] {
+            terminal.feed(
+                format!(
+                    "\x1b_Ga=p,i=1,p={id},P=1,Q={},H={offset},V={offset}\x1b\\",
+                    id - 1
+                )
+                .as_bytes(),
+            );
+        }
+        let graphics = terminal.graphics();
+        let child = &graphics.placements[3];
+        let lookup = |key| {
+            graphics
+                .placements
+                .iter()
+                .find(|p| (p.image_id, p.placement_id) == key)
+        };
+        let (root, offset) = child.resolve_chain(lookup).unwrap();
+        assert_eq!(root.placement_id, PlacementId::External(1));
+        assert_eq!(offset, [i32::MAX - 1; 2]);
+        assert!(child.resolve_chain(|_| None).is_none());
+    }
 
     #[test]
     fn anonymous_and_numbered_images_use_independent_id_allocation() {

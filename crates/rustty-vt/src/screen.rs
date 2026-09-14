@@ -3,12 +3,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::page_list::{Page, PageAllocationInfo, PageList};
-use crate::page_resources::{GraphemeAdmission, GraphemeAllocation, SetFull, StyleAdmission};
+use crate::page_resources::{
+    GraphemeAdmission, GraphemeAllocation, Hyperlink, HyperlinkAdmission, HyperlinkFull, SetFull,
+    StyleAdmission,
+};
 
 #[derive(Clone, Copy)]
 enum PageResource {
     Styles,
     Graphemes,
+    Links,
+    Strings,
+}
+
+impl PageResource {
+    fn for_link(error: HyperlinkFull) -> Option<Self> {
+        match error {
+            HyperlinkFull::Strings => Some(Self::Strings),
+            HyperlinkFull::Set(SetFull::NeedsRehash) => None,
+            HyperlinkFull::Set(SetFull::OutOfMemory) | HyperlinkFull::Map => Some(Self::Links),
+        }
+    }
 }
 
 /// Independent logical storage budgets. `None` means unlimited.
@@ -163,6 +178,8 @@ pub struct Cell {
     #[serde(skip)]
     pub(crate) style_id: u16,
     #[serde(skip)]
+    pub(crate) link_id: u16,
+    #[serde(skip)]
     pub(crate) grapheme: Option<GraphemeAllocation>,
     /// Empty for unwritten cells and the continuation of a wide glyph.
     pub text: String,
@@ -199,6 +216,7 @@ impl Default for Cell {
     fn default() -> Self {
         Self {
             style_id: 0,
+            link_id: 0,
             grapheme: None,
             text: String::new(),
             width: 1,
@@ -214,6 +232,13 @@ impl Default for Cell {
 }
 
 impl Cell {
+    pub(crate) fn clear_link(&mut self) {
+        self.link_id = 0;
+        self.hyperlink = None;
+        self.hyperlink_id = None;
+        self.hyperlink_raw = None;
+    }
+
     pub(crate) fn blank(background: Color) -> Self {
         Self {
             style: Style {
@@ -245,7 +270,7 @@ pub struct Row {
 
 pub(crate) struct RowCopy {
     row: Row,
-    sources: Vec<(Option<u64>, u16, Style)>,
+    sources: Vec<(Option<u64>, u16, Style, u16)>,
 }
 
 impl Row {
@@ -546,6 +571,8 @@ pub struct Screen {
     pub(crate) pages: PageList,
     #[serde(skip)]
     pub(crate) cursor_style: Option<(u64, u16)>,
+    #[serde(skip)]
+    pub(crate) cursor_link: Option<(u64, u16)>,
     pub(crate) next_row: u64,
     #[serde(skip)]
     tracked: TrackedPoints,
@@ -596,6 +623,7 @@ impl Screen {
             history_bytes: 0,
             pages: PageList::new(cols as u16, rows),
             cursor_style: None,
+            cursor_link: None,
             next_row: rows as u64,
             tracked: TrackedPoints::default(),
         }
@@ -634,6 +662,7 @@ impl Screen {
                     row.resource_page = None;
                     for cell in &mut row.cells {
                         cell.style_id = 0;
+                        cell.link_id = 0;
                         cell.grapheme = None;
                     }
                     row
@@ -655,6 +684,7 @@ impl Screen {
                 self.rows.len(),
             ),
             cursor_style: None,
+            cursor_link: None,
             next_row: self.next_row,
             tracked: TrackedPoints::default(),
         }
@@ -758,6 +788,17 @@ impl Screen {
         }
     }
 
+    fn release_link_cell(&mut self, serial: u64, id: u16) {
+        if let Some(page) = self
+            .pages
+            .pages
+            .iter_mut()
+            .find(|page| page.serial == serial)
+        {
+            page.links.release_cell(id);
+        }
+    }
+
     pub(crate) fn release_row_resources(&mut self, row: &Row) {
         if let Some(serial) = row.resource_page
             && let Some(page) = self
@@ -768,6 +809,7 @@ impl Screen {
         {
             for cell in &row.cells {
                 page.styles.release(cell.style_id);
+                page.links.release_cell(cell.link_id);
                 if let Some(grapheme) = cell.grapheme {
                     page.graphemes.release(grapheme);
                 }
@@ -795,8 +837,12 @@ impl Screen {
     fn edit_owned_row<R>(page: &mut Page, row: &mut Row, edit: impl FnOnce(&mut Row) -> R) -> R {
         row.resource_page = Some(page.serial);
         let mut counts: HashMap<u16, isize> = HashMap::new();
+        let mut links: HashMap<u16, isize> = HashMap::new();
         let mut graphemes = HashSet::new();
         for cell in &row.cells {
+            if cell.link_id != 0 {
+                *links.entry(cell.link_id).or_default() -= 1;
+            }
             if cell.style_id != 0 {
                 *counts.entry(cell.style_id).or_default() -= 1;
             }
@@ -806,6 +852,9 @@ impl Screen {
         }
         let result = edit(row);
         for cell in &row.cells {
+            if cell.link_id != 0 {
+                *links.entry(cell.link_id).or_default() += 1;
+            }
             if cell.style_id != 0 {
                 *counts.entry(cell.style_id).or_default() += 1;
             }
@@ -827,6 +876,17 @@ impl Screen {
         }
         for grapheme in graphemes {
             page.graphemes.release(grapheme);
+        }
+        for (id, count) in links {
+            if count < 0 {
+                for _ in 0..-count {
+                    page.links.release_cell(id);
+                }
+            } else {
+                for _ in 0..count {
+                    page.links.retain_moved_cell(id);
+                }
+            }
         }
         result
     }
@@ -858,6 +918,7 @@ impl Screen {
         for cell in &mut row.cells[start..end] {
             if !protected || !cell.protected {
                 self.pages.pages[index].styles.release(cell.style_id);
+                self.pages.pages[index].links.release_cell(cell.link_id);
                 if let Some(grapheme) = cell.grapheme {
                     self.pages.pages[index].graphemes.release(grapheme);
                 }
@@ -870,6 +931,150 @@ impl Screen {
     pub(crate) fn release_cursor_style(&mut self) {
         if let Some((serial, id)) = self.cursor_style.take() {
             self.release_style(serial, id);
+        }
+    }
+
+    fn release_cursor_link(&mut self) {
+        if let Some((serial, id)) = self.cursor_link.take()
+            && let Some(page) = self
+                .pages
+                .pages
+                .iter_mut()
+                .find(|page| page.serial == serial)
+        {
+            page.links.release(id);
+        }
+    }
+
+    pub(crate) fn end_hyperlink(&mut self) {
+        self.release_cursor_link();
+        self.cursor.hyperlink = None;
+        self.cursor.hyperlink_id = None;
+        self.cursor.hyperlink_raw = None;
+    }
+
+    fn acquire_cursor_link(&mut self, link: &Hyperlink) -> Option<(u64, u16)> {
+        let absolute = self.history.len() + self.cursor.row;
+        loop {
+            let index = self.pages.page_index(absolute);
+            match self.pages.pages[index].links.insert(link) {
+                Ok(id) => return Some((self.pages.pages[index].serial, id)),
+                Err(error) => self
+                    .grow_resource_page(index, PageResource::for_link(error))
+                    .ok()?,
+            }
+        }
+    }
+
+    pub(crate) fn start_hyperlink(&mut self, uri: &[u8], explicit: Option<&[u8]>) {
+        let id = if let Some(id) = explicit {
+            HyperlinkId::Explicit(id.to_vec())
+        } else {
+            let id = self.metadata.hyperlink_implicit_id;
+            self.metadata.hyperlink_implicit_id = id.wrapping_add(1);
+            HyperlinkId::Implicit(id)
+        };
+        let link = Hyperlink {
+            id,
+            uri: uri.to_vec(),
+        };
+        self.end_hyperlink();
+        if let Some(reference) = self.acquire_cursor_link(&link) {
+            self.cursor_link = Some(reference);
+            self.cursor.hyperlink = Some(String::from_utf8_lossy(uri).into_owned());
+            self.cursor.hyperlink_raw = std::str::from_utf8(uri).is_err().then(|| uri.to_vec());
+            self.cursor.hyperlink_id = Some(link.id);
+        } else if explicit.is_none() {
+            self.metadata.hyperlink_implicit_id =
+                self.metadata.hyperlink_implicit_id.wrapping_sub(1);
+        }
+    }
+
+    /// Page movement renews implicit cursor links. Resource growth on the same
+    /// page reinstalls their existing identities; printed cells retain theirs.
+    pub(crate) fn sync_cursor_resources(&mut self) {
+        let index = self.pages.page_index(self.history.len() + self.cursor.row);
+        let serial = self.pages.pages[index].serial;
+        let moved = self.cursor_link.is_some_and(|(owner, _)| owner != serial);
+        if moved {
+            self.release_cursor_link();
+            if matches!(self.cursor.hyperlink_id, Some(HyperlinkId::Implicit(_))) {
+                let id = self.metadata.hyperlink_implicit_id;
+                self.cursor.hyperlink_id = Some(HyperlinkId::Implicit(id));
+                self.metadata.hyperlink_implicit_id = id.wrapping_add(1);
+            }
+        }
+        self.sync_cursor_style();
+        if let Some((owner, id)) = self.cursor_link {
+            let page = self.pages.page_at(self.history.len() + self.cursor.row).0;
+            if owner == page.serial {
+                let link = page.links.get(id);
+                if self.cursor.hyperlink.as_ref().is_some_and(|uri| {
+                    link.uri
+                        == self
+                            .cursor
+                            .hyperlink_raw
+                            .as_deref()
+                            .unwrap_or(uri.as_bytes())
+                        && Some(&link.id) == self.cursor.hyperlink_id.as_ref()
+                }) {
+                    return;
+                }
+            }
+            self.release_cursor_link();
+        }
+        if let Some(link) = Hyperlink::from_cursor(&self.cursor) {
+            self.cursor_link = self.acquire_cursor_link(&link);
+            if self.cursor_link.is_none() {
+                self.end_hyperlink();
+            }
+        }
+    }
+
+    pub(crate) fn set_cell_cursor_hyperlink(&mut self, col: usize) {
+        let absolute = self.history.len() + self.cursor.row;
+        while let Some((_, id)) = self.cursor_link {
+            let index = self.pages.page_index(absolute);
+            if self.pages.pages[index].links.retain_cell(id).is_ok() {
+                self.rows[self.cursor.row].cells[col].link_id = id;
+                return;
+            }
+            // Match native map growth's extra URI reservation. Page rebuilding
+            // can drop a cursor link that no longer fits alongside live cells.
+            while let Some(link) = Hyperlink::from_cursor(&self.cursor) {
+                if self.pages.pages[index].links.reserve_uri(link.uri.len()) {
+                    break;
+                }
+                if self
+                    .grow_resource_page(index, Some(PageResource::Strings))
+                    .is_err()
+                {
+                    self.rows[self.cursor.row].cells[col].clear_link();
+                    return;
+                }
+            }
+            if self
+                .grow_resource_page(index, Some(PageResource::Links))
+                .is_err()
+            {
+                break;
+            }
+        }
+        self.rows[self.cursor.row].cells[col].clear_link();
+    }
+
+    fn acquire_link_cell(
+        &mut self,
+        absolute: usize,
+        link: &Hyperlink,
+        preferred: u16,
+    ) -> Result<u16, SetFull> {
+        loop {
+            let index = self.pages.page_index(absolute);
+            match self.pages.pages[index].links.copy_cell(link, preferred) {
+                Ok(id) => return Ok(id),
+                Err(error) => self.grow_resource_page(index, PageResource::for_link(error))?,
+            }
         }
     }
 
@@ -1105,7 +1310,7 @@ impl Screen {
         } else {
             relative
         };
-        let referenced_cursor = self.cursor_style.is_some();
+        let referenced_cursor = self.cursor_style.is_some() || self.cursor_link.is_some();
         if !self.pages.split(index, split as u16) {
             return Err(SetFull::OutOfMemory);
         }
@@ -1115,7 +1320,7 @@ impl Screen {
             }
         }
         if referenced_cursor {
-            self.sync_cursor_style();
+            self.sync_cursor_resources();
         }
         Ok(())
     }
@@ -1140,6 +1345,18 @@ impl Screen {
                     u64::from(u32::MAX),
                     page.graphemes.used_bytes() as u64,
                 ),
+                PageResource::Links => (
+                    u64::from(capacity.hyperlink_bytes),
+                    192,
+                    u64::from(u16::MAX),
+                    0,
+                ),
+                PageResource::Strings => (
+                    u64::from(capacity.string_bytes),
+                    2048,
+                    u64::from(u32::MAX),
+                    0,
+                ),
             };
             if old == maximum {
                 return Err(SetFull::OutOfMemory);
@@ -1147,6 +1364,8 @@ impl Screen {
             let assign = |cap: &mut crate::page_layout::PageCapacity, value: u64| match resource {
                 PageResource::Styles => cap.styles = value as u16,
                 PageResource::Graphemes => cap.grapheme_bytes = value as u32,
+                PageResource::Links => cap.hyperlink_bytes = value as u16,
+                PageResource::Strings => cap.string_bytes = value as u32,
             };
             let increased = if old == 0 {
                 default
@@ -1174,33 +1393,47 @@ impl Screen {
             layout.grapheme_alloc_layout,
             layout.grapheme_map_layout.capacity as usize,
         );
+        let mut links = HyperlinkAdmission::new(
+            layout.hyperlink_set_layout,
+            layout.string_alloc_layout,
+            layout.hyperlink_map_layout.capacity as usize * 80 / 100,
+        );
         let mut pending = Vec::new();
         for row in rows.filter(|row| row.resource_page == Some(serial)) {
             for cell in &mut row.cells {
-                if cell.style_id == 0 && cell.grapheme.is_none() {
+                if cell.style_id == 0 && cell.grapheme.is_none() && cell.link_id == 0 {
                     continue;
                 }
                 let grapheme = cell
                     .grapheme
                     .map(|allocation| graphemes.acquire(allocation.len))
                     .transpose()?;
+                let link_id = if cell.link_id == 0 {
+                    0
+                } else {
+                    links
+                        .copy_cell(page.links.get(cell.link_id), cell.link_id)
+                        .map_err(|_| SetFull::OutOfMemory)?
+                };
                 let id = if cell.style_id == 0 {
                     0
                 } else {
                     styles.acquire_with_id(*page.styles.get(cell.style_id), cell.style_id)?
                 };
-                pending.push((cell, id, grapheme));
+                pending.push((cell, id, grapheme, link_id));
             }
         }
         // Reordering live entries can itself exhaust a collision chain. Until
         // every admission succeeds, cell IDs must still address the old set.
-        for (cell, id, grapheme) in pending {
+        for (cell, id, grapheme, link_id) in pending {
             cell.style_id = id;
             cell.grapheme = grapheme;
+            cell.link_id = link_id;
         }
         page.capacity = capacity;
         page.styles = styles;
         page.graphemes = graphemes;
+        page.links = links;
         page.layout_generation = page.layout_generation.wrapping_add(1);
         Ok(())
     }
@@ -1222,6 +1455,15 @@ impl Screen {
                 Err(_) => {
                     self.cursor_style = None;
                     self.cursor.style = Style::default();
+                }
+            }
+        }
+        if self.cursor_link.is_some_and(|(owner, _)| owner == serial) {
+            self.cursor_link = None;
+            if let Some(link) = Hyperlink::from_cursor(&self.cursor) {
+                match self.pages.pages[index].links.insert(&link) {
+                    Ok(id) => self.cursor_link = Some((serial, id)),
+                    Err(_) => self.end_hyperlink(),
                 }
             }
         }
@@ -1258,6 +1500,29 @@ impl Screen {
         }
     }
 
+    fn reflow_link(&mut self, output: &mut [Row], line: &mut Row, col: usize, preferred: u16) {
+        let Some(link) = Hyperlink::from_cell(&line.cells[col]) else {
+            return;
+        };
+        let index = self.pages.page_index(output.len());
+        loop {
+            match self.pages.pages[index].links.reflow_cell(&link, preferred) {
+                Ok(id) => {
+                    line.cells[col].link_id = id;
+                    return;
+                }
+                Err(error) => {
+                    Self::rebuild_resource_page(
+                        &mut self.pages.pages[index],
+                        output.iter_mut().chain(std::iter::once(&mut *line)),
+                        PageResource::for_link(error),
+                    )
+                    .expect("reflow hyperlinks must fit after page growth");
+                }
+            }
+        }
+    }
+
     /// Rehome complete rows after physical page movement. Same-page rotations
     /// keep their IDs; crossing a page copies with addWithId before releasing
     /// the source. The direction follows the native copy operation.
@@ -1267,7 +1532,7 @@ impl Screen {
             let absolute = self.history.len() + if reverse { count - 1 - offset } else { offset };
             self.sync_resource_row(absolute);
         }
-        self.sync_cursor_style();
+        self.sync_cursor_resources();
     }
 
     fn sync_resource_row(&mut self, absolute: usize) {
@@ -1289,7 +1554,13 @@ impl Screen {
                 } else {
                     Style::default()
                 };
-                (cell.style_id, value, cell.grapheme)
+                (
+                    cell.style_id,
+                    value,
+                    cell.grapheme,
+                    cell.link_id,
+                    Hyperlink::from_cell(cell),
+                )
             })
             .collect();
         let row = self.physical_row_mut(absolute);
@@ -1297,8 +1568,10 @@ impl Screen {
         for cell in &mut row.cells {
             cell.style_id = 0;
             cell.grapheme = None;
+            cell.link_id = 0;
         }
-        for (col, (old_id, style, grapheme)) in resources.into_iter().enumerate() {
+        for (col, (old_id, style, grapheme, old_link_id, link)) in resources.into_iter().enumerate()
+        {
             if let Some(grapheme) = grapheme {
                 let allocation = self.acquire_grapheme(absolute, grapheme.len).ok();
                 self.physical_row_mut(absolute).cells[col].grapheme = allocation;
@@ -1306,6 +1579,16 @@ impl Screen {
                     let cell = &mut self.physical_row_mut(absolute).cells[col];
                     cell.text
                         .truncate(cell.text.chars().next().map_or(0, char::len_utf8));
+                }
+            }
+            if let Some(link) = link {
+                let id = self
+                    .acquire_link_cell(absolute, &link, old_link_id)
+                    .unwrap_or(0);
+                let cell = &mut self.physical_row_mut(absolute).cells[col];
+                cell.link_id = id;
+                if id == 0 {
+                    cell.clear_link();
                 }
             }
             if old_id != 0 {
@@ -1319,6 +1602,7 @@ impl Screen {
             }
             if let Some(previous) = previous {
                 self.release_style(previous, old_id);
+                self.release_link_cell(previous, old_link_id);
                 if let Some(grapheme) = grapheme
                     && let Some(page) = self
                         .pages
@@ -1372,7 +1656,7 @@ impl Screen {
                         })
                         .map_or(cell.style, |page| *page.styles.get(cell.style_id))
                 };
-                (owner, cell.style_id, value)
+                (owner, cell.style_id, value, cell.link_id)
             })
             .collect();
         RowCopy { row, sources }
@@ -1394,15 +1678,17 @@ impl Screen {
             let serial = self.pages.pages[index].serial;
             copy.row.resource_page = Some(serial);
             let mut graphemes = Vec::new();
-            for (cell, &(owner, id, _)) in copy.row.cells.iter_mut().zip(&copy.sources) {
+            for (cell, &(owner, id, _, link_id)) in copy.row.cells.iter_mut().zip(&copy.sources) {
                 if owner == Some(serial) {
                     self.pages.pages[index].styles.retain(id);
+                    self.pages.pages[index].links.retain_moved_cell(link_id);
                     if let Some(grapheme) = cell.grapheme {
                         assert!(transferred.insert((serial, grapheme)));
                     }
                     graphemes.push(None);
                 } else {
                     cell.style_id = 0;
+                    cell.link_id = 0;
                     graphemes.push(cell.grapheme.take().map(|grapheme| grapheme.len));
                 }
             }
@@ -1427,7 +1713,7 @@ impl Screen {
             "copied grapheme still has a source owner"
         );
         for (y, serial, sources, graphemes) in pending {
-            for (column, ((owner, source_id, style), grapheme)) in
+            for (column, ((owner, source_id, style, link_id), grapheme)) in
                 sources.into_iter().zip(graphemes).enumerate()
             {
                 if let Some(len) = grapheme {
@@ -1435,6 +1721,17 @@ impl Screen {
                         self.acquire_grapheme(self.history.len() + y, len)
                             .expect("copied grapheme must fit after page growth"),
                     );
+                }
+                if owner != Some(serial)
+                    && let Some(link) = Hyperlink::from_cell(&self.rows[y].cells[column])
+                {
+                    let id = self
+                        .acquire_link_cell(self.history.len() + y, &link, link_id)
+                        .unwrap_or(0);
+                    self.rows[y].cells[column].link_id = id;
+                    if id == 0 {
+                        self.rows[y].cells[column].clear_link();
+                    }
                 }
                 if source_id == 0 || owner == Some(serial) {
                     continue;
@@ -1503,6 +1800,7 @@ impl Screen {
         });
         for (offset, (mut cell, style)) in cells.into_iter().enumerate() {
             let source_id = cell.style_id;
+            let source_link = std::mem::take(&mut cell.link_id);
             let grapheme = cell.grapheme.take();
             cell.style_id = 0;
             self.rows[destination].cells[start + offset] = cell;
@@ -1511,6 +1809,16 @@ impl Screen {
                     self.acquire_grapheme(self.history.len() + destination, grapheme.len)
                         .expect("copied grapheme must fit after page growth"),
                 );
+            }
+            if let Some(link) = Hyperlink::from_cell(&self.rows[destination].cells[start + offset])
+            {
+                let id = self
+                    .acquire_link_cell(self.history.len() + destination, &link, source_link)
+                    .unwrap_or(0);
+                self.rows[destination].cells[start + offset].link_id = id;
+                if id == 0 {
+                    self.rows[destination].cells[start + offset].clear_link();
+                }
             }
             if source_id != 0 {
                 let id = self
@@ -1574,11 +1882,15 @@ impl Screen {
                             source.map_or(cell.style, |page| *page.styles.get(id))
                         },
                         cell.grapheme.take(),
+                        std::mem::take(&mut cell.link_id),
+                        Hyperlink::from_cell(cell),
                     )
                 })
                 .collect();
             row.resource_page = Some(serial);
-            for (col, (source_id, style, grapheme)) in resources.into_iter().enumerate() {
+            for (col, (source_id, style, grapheme, source_link, link)) in
+                resources.into_iter().enumerate()
+            {
                 if let Some(grapheme) = grapheme {
                     let allocation = loop {
                         if let Ok(allocation) = pages.pages[index].graphemes.acquire(grapheme.len) {
@@ -1592,6 +1904,20 @@ impl Screen {
                         .expect("copied page resources must fit after growth");
                     };
                     contents[absolute].cells[col].grapheme = Some(allocation);
+                }
+                if let Some(link) = link {
+                    let id = loop {
+                        match pages.pages[index].links.copy_cell(&link, source_link) {
+                            Ok(id) => break id,
+                            Err(error) => Self::rebuild_resource_page(
+                                &mut pages.pages[index],
+                                contents.iter_mut(),
+                                PageResource::for_link(error),
+                            )
+                            .expect("copied hyperlinks must fit after page growth"),
+                        }
+                    };
+                    contents[absolute].cells[col].link_id = id;
                 }
                 if source_id != 0 {
                     let acquired = pages.pages[index].styles.acquire_with_id(style, source_id);
@@ -1614,6 +1940,7 @@ impl Screen {
                     && let Some(page) = pages.pages.iter_mut().find(|page| page.serial == owner)
                 {
                     page.styles.release(source_id);
+                    page.links.release_cell(source_link);
                     if let Some(grapheme) = grapheme {
                         page.graphemes.release(grapheme);
                     }
@@ -1644,6 +1971,13 @@ impl Screen {
         let range = absolute - page_row..absolute - page_row + usize::from(page.rows);
         let index = self.pages.page_index(absolute);
         self.release_cursor_style();
+        if copy_rows
+            && self
+                .cursor_link
+                .is_some_and(|(owner, _)| owner == self.pages.pages[index].serial)
+        {
+            self.release_cursor_link();
+        }
         let old_pages = self.pages.clone();
         let mut contents: Vec<_> = self.history.drain(..).chain(self.rows.drain(..)).collect();
         for row in &mut contents[range.clone()] {
@@ -1666,7 +2000,7 @@ impl Screen {
         if range.start < history {
             self.history_bytes = self.history.iter().map(Row::storage_bytes).sum();
         }
-        self.sync_cursor_style();
+        self.sync_cursor_resources();
     }
 
     pub(crate) fn cursor_reset_wrap(&mut self) {
@@ -1885,6 +2219,7 @@ impl Screen {
             self.viewport_pin_column = 0;
         }
         self.release_cursor_style();
+        self.release_cursor_link();
         let old_cols = self.columns;
         let columns_changed = cols != old_cols;
         self.columns = cols;
@@ -2038,9 +2373,11 @@ impl Screen {
                         *source_page.styles.get(cell.style_id)
                     };
                     let source_id = cell.style_id;
+                    let source_link = cell.link_id;
                     let grapheme = cell.grapheme;
                     let mut cell = cell.clone();
                     cell.style_id = 0;
+                    cell.link_id = 0;
                     cell.grapheme = None;
                     if cols == 1 && cell.width == 2 {
                         cell.text.clear();
@@ -2065,6 +2402,7 @@ impl Screen {
                         };
                         line.cells[x].grapheme = Some(allocation);
                     }
+                    self.reflow_link(&mut output, &mut line, x, source_link);
                     let native_id = self
                         .reflow_style(&mut output, &mut line, source_style, source_id)
                         .unwrap_or(0);
@@ -2079,8 +2417,10 @@ impl Screen {
                         let mut cell = cell.clone();
                         cell.text.clear();
                         cell.grapheme = None;
+                        cell.link_id = 0;
                         cell.width = 0;
                         line.cells[x + 1] = cell;
+                        self.reflow_link(&mut output, &mut line, x + 1, source_link);
                     }
                     wide_tail = Some(GridPoint {
                         row: line.id,
@@ -2467,6 +2807,15 @@ mod resource_tests {
                     assert_eq!(row.resource_page, Some(serial));
                     *expected.entry((serial, cell.style_id)).or_default() += 1;
                 }
+                if let Some(link) = Hyperlink::from_cell(cell) {
+                    assert_eq!(row.resource_page, Some(serial));
+                    assert_eq!(
+                        screen.pages.page_at(absolute).0.links.get(cell.link_id),
+                        &link
+                    );
+                } else {
+                    assert_eq!(cell.link_id, 0);
+                }
             }
         }
         if let Some((serial, id)) = screen.cursor_style {
@@ -2481,6 +2830,16 @@ mod resource_tests {
             *expected.entry((serial, id)).or_default() += 1;
         }
         for page in &screen.pages.pages {
+            page.links.assert_references(
+                screen
+                    .all_rows()
+                    .filter(|row| row.resource_page == Some(page.serial))
+                    .flat_map(|row| row.cells.iter().map(|cell| cell.link_id)),
+                screen
+                    .cursor_link
+                    .filter(|(serial, _)| *serial == page.serial)
+                    .map(|(_, id)| id),
+            );
             page.graphemes.assert_allocations(
                 graphemes
                     .remove(&page.serial)
@@ -2501,6 +2860,62 @@ mod resource_tests {
             graphemes.is_empty(),
             "cells referenced a retired grapheme page"
         );
+    }
+
+    #[test]
+    fn live_hyperlink_allocations_survive_mutations_and_restore() {
+        let mut terminal = Terminal::new(1024, 2, 100);
+        terminal.feed(format!("\x1b]8;;https://example.org\x1b\\{}", "a".repeat(102)).as_bytes());
+        assert_eq!(
+            terminal.screen().pages.pages[0].capacity.hyperlink_bytes,
+            192
+        );
+        terminal.feed(b"b");
+        assert_eq!(
+            terminal.screen().pages.pages[0].capacity.hyperlink_bytes,
+            384
+        );
+        assert_references(terminal.screen());
+
+        for columns in [80, 1024] {
+            let mut terminal = Terminal::with_limits(columns, 4, ScrollbackLimits::default());
+            for id in 0..160 {
+                terminal.feed(format!("\x1b]8;id={id};https://example.org/{id}\x1b\\\x1b[31ma\u{301}\x1b]8;;\x1b\\").as_bytes());
+                assert_references(terminal.screen());
+            }
+            for sequence in [
+                "\x1b[H\x1b[20@",
+                "\x1b[20P",
+                "\x1b[20X",
+                "\x1b[2S",
+                "\x1b[2T",
+                "\x1b[2;4r\x1b[4;1H\n",
+                "\x1b[r\x1b[?69h\x1b[2;79s\x1b[2S",
+                "\x1b[?69l\x1b[H\x1b]8;;https://example.org\x1b\\界\u{301}",
+            ] {
+                terminal.feed(sequence.as_bytes());
+                assert_references(terminal.screen());
+            }
+            for (cols, rows) in [(24, 6), (120, 3), (3, 4), (80, 4)] {
+                terminal.resize(cols, rows);
+                assert_references(terminal.screen());
+            }
+            let data = crate::snapshot::encode_to_vec(&terminal).unwrap();
+            let mut restored =
+                crate::snapshot::decode(data.as_slice(), Default::default()).unwrap();
+            assert_references(restored.screen());
+            restored.feed(b"\x1b[H\x1b[2Jtext\x1b]8;;\x1b\\");
+            assert_references(restored.screen());
+            let viewport = restored.screen().snapshot_viewport();
+            assert!(
+                viewport
+                    .all_rows()
+                    .all(|row| row.cells.iter().all(|cell| cell.link_id == 0))
+            );
+            for page in &viewport.pages.pages {
+                page.links.assert_references(std::iter::empty(), None);
+            }
+        }
     }
 
     #[test]

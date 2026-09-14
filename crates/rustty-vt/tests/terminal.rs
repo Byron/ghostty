@@ -192,6 +192,22 @@ fn resize_unwraps_before_growing_the_active_area() {
 }
 
 #[test]
+fn resize_skips_an_empty_wrap_continuation_without_ending_the_line() {
+    let mut terminal = Terminal::new(12, 4, 100);
+    terminal.feed(b"\t");
+    terminal.resize(3, 4);
+    terminal.feed(b"\n");
+    terminal.resize(7, 3);
+    assert_eq!(
+        (terminal.screen().cursor.col, terminal.screen().cursor.row),
+        (1, 1)
+    );
+    assert!(terminal.screen().rows[0].wrapped);
+    assert!(terminal.screen().rows[1].wrap_continuation);
+    invariant(&terminal);
+}
+
+#[test]
 fn resize_remaps_saved_cursor_separately_from_the_live_cursor() {
     let mut t = Terminal::new(12, 4, 100);
     t.feed(b"abcdefghi\n\x1b[?1049h");

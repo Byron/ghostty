@@ -108,6 +108,30 @@ def requests():
                                    operations, ["terminal.resize", "terminal.cursor", "terminal.tracked"],
                                    cols=12)
 
+    for narrow in (3, 4, 5):
+        for wide in (6, 7, 13):
+            for rows in (3, 4):
+                for retention in ("none", "track", "selection", "saved", "semantic", "background"):
+                    for advance in (b"\n", b"\r\n"):
+                        anchor = point(8 % narrow, 8 // narrow)
+                        operations = [b"\t", {"op": "resize", "cols": narrow, "rows": 4}]
+                        if retention == "track":
+                            operations.append(grid("track", id=1, point=anchor))
+                        elif retention == "selection":
+                            operations.append(grid("select", start=anchor, end=anchor))
+                        elif retention == "saved":
+                            operations.append(b"\x1b7")
+                        elif retention == "semantic":
+                            operations.append(b"\x1b]133;A\x07")
+                        elif retention == "background":
+                            operations.append(b"\x1b[44m\x1b[K\x1b[0m")
+                        operations.extend([advance, {"op": "resize", "cols": wide, "rows": rows}, observe])
+                        if retention == "saved":
+                            operations.append(b"\x1b8")
+                        operations.append(b"X")
+                        yield case(f"resize/empty-continuation/{narrow}/{wide}/{rows}/{retention}/{advance.hex()}",
+                                   operations, ["terminal.resize", "terminal.cursor", "terminal.tracked"], cols=12)
+
     for reset in ({"op": "terminal_reset"}, {"op": "reset"}):
         yield case("tracked/reuse/" + reset["op"], [b"A", grid("track", id=1), reset,
                    b"BC", grid("track", id=2, point=point(1)), observe, grid("untrack", id=2)],

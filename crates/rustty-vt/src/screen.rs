@@ -2350,6 +2350,11 @@ impl Screen {
                 if old.semantic != SemanticContent::Output {
                     used = used.max(1);
                 }
+                // A discarded blank continuation does not end the reflowed
+                // line. Native defers a hard break only for independent rows.
+                if used == 0 && old.wrap_continuation {
+                    continue;
+                }
                 if used > 0 {
                     while self.pages.total_rows() <= output.len() {
                         self.pages.reflow_row(capacity);

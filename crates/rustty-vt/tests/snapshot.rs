@@ -1,4 +1,4 @@
-use rustty_vt::snapshot::{DecodeOptions, Decoder, decode, encode_to_vec};
+use rustty_vt::snapshot::{DecodeOptions, Decoder, decode, decode_exact, encode_to_vec};
 use rustty_vt::{
     Color, CursorShape, HyperlinkId, Row, Screen, ScrollbackLimits, SemanticContent, Terminal,
     default_palette,
@@ -225,6 +225,51 @@ fn corrupt_truncated_and_excessive_snapshots_are_rejected() {
     let mut decoder = Decoder::new(&bytes[..30], DecodeOptions::default());
     assert!(decoder.ready().is_err());
     assert!(decoder.ready().is_err());
+}
+
+#[test]
+fn exact_snapshot_decode_checks_eof_without_consuming_transport_bytes() {
+    let bytes = fixture();
+    assert!(decode_exact(bytes.as_slice(), DecodeOptions::default()).is_ok());
+    let mut source = Cursor::new([bytes.as_slice(), b"tail"].concat());
+    let error = decode_exact(&mut source, DecodeOptions::default()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(source.position(), bytes.len() as u64);
+    let mut tail = String::new();
+    source.read_to_string(&mut tail).unwrap();
+    assert_eq!(tail, "tail");
+
+    // Peek may fill the reader's buffer past FINISH, but must not consume
+    // any exposed trailing bytes, including a complete following snapshot.
+    for capacity in [1, 7, 1024, bytes.len() * 3] {
+        let data = [bytes.as_slice(), bytes.as_slice()].concat();
+        let mut source = std::io::BufReader::with_capacity(capacity, Cursor::new(data));
+        let error = decode_exact(&mut source, DecodeOptions::default()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::io::Seek::stream_position(&mut source).unwrap(),
+            bytes.len() as u64
+        );
+        // Decoding again begins at the second snapshot's magic, not one byte
+        // after it. The same reader retains any bytes read ahead internally.
+        assert!(decode_exact(&mut source, DecodeOptions::default()).is_ok());
+    }
+
+    struct BrokenTail;
+    impl Read for BrokenTail {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::ConnectionReset.into())
+        }
+    }
+    impl std::io::BufRead for BrokenTail {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::ErrorKind::ConnectionReset.into())
+        }
+        fn consume(&mut self, _: usize) {}
+    }
+    let source = Cursor::new(bytes).chain(BrokenTail);
+    let error = decode_exact(source, DecodeOptions::default()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
 }
 
 #[test]

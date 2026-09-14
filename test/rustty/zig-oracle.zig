@@ -669,10 +669,13 @@ fn execute(alloc: Allocator, io: std.Io, request: Request) !Response {
                 .continuation = if (continuation.written().len == 0) .ground else .{ .bytes = continuation.written() },
             });
             try snapshots.append(alloc, try hexEncode(alloc, encoded.written()));
-        } else if (std.mem.eql(u8, op.op, "restore")) {
+        } else if (std.mem.eql(u8, op.op, "restore") or std.mem.eql(u8, op.op, "restore_exact")) {
             if (grid.hasHandles()) return error.UnsupportedGridRestore;
             var source: std.Io.Reader = .fixed(try hexDecode(alloc, op.data));
-            var decoded = vt.snapshot.decode(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 }) catch return error.InvalidSnapshot;
+            var decoded = (if (std.mem.eql(u8, op.op, "restore_exact"))
+                vt.snapshot.decodeExact(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 })
+            else
+                vt.snapshot.decode(alloc, io, &source, .{ .max_continuation_bytes = 8 * 1024 * 1024 })) catch return error.InvalidSnapshot;
             defer decoded.deinit(alloc);
             restoreTerminal(alloc, &t, &stream, &decoded);
             snapshot_decoder = null;

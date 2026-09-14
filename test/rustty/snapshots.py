@@ -49,6 +49,14 @@ def wire_requests(root, reference):
         write(b"\x1b[?1049l\x1b[0mZ"),
     ]}, ["snapshot.fixtures"])
 
+    for name, payload in (("complete", data), ("trailing", data + b"transport tail"),
+                          ("concatenated", data + data), ("empty", b""), ("truncated", data[:-1])):
+        request = {"id": "snapshot/exact/" + name,
+                   "operations": [{"op": "restore_exact", "data": payload.hex()}, {"op": "observe"}]}
+        if name != "complete":
+            request["expected_error"] = "InvalidSnapshot"
+        yield request, ["snapshot.fixtures", "snapshot.cross-decode"]
+
     for physical, logical in ((4, 8), (8, 4)):
         encoded = reference.request({"id": "snapshot/mixed-source", "cols": physical, "rows": 1,
             "operations": [write(b"abcdefgh"[:physical]), {"op": "snapshot"}]})

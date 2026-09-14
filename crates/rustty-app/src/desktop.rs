@@ -2801,22 +2801,24 @@ impl App {
                                     .saturating_add(terminal.screen().viewport_offset)
                                     < terminal.rows as usize
                                 && terminal.screen().cursor.blink;
-                            let cursor_color = terminal.cursor_color.unwrap_or(terminal.foreground);
+                            let (foreground, background) = if terminal.modes.dec(5) {
+                                (terminal.background, terminal.foreground)
+                            } else {
+                                (terminal.foreground, terminal.background)
+                            };
+                            let cursor_color = terminal.cursor_color.unwrap_or(foreground);
                             let resolve = |color: config::TerminalColor| match color {
                                 config::TerminalColor::Rgb(color) => [color.r, color.g, color.b],
-                                config::TerminalColor::CellForeground => terminal.foreground,
-                                config::TerminalColor::CellBackground => terminal.background,
+                                config::TerminalColor::CellForeground => foreground,
+                                config::TerminalColor::CellBackground => background,
                             };
                             let options = RenderOptions {
                                 size: [physical.x.max(1.0) as u32, physical.y.max(1.0) as u32],
                                 padding,
-                                foreground: terminal.foreground,
-                                background: terminal.background,
+                                foreground,
+                                background,
                                 cursor_color,
-                                cursor_text: config
-                                    .cursor_text
-                                    .map(resolve)
-                                    .unwrap_or(terminal.background),
+                                cursor_text: config.cursor_text.map(resolve).unwrap_or(background),
                                 selection_background: config
                                     .selection_background
                                     .map(resolve)

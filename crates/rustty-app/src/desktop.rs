@@ -1085,12 +1085,60 @@ impl App {
         }
         self.changed();
     }
-    fn drain(&mut self, id: Id) {
-        let live = self
-            .workspace
+    fn tab_label(&self, tab: &Tab) -> (String, bool) {
+        let pane = self.panes.get(&tab.focused);
+        let title = tab
+            .title
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| pane.map(|p| p.title.as_str()).filter(|s| !s.is_empty()))
+            .unwrap_or("Terminal");
+        let working = tab
+            .panes
+            .keys()
+            .filter(|id| {
+                self.panes
+                    .get(id)
+                    .is_some_and(|p| p.activity.reported_active())
+            })
+            .count();
+        let attention = tab
+            .panes
+            .keys()
+            .any(|id| self.panes.get(id).is_some_and(|p| p.unseen));
+        let is_active = tab
+            .panes
+            .keys()
+            .any(|id| self.panes.get(id).is_some_and(|p| p.activity.is_active()));
+        let suffix = format!(
+            "{}{}",
+            if attention { " ●" } else { "" },
+            if working > 0 {
+                format!(" ▶ {working}")
+            } else {
+                String::new()
+            }
+        );
+        let label = format!(
+            "{}{suffix}{}",
+            title.chars().take(26).collect::<String>(),
+            if tab.zoom.is_some() { " ◩" } else { "" }
+        );
+        (label, is_active)
+    }
+
+    fn pane_tab_label(&self, pane: Id) -> Option<(String, bool)> {
+        self.workspace
             .windows
             .iter()
-            .any(|window| window.tabs.iter().any(|tab| tab.panes.contains_key(&id)));
+            .flat_map(|window| &window.tabs)
+            .find(|tab| tab.panes.contains_key(&pane))
+            .map(|tab| self.tab_label(tab))
+    }
+
+    fn drain(&mut self, id: Id) {
+        let previous_tab_label = self.pane_tab_label(id);
+        let live = previous_tab_label.is_some();
         let mut close = false;
         let mut stopped = false;
         let mut clipboard = Vec::new();
@@ -1102,12 +1150,6 @@ impl App {
         let Some(pane) = self.panes.get_mut(&id) else {
             return;
         };
-        let previous_title = pane.title.clone();
-        let previous_status = (
-            pane.activity.is_active(),
-            pane.activity.reported_active(),
-            pane.unseen,
-        );
         pane.wake_pending.store(false, Ordering::Release);
         if let Err(error) = pane.flush()
             && !pane.session.has_exited()
@@ -1209,14 +1251,9 @@ impl App {
             pane.running = None;
             stopped |= pane.activity.clear();
         }
-        let indicators_changed = stopped
-            || previous_title != pane.title
-            || previous_status
-                != (
-                    pane.activity.is_active(),
-                    pane.activity.reported_active(),
-                    pane.unseen,
-                );
+        // Only a change in the rendered tab label/underline warrants a hidden-tab
+        // repaint. Raw titles can be masked by a custom title or another pane.
+        let indicators_changed = stopped || previous_tab_label != self.pane_tab_label(id);
         if stopped {
             self.activity_stopped(id, Instant::now());
         }
@@ -2389,45 +2426,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_space(72.0);
                         for (index, tab) in state.tabs.iter().enumerate() {
-                            let pane = self.panes.get(&tab.focused);
-                            let title = tab
-                                .title
-                                .as_deref()
-                                .filter(|s| !s.is_empty())
-                                .or_else(|| {
-                                    pane.map(|p| p.title.as_str()).filter(|s| !s.is_empty())
-                                })
-                                .unwrap_or("Terminal");
-                            let working = tab
-                                .panes
-                                .keys()
-                                .filter(|id| {
-                                    self.panes
-                                        .get(id)
-                                        .is_some_and(|p| p.activity.reported_active())
-                                })
-                                .count();
-                            let attention = tab
-                                .panes
-                                .keys()
-                                .any(|id| self.panes.get(id).is_some_and(|p| p.unseen));
-                            let is_active = tab.panes.keys().any(|id| {
-                                self.panes.get(id).is_some_and(|p| p.activity.is_active())
-                            });
-                            let suffix = format!(
-                                "{}{}",
-                                if attention { " ●" } else { "" },
-                                if working > 0 {
-                                    format!(" ▶ {working}")
-                                } else {
-                                    String::new()
-                                }
-                            );
-                            let label = format!(
-                                "{}{suffix}{}",
-                                title.chars().take(26).collect::<String>(),
-                                if tab.zoom.is_some() { " ◩" } else { "" }
-                            );
+                            let (label, is_active) = self.tab_label(tab);
                             let selected = index == state.active_tab;
                             let colors = TabAccent::new(tab.color, platform_accent);
                             let color = Color32::from_rgb(

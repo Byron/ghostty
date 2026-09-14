@@ -203,6 +203,46 @@ fn snapshot_propagates_io_failures_at_record_boundaries() {
     }
 }
 
+#[test]
+fn decode_continuation_budget_does_not_limit_later_capture() {
+    for prefix in [b"".as_slice(), b"\x1b"] {
+        let mut original = Terminal::new(8, 3, 0);
+        original.feed(prefix);
+        let encoded = encode_to_vec(&original).unwrap();
+        let options = DecodeOptions {
+            max_continuation_bytes: prefix.len(),
+            ..Default::default()
+        };
+        let mut terminal = decode(encoded.as_slice(), options).unwrap();
+        terminal.feed(b"\x1b]2;longer title");
+        let encoded = encode_to_vec(&terminal).unwrap();
+        let mut resumed = decode(encoded.as_slice(), DecodeOptions::default()).unwrap();
+        resumed.feed(b"\x07");
+        assert_eq!(resumed.title, "longer title");
+        assert!(decode(encoded.as_slice(), options).is_err());
+    }
+}
+
+#[test]
+fn raised_decode_budget_keeps_the_normal_capture_limit() {
+    let mut parts = records(&encode_to_vec(&Terminal::new(8, 3, 0)).unwrap());
+    let continuation = &mut parts.iter_mut().find(|(tag, _)| *tag == 7).unwrap().1;
+    continuation.extend_from_slice(b"\x1bPq");
+    continuation.resize(rustty_parser::MAX_OSC_BYTES + 1, b'x');
+    let options = DecodeOptions {
+        max_record_bytes: continuation.len(),
+        max_continuation_bytes: continuation.len(),
+        ..Default::default()
+    };
+    let encoded = frame(&parts);
+    let mut terminal = decode(encoded.as_slice(), options).unwrap();
+    assert!(matches!(encode_to_vec(&terminal), Err(error)
+        if error.kind() == std::io::ErrorKind::InvalidData));
+    terminal.feed(b"\x1b\\\x1b]2;recovered\x07");
+    assert_eq!(terminal.title, "recovered");
+    assert!(encode_to_vec(&terminal).is_ok());
+}
+
 fn text<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Vec<String> {
     rows.into_iter().map(Row::text).collect()
 }

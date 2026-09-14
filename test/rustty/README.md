@@ -434,6 +434,11 @@ ordering, duplicates, required dimensions and continuation budgets through
 full, exact and incremental decoding. Rust tests inject reader and writer errors
 at record headers, payload middles and boundaries, checking the returned error
 and exact written prefix. Allocation-failure injection remains uncovered.
+`--case snapshot/policy-live` checks that an import budget does not change
+capture of later terminal input. A raised import budget also leaves the normal
+8 MiB parser capture limit intact: an oversized unfinished sequence may import,
+but cannot be exported again until capture recovers. Rust tests retain both
+the tiny-budget regression and this independently verified native boundary.
 
 `--snapshot-wire --case snapshot/resources/hyperlinks` compares PAGE hyperlink
 table admission, string-pool allocation, duplicate values and wire IDs, invalid

@@ -2800,12 +2800,7 @@ impl App {
                                     .map(rgb)
                                     .unwrap_or(Color32::from_gray(65))
                             };
-                            ui.painter().rect_stroke(
-                                rect,
-                                0.0,
-                                egui::Stroke::new(if selected { 1.5 } else { 0.5 }, color),
-                                egui::StrokeKind::Inside,
-                            );
+                            paint_pane_frame(ui.painter(), rect, color);
                         }
                         if config.progress_style
                             && let Some(progress) =
@@ -2890,12 +2885,7 @@ impl App {
                                 );
                             }
                             if Some(id) == selected {
-                                ui.painter().rect_stroke(
-                                    bounds,
-                                    0.0,
-                                    egui::Stroke::new(2.0, accent),
-                                    egui::StrokeKind::Inside,
-                                );
+                                paint_pane_frame(ui.painter(), bounds, accent);
                             }
                         }
                         if let Some(label) = self.quadrant_label(active, host, id) {
@@ -4393,6 +4383,15 @@ fn configure_ui_fonts(context: &egui::Context) {
     }
 }
 
+fn paint_pane_frame(painter: &egui::Painter, bounds: egui::Rect, color: Color32) {
+    painter.rect_stroke(
+        bounds,
+        0.0,
+        egui::Stroke::new(1.0, color),
+        egui::StrokeKind::Inside,
+    );
+}
+
 /// Returns whether a visible indeterminate bar needs another frame.
 fn paint_progress(
     ui: &mut egui::Ui,
@@ -4481,12 +4480,7 @@ mod tests {
         let accent = Color32::from_rgb(200, 90, 230);
         for percentage in [25, 50, 100] {
             let mut output = context.run_ui(egui::RawInput::default(), |ui| {
-                ui.painter().rect_stroke(
-                    bounds,
-                    0.0,
-                    egui::Stroke::new(1.5, accent),
-                    egui::StrokeKind::Inside,
-                );
+                paint_pane_frame(ui.painter(), bounds, accent);
                 assert!(!paint_progress(
                     ui,
                     1,

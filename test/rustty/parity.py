@@ -301,6 +301,8 @@ def input_requests():
         ("padding", [103, 101], [5, 10], [7, 13, 11, 17]),
         ("tiny", [4, 2], [8, 16], [10, 20, 30, 40]),
         ("zero", [0, 0], [8, 16], [0, 0, 0, 0]),
+        ("max-grid", [4294967295, 4294967295], [1, 1], [0, 0, 0, 0]),
+        ("max-padding", [4294967295, 4294967295], [8, 16], [4294967295] * 4),
     ]
     for mode in (0, 9, 1000, 1002, 1003):
         for encoding in (0, 1005, 1006, 1015, 1016):
@@ -330,7 +332,8 @@ def input_requests():
             events = [{"kind": "mouse", "action": action, "button": "left", "x": x, "y": y,
                        "screen_size": [65535, 65535], "cell_size": [1, 1], "track_last_cell": True}
                       for x, y in ((94, 95), (222, 223), (2014, 2015), (2047, 4095),
-                                   (55262, 57311), (65534, 65535), (-1, -1))
+                                   (55262, 57311), (55263, 1), (1, 57310),
+                                   (65534, 65535), (-1, -1), (1e30, -1e30))
                       for action in ("press", "motion", "release")]
             yield request(f"mouse/limits/{mode}/{encoding}", setup, events, ["input.mouse"])
 
@@ -352,7 +355,8 @@ def input_requests():
     yield request("mouse/pixel-limits", "\x1b[?1003h\x1b[?1016h", [
         {"kind": "mouse", "action": "release", "button": "left", "x": x, "y": y,
          "screen_size": [2147483648, 2147483648], "cell_size": [65536, 65536], "track_last_cell": True}
-        for x, y in ((2147483520, -2147483648), (-0.5, 0.5), (-1.5, 1.5))
+        for x, y in ((2147483520, -2147483648), (2147483648, -2147483904),
+                     (1e30, -1e30), (-0.5, 0.5), (-1.5, 1.5))
     ], ["input.mouse"])
     for enabled in (False, True):
         yield request(f"focus/{enabled}", "\x1b[?1004h" if enabled else "",

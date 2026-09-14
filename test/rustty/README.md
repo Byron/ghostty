@@ -96,15 +96,22 @@ renderer and terminal now share integer placement sizing from `rustty-vt`.
 
 
 `--protocols --case protocol/graphics/placements/placeholder/` compares native
-Unicode placeholder runs and resolved target keys. All reference diacritics,
+Unicode placeholder runs, resolved target keys and rounded pixel rectangles.
+All reference diacritics,
 missing/invalid indices, inherited IDs, row/column discontinuities, palette/RGB
 IDs, stable zero-ID selection, explicit ordinary/relative targets, replacement,
-erasure, reflow and screen switches are covered by 343 fixtures (1,029 delivery
-comparisons). The renderer and adapter share the VT decoder and target lookup.
+erasure, reflow and screen switches are covered alongside aspect fitting,
+letterboxing, partial/out-of-image runs, tiny source rectangles and oversized
+grids by 484 fixtures (1,452 delivery comparisons). The renderer and adapter
+share the VT decoder, target lookup and `Placement::geometry` calculation.
+The optional observation reports `geometry` (offset, source and destination
+pixel sizes) or `geometry_error`, using native `renderPlacement` as the reference.
 Renderer tests check that relative children use independent minimum x/y origins
 from the selected virtual parent's visible placeholders, and that ordinary
-placements alone do not enable placeholder rendering. Pixel rounding and full
-viewport-edge behavior remain separate from these run/target observations.
+placements alone do not enable placeholder rendering. Rounded zero-size source
+rectangles and overhanging fragments retain their full destination area by
+sampling clamped edge texels in the image atlas. Zero cell sizes, overflowing
+pixel products and full viewport-edge behavior remain incomplete.
 
 `--protocols --case protocol/graphics/placements/relative/` covers ordinary
 parent references and chains with 64 fixtures (192 delivery comparisons).

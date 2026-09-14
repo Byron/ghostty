@@ -115,6 +115,8 @@ pub enum Query {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Defaults {
     pub color_scheme: Option<ColorScheme>,
+    /// Actual keyboard focus, when a host wants an initial mode-1004 report.
+    pub focused: Option<bool>,
     pub device_attributes: Option<DeviceAttributes>,
     pub enquiry: Vec<u8>,
     pub xtversion: Vec<u8>,
@@ -125,6 +127,7 @@ impl Default for Defaults {
     fn default() -> Self {
         Self {
             color_scheme: None,
+            focused: None,
             device_attributes: Some(DeviceAttributes::default()),
             enquiry: Vec::new(),
             xtversion: concat!("ghostty ", env!("CARGO_PKG_VERSION"))

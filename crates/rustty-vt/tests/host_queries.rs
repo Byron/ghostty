@@ -10,6 +10,27 @@ impl EffectHandler for Readonly {
 }
 
 #[test]
+fn focus_reporting_sends_current_host_state_on_enable_and_restore() {
+    for focused in [false, true] {
+        let mut terminal = Terminal::new(10, 2, 0);
+        assert!(terminal.feed(b"\x1b[?1004h").is_empty());
+        terminal.query_defaults.focused = Some(focused);
+        let report = Effect::Write(if focused { b"\x1b[I" } else { b"\x1b[O" }.to_vec());
+        for sequence in [
+            b"\x1b[?1004h".as_slice(),
+            b"\x1b[?1004s\x1b[?1004l\x1b[?1004r",
+        ] {
+            assert_eq!(
+                terminal.feed(sequence).as_slice(),
+                std::slice::from_ref(&report)
+            );
+        }
+        terminal.feed(b"\x1bc");
+        assert_eq!(terminal.feed(b"\x1b[?1004h"), [report]);
+    }
+}
+
+#[test]
 fn synchronous_hosts_are_readonly_unless_callbacks_supply_answers() {
     let mut terminal = Terminal::new(10, 2, 0);
     let mut host = Readonly::default();

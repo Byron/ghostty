@@ -34,6 +34,8 @@ disabled by default and follows configuration reloads.
 Tabs, splits, zoom, quadrant navigation, clipboard and
 search use the configured Ghostty keybindings. Window layouts and pane directories
 are saved separately under `com.rustty.app`.
+Holding Command underlines the openable link under the pointer, including OSC 8
+links and detected URLs. Command-click opens the highlighted target.
 
 File → Open Saved Layout lists the last saved layouts from Ghostty Local,
 Ghostty and Rustty, and can browse for another Rustty workspace JSON or Ghostty

@@ -3106,6 +3106,7 @@ dependencies = [
  "rustty",
  "rustty-font",
  "rustty-render",
+ "rustty-render-software",
  "rustty-render-wgpu",
  "serde",
  "serde_json",
@@ -3140,6 +3141,14 @@ version = "0.1.0"
 dependencies = [
  "rustty-font",
  "rustty-vt",
+]
+
+[[package]]
+name = "rustty-render-software"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "rustty-render",
 ]
 
 [[package]]

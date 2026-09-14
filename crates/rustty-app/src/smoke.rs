@@ -344,7 +344,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","reverse-video","dec-column-mode","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","reverse-video","dec-column-mode","text-blink","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -510,6 +510,11 @@ fn check_terminal_frames(
     };
     let sync = std::mem::take(&mut pane.sync_output);
     let prepared = host.prepared.remove(&id);
+    let focused = host.focused;
+    let blink_started = host.cursor_blink_started;
+    let focus_hint = host.focus_hint;
+    let navigation_warning = host.navigation_warning.take();
+    host.focus_hint.dismiss();
     let result = (|| -> Result<()> {
         app.draw(event_loop, host)?;
         let normal = host.prepared[&id].key.options.clone();
@@ -596,6 +601,41 @@ fn check_terminal_frames(
         {
             return Err("atlas replacement retained an invalid synchronized frame".into());
         }
+        // Text blinking must keep working with a hidden cursor. Drive the
+        // existing clock directly so the check needs no timed waits.
+        host.focused = true;
+        app.panes[&id]
+            .session
+            .terminal()?
+            .feed(b"\x1b[H\x1b[2J\x1b[?25l\x1b[5mblinking\x1b[0m");
+        host.cursor_blink_started = Instant::now();
+        app.draw(event_loop, host)?;
+        let shown = host.prepared[&id].frame.quads.clone();
+        if host.deadline.is_none() || !host.prepared[&id].key.options.blink_visible {
+            return Err("blinking text did not schedule a redraw with the cursor hidden".into());
+        }
+        host.cursor_blink_started = Instant::now() - Duration::from_millis(650);
+        app.draw(event_loop, host)?;
+        if host.deadline.is_none() || host.prepared[&id].frame.quads == shown {
+            return Err("blinking text did not change at the next blink phase".into());
+        }
+        app.panes[&id].session.terminal()?.feed(b"\x1b[?2026h");
+        app.draw(event_loop, host)?;
+        if host.deadline.is_some() {
+            return Err("synchronized output kept a text-blink timer running".into());
+        }
+        app.panes[&id].session.terminal()?.feed(b"\x1b[?2026l");
+        host.focused = false;
+        app.draw(event_loop, host)?;
+        if host.deadline.is_some() || host.prepared[&id].frame.quads != shown {
+            return Err("unfocused blinking text was hidden or kept waking the app".into());
+        }
+        host.focused = true;
+        app.panes[&id].session.terminal()?.feed(b"\x1b[2J");
+        app.draw(event_loop, host)?;
+        if host.deadline.is_some() {
+            return Err("erasing blinking text left a redraw timer running".into());
+        }
         Ok(())
     })();
     let pane = app.panes.get_mut(&id).unwrap();
@@ -605,10 +645,14 @@ fn check_terminal_frames(
     if let Some(prepared) = prepared {
         host.prepared.insert(id, prepared);
     }
+    host.focused = focused;
+    host.cursor_blink_started = blink_started;
+    host.focus_hint = focus_hint;
+    host.navigation_warning = navigation_warning;
     host.repaint();
     result?;
     eprintln!(
-        "Native smoke: reverse video and DEC column mode rendered; synchronized output held partial frames and cursors, then released immediately"
+        "Native smoke: reverse video, DEC column mode, and text blink rendered; synchronized output held partial frames and cursors, then released immediately"
     );
     Ok(())
 }

@@ -17,6 +17,9 @@ fn hover_measurement_restarts_for_motion_and_leaving_but_not_duplicate_events() 
         original: None,
         closed: None,
         idle_frames: 0,
+        progress_started: now,
+        progress_frames: 0,
+        progress_seconds: 0.0,
         events: BTreeMap::new(),
     };
     let position = Some(Pos2::new(100.0, 100.0));
@@ -42,6 +45,9 @@ pub(super) struct Smoke {
     original: Option<Id>,
     closed: Option<(Id, Instant)>,
     idle_frames: u64,
+    progress_started: Instant,
+    progress_frames: u64,
+    progress_seconds: f64,
     events: BTreeMap<&'static str, u64>,
 }
 impl Smoke {
@@ -70,6 +76,9 @@ impl Smoke {
             original: None,
             closed: None,
             idle_frames: 0,
+            progress_started: Instant::now(),
+            progress_frames: 0,
+            progress_seconds: 0.0,
             events: BTreeMap::new(),
         }))
     }
@@ -254,40 +263,49 @@ impl Smoke {
                 self.stage = 3;
             }
             3 => {
-                if self.offscreen && self.directory.join("window.png").is_file() {
-                    self.idle_frames = host.frames;
-                    self.next = Instant::now() + Duration::from_millis(1500);
-                    self.stage = 4;
-                    return Ok(false);
-                }
-                if let Some(state) = app.painter.render_state() {
-                    state.device.poll(wgpu::PollType::Poll)?;
-                }
-                let mut events = Vec::new();
-                app.painter.handle_screenshots(&mut events);
-                if events.is_empty() {
-                    host.capture = true;
-                    host.repaint();
-                    self.next = Instant::now() + Duration::from_millis(100);
-                }
-                for event in events {
-                    if let egui::Event::Screenshot { image, .. } = event {
-                        let file = fs::File::create(self.directory.join("window.png"))?;
-                        let mut encoder =
-                            png::Encoder::new(file, image.width() as u32, image.height() as u32);
-                        encoder.set_color(png::ColorType::Rgba);
-                        encoder.set_depth(png::BitDepth::Eight);
-                        encoder.write_header()?.write_image_data(
-                            &image
-                                .pixels
-                                .iter()
-                                .flat_map(|c| c.to_array())
-                                .collect::<Vec<_>>(),
-                        )?;
-                        self.idle_frames = host.frames;
-                        self.next = Instant::now() + Duration::from_millis(1500);
-                        self.stage = 4;
+                let capture_path = self.directory.join("window.png");
+                if !capture_path.is_file() {
+                    if let Some(state) = app.painter.render_state() {
+                        state.device.poll(wgpu::PollType::Poll)?;
                     }
+                    let mut events = Vec::new();
+                    app.painter.handle_screenshots(&mut events);
+                    if events.is_empty() {
+                        host.capture = true;
+                        host.repaint();
+                        self.next = Instant::now() + Duration::from_millis(100);
+                    }
+                    for event in events {
+                        if let egui::Event::Screenshot { image, .. } = event {
+                            let file = fs::File::create(&capture_path)?;
+                            let mut encoder = png::Encoder::new(
+                                file,
+                                image.width() as u32,
+                                image.height() as u32,
+                            );
+                            encoder.set_color(png::ColorType::Rgba);
+                            encoder.set_depth(png::BitDepth::Eight);
+                            encoder.write_header()?.write_image_data(
+                                &image
+                                    .pixels
+                                    .iter()
+                                    .flat_map(|c| c.to_array())
+                                    .collect::<Vec<_>>(),
+                            )?;
+                        }
+                    }
+                }
+                if capture_path.is_file() {
+                    self.idle_frames = host.frames;
+                    self.progress_started = Instant::now();
+                    app.panes
+                        .get_mut(&pane)
+                        .unwrap()
+                        .activity
+                        .progress_reported(3, None, self.progress_started);
+                    host.repaint();
+                    self.next = self.progress_started + Duration::from_secs(2);
+                    self.stage = 7;
                 }
             }
             4 => {
@@ -310,7 +328,12 @@ impl Smoke {
                     )
                     .into());
                 }
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let refresh_hz = host
+                    .window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz())
+                    .map(|rate| f64::from(rate) / 1000.0);
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -345,6 +368,28 @@ impl Smoke {
                     return Err("undo did not restore the same terminal process".into());
                 }
                 self.stage = 2;
+            }
+            7 => {
+                self.progress_frames = host.frames.saturating_sub(self.idle_frames);
+                self.progress_seconds = self.progress_started.elapsed().as_secs_f64();
+                if !self.offscreen && self.progress_frames == 0 {
+                    return Err("indefinite progress did not render any animation frames".into());
+                }
+                eprintln!(
+                    "Native smoke: indefinite progress rendered {} frames in {:.3}s ({:.1} FPS)",
+                    self.progress_frames,
+                    self.progress_seconds,
+                    self.progress_frames as f64 / self.progress_seconds
+                );
+                app.panes
+                    .get_mut(&pane)
+                    .unwrap()
+                    .activity
+                    .progress_reported(1, Some(65), Instant::now());
+                host.repaint();
+                self.idle_frames = host.frames;
+                self.next = Instant::now() + Duration::from_millis(1500);
+                self.stage = 4;
             }
             _ => unreachable!(),
         }

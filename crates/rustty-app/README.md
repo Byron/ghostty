@@ -74,9 +74,10 @@ RUSTTY_SMOKE_DIR=/tmp/rustty-native-smoke target/debug/Rustty.app/Contents/MacOS
 ```
 
 The opt-in native smoke check starts disposable `/bin/sh` sessions, checks input,
-four split panes, tabs, quadrant focus and zoom, URI directory reports, restoration
-and idle rendering. It writes `result.json`, `workspace.json` and a WGPU readback
-`window.png` into the specified directory and exits. It uses the selected display
+four split panes, tabs, quadrant focus and zoom, URI directory reports, restoration,
+progress animation and idle rendering. The report records animation frame rate and
+the monitor's reported refresh rate. It writes `result.json`, `workspace.json` and a
+WGPU readback `window.png` into the specified directory and exits. It uses the selected display
 configuration but does not restore or overwrite the regular app workspace.
 
 On a locked or headless Mac, set `RUSTTY_SMOKE_OFFSCREEN=1` for an offscreen

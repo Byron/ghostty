@@ -57,7 +57,7 @@ impl From<egui_winit::accesskit_winit::Event> for Event {
 
 struct Pane {
     session: Session,
-    host_state: (bool, vt::query::ColorScheme),
+    host_state: (bool, bool, vt::query::ColorScheme),
     wake_pending: Arc<AtomicBool>,
     input: VecDeque<Vec<u8>>,
     input_bytes: usize,
@@ -746,6 +746,7 @@ impl App {
     }
     fn sync_host_state(&mut self) {
         let now = Instant::now();
+        let mut focused_panes = HashSet::new();
         for host in self.windows.values_mut() {
             let focused = self
                 .workspace
@@ -755,6 +756,7 @@ impl App {
                 .and_then(|window| window.tabs.get(window.active_tab))
                 .map(|tab| tab.focused)
                 .filter(|_| host.focused && host.visible);
+            focused_panes.extend(focused);
             if host.focus_hint.focus(focused, now) {
                 host.repaint();
             }
@@ -762,12 +764,12 @@ impl App {
         let visible = self.visible_panes();
         let scheme = color_scheme(self.config_loader.dark_mode);
         for (&id, pane) in &mut self.panes {
-            let state = (visible.contains(&id), scheme);
+            let state = (visible.contains(&id), focused_panes.contains(&id), scheme);
             if !state.0 {
                 pane.activity.reset_progress_animation();
             }
             if !pane.exited && pane.host_state != state {
-                match pane.session.set_host_state(state.0, state.1) {
+                match pane.session.set_host_state(state.0, state.1, state.2) {
                     Ok(()) => pane.host_state = state,
                     Err(error) => self.errors.push(error.to_string()),
                 }
@@ -857,15 +859,26 @@ impl App {
             )
             .contains(&id)
         });
-        let host_state = (visible, color_scheme(self.config_loader.dark_mode));
+        let focused = self.workspace.windows.iter().any(|window| {
+            let native = host
+                .filter(|host| host.id == window.id)
+                .or_else(|| self.windows.values().find(|host| host.id == window.id));
+            native.is_some_and(|host| host.focused && host.visible)
+                && window
+                    .tabs
+                    .get(window.active_tab)
+                    .is_some_and(|tab| tab.focused == id)
+        });
+        let host_state = (visible, focused, color_scheme(self.config_loader.dark_mode));
         let session = match Session::spawn(
             self.config(),
             SessionOptions {
                 working_directory: Some(directory.clone()),
                 command,
                 resources: self.resources.clone(),
-                color_scheme: Some(host_state.1),
+                color_scheme: Some(host_state.2),
                 visible: host_state.0,
+                focused: host_state.1,
                 ..Default::default()
             },
             wake,
@@ -1196,30 +1209,13 @@ impl App {
         Ok(emitted)
     }
     fn focus_pane(&mut self, window: Id, pane: Id) {
-        let previous = self.focused(window);
         if let Some(tab) = self.tab_mut(window) {
             tab.focus(pane);
         }
-        for (id, focused) in previous
-            .map(|id| (id, false))
-            .into_iter()
-            .chain([(pane, true)])
-        {
-            if let Some(pane) = self.panes.get_mut(&id) {
-                if focused {
-                    pane.unseen = false;
-                    if let Some(platform) = &self.platform {
-                        platform.clear_notifications(id);
-                    }
-                }
-                let bytes = pane
-                    .session
-                    .terminal()
-                    .ok()
-                    .map(|terminal| terminal.encode_focus(focused));
-                if let Some(bytes) = bytes {
-                    let _ = pane.write(bytes);
-                }
+        if let Some(state) = self.panes.get_mut(&pane) {
+            state.unseen = false;
+            if let Some(platform) = &self.platform {
+                platform.clear_notifications(pane);
             }
         }
         self.changed();
@@ -4065,17 +4061,6 @@ impl ApplicationHandler<Event> for App {
                     host.preedit_selection = None;
                     host.sequence.clear();
                     host.sequence_len = 0;
-                    if let Some(pane) = self.focused(host.id).and_then(|id| self.panes.get_mut(&id))
-                    {
-                        let bytes = pane
-                            .session
-                            .terminal()
-                            .ok()
-                            .map(|terminal| terminal.encode_focus(false));
-                        if let Some(bytes) = bytes {
-                            let _ = pane.write(bytes);
-                        }
-                    }
                     if self
                         .index(host.id)
                         .is_some_and(|i| self.workspace.windows[i].quick)

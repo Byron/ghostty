@@ -1889,6 +1889,11 @@ impl Terminal {
         self.set_mode(private, mode, value);
         if private && value {
             match mode {
+                1004 => {
+                    if let Some(focused) = self.query_defaults.focused {
+                        effects.push(Effect::Write(self.encode_focus(focused)));
+                    }
+                }
                 2048 => effects.push(Effect::Query(Query::Size(query::SizeStyle::InBand))),
                 2033 => effects.push(Effect::Write(query::visibility(self.visible))),
                 _ => {}

@@ -21,6 +21,7 @@ pub struct SessionOptions {
     /// Initial host state is installed before the child can issue queries.
     pub color_scheme: Option<query::ColorScheme>,
     pub visible: bool,
+    pub focused: bool,
 }
 
 impl Default for SessionOptions {
@@ -33,6 +34,7 @@ impl Default for SessionOptions {
             resources: None,
             color_scheme: None,
             visible: true,
+            focused: false,
         }
     }
 }
@@ -118,6 +120,7 @@ impl Session {
         terminal.terminfo_name = terminfo_name;
         terminal.shell_command_events = true;
         terminal.query_defaults.color_scheme = options.color_scheme;
+        terminal.query_defaults.focused = Some(options.focused);
         terminal.visible = options.visible;
         apply_appearance(&mut terminal, config);
         terminal.working_directory = options
@@ -341,7 +344,12 @@ impl Session {
     }
 
     /// Apply actual window state and notify programs subscribed to its changes.
-    pub fn set_host_state(&self, visible: bool, scheme: query::ColorScheme) -> io::Result<()> {
+    pub fn set_host_state(
+        &self,
+        visible: bool,
+        focused: bool,
+        scheme: query::ColorScheme,
+    ) -> io::Result<()> {
         let mut terminal = self.terminal()?;
         let mut reply = Vec::new();
         if terminal.query_defaults.color_scheme != Some(scheme) {
@@ -356,9 +364,13 @@ impl Session {
                 reply.extend(query::visibility(visible));
             }
         }
+        if terminal.query_defaults.focused != Some(focused) {
+            terminal.query_defaults.focused = Some(focused);
+            reply.extend(terminal.encode_focus(focused));
+        }
         drop(terminal);
         if !reply.is_empty() {
-            // Host changes produce at most two small reports. Like resize
+            // Host changes produce at most three small reports. Like resize
             // reports, they must not block the UI on the user-input budget.
             self.input
                 .send(IoCommand::HostReport(reply))
@@ -741,7 +753,7 @@ mod tests {
                 visible: false,
                 command: Some(Command::Direct(vec![
                     "/bin/sh".into(), "-c".into(),
-                    r"stty raw -echo; printf '\033[?996n\033[?998n'; dd bs=1 count=18 2>/dev/null | od -An -tx1 | tr -d ' \n'; printf '\r\nstate-ready\r\n'; dd bs=1 count=18 2>/dev/null | od -An -tx1 | tr -d ' \n'; stty min 0 time 1; dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'; printf '\r\nstate-done\r\n'".into(),
+                    r"stty raw -echo; printf '\033[?996n\033[?998n\033[?1004h'; dd bs=1 count=21 2>/dev/null | od -An -tx1 | tr -d ' \n'; printf '\r\nstate-ready\r\n'; dd bs=1 count=21 2>/dev/null | od -An -tx1 | tr -d ' \n'; stty min 0 time 1; dd bs=64 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'; printf '\r\nstate-done\r\n'".into(),
                 ])),
                 ..SessionOptions::default()
             },
@@ -758,7 +770,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
         };
-        assert!(wait_for("state-ready").contains("1b5b3f3939373b326e1b5b3f3939393b326e"));
+        assert!(wait_for("state-ready").contains("1b5b3f3939373b326e1b5b3f3939393b326e1b5b4f"));
         {
             let mut terminal = session.terminal().unwrap();
             terminal.modes.set(true, 2031, true);
@@ -767,26 +779,29 @@ mod tests {
         // A full user-input queue must neither block nor discard host reports.
         *session.pending_input.used.lock().unwrap() = Some(MAX_PENDING_INPUT);
         session
-            .set_host_state(true, query::ColorScheme::Dark)
+            .set_host_state(true, true, query::ColorScheme::Dark)
             .unwrap();
         session
-            .set_host_state(true, query::ColorScheme::Dark)
+            .set_host_state(true, true, query::ColorScheme::Dark)
             .unwrap();
         {
             let mut terminal = session.terminal().unwrap();
             terminal.modes.set(true, 2031, false);
             terminal.modes.set(true, 2033, false);
+            terminal.modes.set(true, 1004, false);
         }
         session
-            .set_host_state(false, query::ColorScheme::Light)
+            .set_host_state(false, false, query::ColorScheme::Light)
             .unwrap();
         let text = wait_for("state-done");
         assert_eq!(
-            text.matches("1b5b3f3939373b316e1b5b3f3939393b316e").count(),
+            text.matches("1b5b3f3939373b316e1b5b3f3939393b316e1b5b49")
+                .count(),
             1
         );
         assert_eq!(
-            text.matches("1b5b3f3939373b326e1b5b3f3939393b326e").count(),
+            text.matches("1b5b3f3939373b326e1b5b3f3939393b326e1b5b4f")
+                .count(),
             1
         );
         assert_eq!(

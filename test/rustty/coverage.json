@@ -149,7 +149,7 @@
     {
       "id": "input.mouse",
       "status": "partial",
-      "remaining": "All mouse modes/formats, buttons and viewport/pixel cases pass; retained motion deduplication, renderer padding and full coordinate-limit cases remain."
+      "remaining": "All modes/formats, buttons, independent held-button state, renderer padding, zero/tiny surfaces, retained cell deduplication, explicit tracking reset and continuation through terminal reset/resize/screen/mode changes pass 1116 comparisons across 372 fixtures. Renderer geometry is independent of terminal dimensions, and UTF-8 coordinates may occupy three or four bytes. Rustty panes own their tracking state and retain fractional renderer bounds. Native reference crashes remain for UTF-8 surrogate coordinates and overflowing grid/pixel conversion; complete coordinate/resource limits remain."
     },
     {
       "id": "input.focus-paste",

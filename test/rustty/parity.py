@@ -293,6 +293,67 @@ def input_requests():
                           for x, y in ((0, 0), (9, 17), (639, 383), (640, 384), (2000, 4000),
                                        (-1, -1), (-0.25, 0), (1.5, 2.5), (640.25, 384.25))]
                 yield request(f"mouse/{mode}/{encoding}/{button}", setup, events, ["input.mouse"])
+
+    # Retain the caller's last reported cell across input operations, including
+    # rejected buttons and output formats which cannot encode a coordinate.
+    geometries = [
+        ("plain", [640, 384], [8, 16], [0, 0, 0, 0]),
+        ("padding", [103, 101], [5, 10], [7, 13, 11, 17]),
+        ("tiny", [4, 2], [8, 16], [10, 20, 30, 40]),
+        ("zero", [0, 0], [8, 16], [0, 0, 0, 0]),
+    ]
+    for mode in (0, 9, 1000, 1002, 1003):
+        for encoding in (0, 1005, 1006, 1015, 1016):
+            setup = (f"\x1b[?{mode}h" if mode else "") + (f"\x1b[?{encoding}h" if encoding else "")
+            for name, screen, cell, padding in geometries:
+                positions = [(0, 0), (1, 1), (padding[0] - 0.5, padding[1] - 0.5),
+                             (padding[0] + 0.5, padding[1] + 0.5),
+                             (padding[0] + cell[0] - 0.25, padding[1]),
+                             (padding[0] + cell[0], padding[1] + cell[1]),
+                             tuple(screen), (screen[0] + 0.25, screen[1] + 0.25), (-0.25, -0.25)]
+                events = [
+                    {"kind": "mouse", "action": action, "button": button, "x": x, "y": y,
+                     "modifiers": modifiers, "screen_size": screen, "cell_size": cell,
+                     "padding": padding, "track_last_cell": True, "any_button_pressed": held}
+                    for x, y in positions
+                    for action, button, held, modifiers in (
+                        ("motion", None, False, 0), ("motion", None, False, 7),
+                        ("motion", "left", False, 0), ("motion", "left", True, 0),
+                        ("press", "ten", True, 0), ("motion", None, True, 0),
+                        ("press", "left", True, 0), ("press", "left", True, 0),
+                        ("release", "right", False, 0), ("release", None, False, 0))
+                ]
+                yield request(f"mouse/retained/{mode}/{encoding}/{name}", setup, events, ["input.mouse"])
+
+            # Renderer geometry is independent of the terminal's cell count.
+            # UTF-8 mouse coordinates can require three or four bytes.
+            events = [{"kind": "mouse", "action": action, "button": "left", "x": x, "y": y,
+                       "screen_size": [65535, 65535], "cell_size": [1, 1], "track_last_cell": True}
+                      for x, y in ((94, 95), (222, 223), (2014, 2015), (2047, 4095),
+                                   (55262, 57311), (65534, 65535), (-1, -1))
+                      for action in ("press", "motion", "release")]
+            yield request(f"mouse/limits/{mode}/{encoding}", setup, events, ["input.mouse"])
+
+    def mouse(**options):
+        return {"op": "input", "input": {"kind": "mouse", "action": "motion", "x": 9, "y": 17,
+                                         "track_last_cell": True, **options}}
+
+    transitions = [b"\x1b[?47h", b"\x1b[?1003l\x1b[?1003h", b"\x1b[?1016h", b"\x1bc",
+                   b"\x1b[?1000h", b"\x1b[?1005h"]
+    for transition in transitions:
+        setup = {"op": "write", "data": b"\x1b[?1003h\x1b[?1006h".hex()}
+        yield ({"id": "input/mouse/transitions/" + transition.hex(), "kind": "input", "cols": 80, "rows": 24,
+                "operations": [setup, mouse(), {"op": "write", "data": transition.hex()}, mouse(),
+                               setup, mouse(), mouse(track_last_cell=False), mouse(),
+                               mouse(reset_mouse=True), mouse(),
+                               {"op": "resize", "cols": 1, "rows": 1}, mouse(),
+                               {"op": "terminal_reset"}, setup, mouse()]}, ["input.mouse"])
+
+    yield request("mouse/pixel-limits", "\x1b[?1003h\x1b[?1016h", [
+        {"kind": "mouse", "action": "release", "button": "left", "x": x, "y": y,
+         "screen_size": [2147483648, 2147483648], "cell_size": [65536, 65536], "track_last_cell": True}
+        for x, y in ((2147483520, -2147483648), (-0.5, 0.5), (-1.5, 1.5))
+    ], ["input.mouse"])
     for enabled in (False, True):
         yield request(f"focus/{enabled}", "\x1b[?1004h" if enabled else "",
                       [{"kind": "focus", "focused": focused} for focused in (True, False, True)], ["input.focus-paste"])

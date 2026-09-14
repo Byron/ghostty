@@ -675,6 +675,7 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
     }
     let mut observations = Vec::new();
     let mut mode_results = Vec::new();
+    let mut mouse_cell = None;
     let mut grid = grid_adapter::Context::default();
     let mut grid_results = Vec::new();
     let mut glyph_results = Vec::new();
@@ -805,8 +806,11 @@ fn execute(request: &Request) -> Result<Value, &'static str> {
                 operation.grid.as_ref().ok_or("MissingGridOperation")?,
             )?),
             "input" => {
-                let bytes =
-                    input::encode(&terminal, operation.input.as_ref().ok_or("MissingInput")?)?;
+                let bytes = input::encode(
+                    &terminal,
+                    operation.input.as_ref().ok_or("MissingInput")?,
+                    &mut mouse_cell,
+                )?;
                 host.events.push(event("input", hex(&bytes)));
             }
             "paste" => paste::run(

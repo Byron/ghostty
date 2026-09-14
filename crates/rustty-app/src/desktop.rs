@@ -309,9 +309,12 @@ impl Host {
         if !self.egui.is_pointer_in_window() {
             return None;
         }
+        self.pane_at(self.mouse)
+    }
+    fn pane_at(&self, position: Pos2) -> Option<Id> {
         self.rects
             .iter()
-            .find(|(_, rect)| rect.contains(self.mouse))
+            .find(|(_, rect)| rect.contains(position))
             .map(|(&id, _)| id)
     }
     fn ui_input(&self) -> bool {
@@ -1091,6 +1094,27 @@ impl App {
         self.terminal_input(host, paste.pane);
         self.write(paste.pane, bytes);
         host.repaint();
+    }
+    fn drop_file(&mut self, host: &mut Host, position: Pos2, path: &Path) {
+        if host.ui_input()
+            || self
+                .context
+                .layer_id_at(position)
+                .is_some_and(|layer| layer.order != egui::Order::Background)
+        {
+            return;
+        }
+        let Some(pane) = host.pane_at(position) else {
+            return;
+        };
+        self.paste(
+            host,
+            PendingPaste {
+                pane,
+                data: format!("'{}' ", path.to_string_lossy().replace('\'', "'\\''")).into_bytes(),
+            },
+            true,
+        );
     }
     fn paste_event(
         &mut self,
@@ -4103,19 +4127,10 @@ impl ApplicationHandler<Event> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 self.scroll(&mut host, delta);
             }
-            WindowEvent::DroppedFile(path) => {
-                if let Some(id) = self.focused(host.id) {
-                    let escaped = format!("'{}' ", path.to_string_lossy().replace('\'', "'\\''"));
-                    let bytes = self
-                        .panes
-                        .get(&id)
-                        .and_then(|p| p.session.terminal().ok().map(|t| t.encode_paste(&escaped)));
-                    if let Some(bytes) = bytes {
-                        self.terminal_input(&mut host, id);
-                        self.write(id, bytes);
-                    }
-                }
-            }
+            WindowEvent::DroppedFile(path) => match Platform::cursor_position(&host.window) {
+                Ok([x, y]) => self.drop_file(&mut host, Pos2::new(x, y), &path),
+                Err(error) => self.errors.push(error),
+            },
             _ => {}
         }
         self.windows.insert(window, host);

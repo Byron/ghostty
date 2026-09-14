@@ -344,7 +344,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","reverse-video","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","osc-pointer","reverse-video","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -628,6 +628,22 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
                     .to_physical(host.window.scale_factor()),
             },
         );
+        app.panes[&focused]
+            .session
+            .terminal()?
+            .feed(b"\x1b]22;wait\x07");
+        app.panes[&hovered]
+            .session
+            .terminal()?
+            .feed(b"\x1b]22;hand\x07");
+        if app.pointer_cursor(host) != Some(CursorIcon::Pointer) {
+            return Err("OSC 22 pointer shape did not follow the hovered pane".into());
+        }
+        host.mouse = host.rects[&focused].center();
+        if app.pointer_cursor(host) != Some(CursorIcon::Wait) {
+            return Err("OSC 22 pointer shape leaked into another pane".into());
+        }
+        host.mouse = host.rects[&hovered].center();
         for (focused_mode, hovered_mode, shift) in [
             (0, 0, false),
             (1000, 0, false),

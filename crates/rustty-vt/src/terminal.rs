@@ -2374,7 +2374,7 @@ impl Terminal {
         let data = data.get(split + 1..).unwrap_or_default();
         match number {
             // These fixed captures append a NUL before dispatch.
-            0 | 2 | 7 | 8 | 777 | 1337 if !has_separator || data.len() >= 2048 => return,
+            0 | 2 | 7 | 8 | 22 | 777 | 1337 if !has_separator || data.len() >= 2048 => return,
             9 | 133 if !has_separator || data.len() > 2048 => return,
             // Allocating captures count only bytes after the numeric prefix.
             // OSC 52 and 66 reserve a byte for the parser's trailing NUL.
@@ -2428,6 +2428,13 @@ impl Terminal {
                 }
             }
             9 => self.osc9(data, effects),
+            22 => {
+                if let Ok(name) = std::str::from_utf8(data)
+                    && let Some(shape) = crate::input::mouse_shape_index(name)
+                {
+                    self.metadata.mouse_shape = shape;
+                }
+            }
             777 => {
                 if let Some(notification) = data.strip_prefix(b"notify;")
                     && let Some(split) = notification.iter().position(|&b| b == b';')
@@ -2489,7 +2496,7 @@ impl Terminal {
             ),
             72 => dnd::handle(&mut self.kitty_dnd, data, bell, effects),
             133 => self.osc133(data, effects),
-            1 | 22 => {}
+            1 => {}
             _ => effects.push(Effect::UnknownSequence(format!("OSC {number}"))),
         }
     }

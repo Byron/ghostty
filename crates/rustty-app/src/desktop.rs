@@ -3293,6 +3293,9 @@ impl App {
             event_loop,
             output.platform_output,
         );
+        if let Some(cursor) = self.pointer_cursor(host) {
+            host.window.set_cursor(cursor);
+        }
         let primitives = self
             .context
             .tessellate(output.shapes, output.pixels_per_point);
@@ -3444,7 +3447,37 @@ impl App {
         }
         host.repaint();
     }
+    fn pointer_cursor(&self, host: &Host) -> Option<CursorIcon> {
+        if host.ui_input()
+            || host.peek.is_some()
+            || self
+                .context
+                .layer_id_at(host.mouse)
+                .is_some_and(|layer| layer.order != egui::Order::Background)
+        {
+            return None;
+        }
+        let divider = host.divider_drag.or_else(|| {
+            self.tab(host.id)?.visible_tree(false).divider_at(
+                host.content,
+                [host.mouse.x, host.mouse.y],
+                3.0,
+            )
+        });
+        if let Some((_, axis, _)) = divider {
+            return Some(match axis {
+                Axis::Horizontal => CursorIcon::ColResize,
+                Axis::Vertical => CursorIcon::RowResize,
+            });
+        }
+        let pane = self.panes.get(&host.hovered_pane()?)?;
+        pane.session.terminal().ok()?.mouse_shape().parse().ok()
+    }
+
     fn mouse(&mut self, host: &mut Host, action: vt::MouseAction, button: Option<vt::MouseButton>) {
+        if let Some(cursor) = self.pointer_cursor(host) {
+            host.window.set_cursor(cursor);
+        }
         if let Some((id, axis, bounds)) = host.divider_drag {
             if action == vt::MouseAction::Release {
                 host.divider_drag = None;
@@ -3472,11 +3505,6 @@ impl App {
             let divider = self.tab(host.id).and_then(|tab| {
                 tab.visible_tree(false)
                     .divider_at(host.content, [host.mouse.x, host.mouse.y], 3.0)
-            });
-            host.window.set_cursor(match divider {
-                Some((_, Axis::Horizontal, _)) => CursorIcon::ColResize,
-                Some((_, Axis::Vertical, _)) => CursorIcon::RowResize,
-                None => CursorIcon::Default,
             });
             if let Some(divider) = divider {
                 if action == vt::MouseAction::Press && button == Some(vt::MouseButton::Left) {

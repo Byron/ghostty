@@ -344,7 +344,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","file-drop-targeting","osc-pointer","reverse-video","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","reverse-video","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -699,6 +699,39 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
                 }
             }
         }
+        // Alternate scrolling follows the hovered pane and DECCKM, even when
+        // Kitty keyboard mode is active. Disabling mode 1007 sends nothing.
+        app.panes[&hovered].session.terminal()?.mouse_mode = 0;
+        app.panes[&hovered]
+            .session
+            .terminal()?
+            .feed(b"\x1b[?1049h\x1b[>31u");
+        for (enabled, application) in [(true, false), (true, true), (false, true)] {
+            {
+                let mut terminal = app.panes[&hovered].session.terminal()?;
+                terminal.set_mode(true, 1007, enabled);
+                terminal.set_mode(true, 1, application);
+            }
+            for (lines, key) in [(1.0, b'A'), (-1.0, b'B')] {
+                app.scroll(host, MouseScrollDelta::LineDelta(0.0, lines));
+                let pane = app.panes.get_mut(&hovered).unwrap();
+                let expected = [0x1b, if application { b'O' } else { b'[' }, key].repeat(3);
+                if pane.input.len() != if enabled { 2 } else { 1 }
+                    || enabled && pane.input.back() != Some(&expected)
+                {
+                    return Err("alternate scroll ignored mode 1007 or cursor-key mode".into());
+                }
+                if enabled {
+                    pane.input.pop_back();
+                    pane.input_bytes = 0;
+                }
+                if app.focused(host.id) != Some(focused) || app.panes[&focused].input.len() != 1 {
+                    return Err("alternate scroll changed the keyboard target".into());
+                }
+            }
+        }
+        app.panes[&hovered].session.terminal()?.feed(b"\x1b[?1049l");
+
         // A stale last position after leaving the window must not keep a target.
         let _ = host.egui.on_window_event(
             &host.window,

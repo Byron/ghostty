@@ -3420,6 +3420,7 @@ impl App {
             }
         };
         if let Some(id) = host.hovered_pane() {
+            let mut cursor_keys = None;
             let mouse = self
                 .panes
                 .get(&id)
@@ -3440,9 +3441,30 @@ impl App {
             } else if let Some(pane) = self.panes.get(&id)
                 && let Ok(mut terminal) = pane.session.terminal()
             {
-                terminal
-                    .screen_mut()
-                    .scroll_viewport((lines * 3.0).round() as isize);
+                if terminal.is_alternate_screen()
+                    && terminal.mouse_mode == 0
+                    && terminal.modes.dec(1007)
+                {
+                    // Like Ghostty, alternate scroll emits ordinary cursor keys,
+                    // independent of Kitty keyboard flags and held modifiers.
+                    let count = (lines * 3.0).abs().round().min(128.0) as usize;
+                    let sequence = [
+                        0x1b,
+                        if terminal.modes.dec(1) { b'O' } else { b'[' },
+                        if lines > 0.0 { b'A' } else { b'B' },
+                    ];
+                    if count != 0 {
+                        terminal.screen_mut().selection = None;
+                    }
+                    cursor_keys = Some(sequence.repeat(count));
+                } else {
+                    terminal
+                        .screen_mut()
+                        .scroll_viewport((lines * 3.0).round() as isize);
+                }
+            }
+            if let Some(bytes) = cursor_keys {
+                self.write(id, bytes);
             }
         }
         host.repaint();

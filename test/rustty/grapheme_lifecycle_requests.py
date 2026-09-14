@@ -88,8 +88,8 @@ def requests(reference):
                 {"op": "observe"}, {"op": "snapshot"},
             ])
 
-    # Snapshot decode appends suffixes, retaining the resulting fragmentation
-    # for the very next live write instead of starting with an empty allocator.
+    # Snapshot decode reserves complete suffixes, retaining the resulting
+    # allocation history for the very next live write.
     for length in (1, 4, 5, 64):
         source = reference.request({"id": "pages/graphemes/continued-source", "cols": 80,
                                     "rows": 3, "operations": [

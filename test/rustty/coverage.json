@@ -169,7 +169,7 @@
     {
       "id": "snapshot.cross-decode",
       "status": "partial",
-      "remaining": "Both encodings and uninterrupted continuation are compared; PAGE STYLE/LINK admission, hyperlink string lifetimes/deduplication and linked-cell limits have bounded coverage. The native short-bitmap allocation failure is repaired; all 660 hyperlink resource comparisons pass. Complete metadata, lazy mixed-width PAGEs and all state transitions remain."
+      "remaining": "Both encodings and uninterrupted continuation are compared; PAGE STYLE/LINK admission, hyperlink string lifetimes/deduplication and linked-cell limits have bounded coverage. The native short-bitmap allocation failure is repaired; all 660 hyperlink resource comparisons pass. Both decoders now reserve whole grapheme suffixes, repairing native packed-page roundtrip loss caused by transient append allocations. All 534 grapheme resource comparisons pass, including malformed/duplicate entries, full arenas, retry after failed admission and three packed reflow cross-decode fixtures. Complete metadata, lazy mixed-width PAGEs and all state transitions remain."
     },
     {
       "id": "snapshot.streaming",

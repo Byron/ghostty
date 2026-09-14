@@ -204,6 +204,27 @@ fn resize_remaps_saved_cursor_separately_from_the_live_cursor() {
 }
 
 #[test]
+fn resize_retains_the_inactive_viewport_pin_before_saved_and_external_pins() {
+    for track in [false, true] {
+        let mut terminal = Terminal::new(12, 4, 100);
+        terminal.feed(b"\t\n");
+        let point = terminal.screen().point(1, 8).unwrap();
+        let pin = track.then(|| terminal.screen_mut().track(point));
+        terminal.feed(b"\x1b[?1049h");
+        terminal.resize(6, 4);
+        if let Some(pin) = pin {
+            assert_eq!(terminal.primary_screen().resolve(pin).unwrap().col, 4);
+        }
+        terminal.feed(b"\x1b[?1049l");
+        assert_eq!(
+            (terminal.screen().cursor.col, terminal.screen().cursor.row),
+            (4, 1)
+        );
+        invariant(&terminal);
+    }
+}
+
+#[test]
 fn widening_without_reflow_preserves_spacer_attributes() {
     for initial_columns in [4, 8] {
         let mut terminal = Terminal::new(initial_columns, 3, 100);

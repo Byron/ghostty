@@ -943,5 +943,34 @@
     "covers": [
       "terminal.resize"
     ]
+  },
+  {
+    "request": {
+      "id": "terminal/resize/retained-viewport-pin-before-saved-cursor",
+      "cols": 12,
+      "rows": 4,
+      "operations": [
+        {
+          "op": "write",
+          "data": "090a1b5b3f3130343968"
+        },
+        {
+          "op": "resize",
+          "cols": 6,
+          "rows": 4
+        },
+        {
+          "op": "write",
+          "data": "1b5b3f313034396c"
+        }
+      ]
+    },
+    "covers": [
+      "terminal.resize",
+      "terminal.cursor"
+    ],
+    "generated_sources": [
+      "generated/2/187"
+    ]
   }
 ]

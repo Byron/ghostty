@@ -1,9 +1,15 @@
 //! Owned screen storage. Rows retain identity when they enter scrollback.
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::page_list::{Page, PageAllocationInfo, PageList};
-use crate::page_resources::{SetFull, StyleAdmission};
+use crate::page_resources::{GraphemeAdmission, GraphemeAllocation, SetFull, StyleAdmission};
+
+#[derive(Clone, Copy)]
+enum PageResource {
+    Styles,
+    Graphemes,
+}
 
 /// Independent logical storage budgets. `None` means unlimited.
 ///
@@ -156,6 +162,8 @@ pub enum SemanticClick {
 pub struct Cell {
     #[serde(skip)]
     pub(crate) style_id: u16,
+    #[serde(skip)]
+    pub(crate) grapheme: Option<GraphemeAllocation>,
     /// Empty for unwritten cells and the continuation of a wide glyph.
     pub text: String,
     /// Zero denotes the continuation of a two-cell glyph.
@@ -191,6 +199,7 @@ impl Default for Cell {
     fn default() -> Self {
         Self {
             style_id: 0,
+            grapheme: None,
             text: String::new(),
             width: 1,
             style: Style::default(),
@@ -223,7 +232,7 @@ impl Cell {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     #[serde(skip)]
-    pub(crate) style_page: Option<u64>,
+    pub(crate) resource_page: Option<u64>,
     pub id: u64,
     pub cells: Vec<Cell>,
     pub wrapped: bool,
@@ -236,13 +245,13 @@ pub struct Row {
 
 pub(crate) struct RowCopy {
     row: Row,
-    styles: Vec<(Option<u64>, u16, Style)>,
+    sources: Vec<(Option<u64>, u16, Style)>,
 }
 
 impl Row {
     pub(crate) fn new(id: u64, cols: usize, background: Color) -> Self {
         Self {
-            style_page: None,
+            resource_page: None,
             id,
             cells: vec![Cell::blank(background); cols],
             wrapped: false,
@@ -622,9 +631,10 @@ impl Screen {
                 .viewport()
                 .map(|row| {
                     let mut row = row.clone();
-                    row.style_page = None;
+                    row.resource_page = None;
                     for cell in &mut row.cells {
                         cell.style_id = 0;
+                        cell.grapheme = None;
                     }
                     row
                 })
@@ -748,10 +758,19 @@ impl Screen {
         }
     }
 
-    pub(crate) fn release_row_styles(&mut self, row: &Row) {
-        if let Some(serial) = row.style_page {
+    pub(crate) fn release_row_resources(&mut self, row: &Row) {
+        if let Some(serial) = row.resource_page
+            && let Some(page) = self
+                .pages
+                .pages
+                .iter_mut()
+                .find(|page| page.serial == serial)
+        {
             for cell in &row.cells {
-                self.release_style(serial, cell.style_id);
+                page.styles.release(cell.style_id);
+                if let Some(grapheme) = cell.grapheme {
+                    page.graphemes.release(grapheme);
+                }
             }
         }
     }
@@ -765,13 +784,24 @@ impl Screen {
 
     fn edit_physical_row<R>(&mut self, absolute: usize, edit: impl FnOnce(&mut Row) -> R) -> R {
         let index = self.pages.page_index(absolute);
-        let serial = self.pages.pages[index].serial;
-        let row = self.physical_row_mut(absolute);
-        row.style_page = Some(serial);
+        let row = if absolute < self.history.len() {
+            &mut self.history[absolute]
+        } else {
+            &mut self.rows[absolute - self.history.len()]
+        };
+        Self::edit_owned_row(&mut self.pages.pages[index], row, edit)
+    }
+
+    fn edit_owned_row<R>(page: &mut Page, row: &mut Row, edit: impl FnOnce(&mut Row) -> R) -> R {
+        row.resource_page = Some(page.serial);
         let mut counts: HashMap<u16, isize> = HashMap::new();
+        let mut graphemes = HashSet::new();
         for cell in &row.cells {
             if cell.style_id != 0 {
                 *counts.entry(cell.style_id).or_default() -= 1;
+            }
+            if let Some(grapheme) = cell.grapheme {
+                graphemes.insert(grapheme);
             }
         }
         let result = edit(row);
@@ -779,8 +809,11 @@ impl Screen {
             if cell.style_id != 0 {
                 *counts.entry(cell.style_id).or_default() += 1;
             }
+            if let Some(grapheme) = cell.grapheme {
+                graphemes.remove(&grapheme);
+            }
         }
-        let styles = &mut self.pages.pages[index].styles;
+        let styles = &mut page.styles;
         for (id, count) in counts {
             if count < 0 {
                 for _ in 0..-count {
@@ -791,6 +824,9 @@ impl Screen {
                     styles.retain(id);
                 }
             }
+        }
+        for grapheme in graphemes {
+            page.graphemes.release(grapheme);
         }
         result
     }
@@ -808,7 +844,7 @@ impl Screen {
         let index = self.pages.page_index(absolute);
         let serial = self.pages.pages[index].serial;
         let row = &mut self.rows[y];
-        row.style_page = Some(serial);
+        row.resource_page = Some(serial);
         if start >= row.cells.len() || start >= end {
             return;
         }
@@ -822,6 +858,9 @@ impl Screen {
         for cell in &mut row.cells[start..end] {
             if !protected || !cell.protected {
                 self.pages.pages[index].styles.release(cell.style_id);
+                if let Some(grapheme) = cell.grapheme {
+                    self.pages.pages[index].graphemes.release(grapheme);
+                }
                 *cell = Cell::blank(background);
             }
         }
@@ -894,7 +933,7 @@ impl Screen {
         let id = self.cursor_style.map_or(0, |(_, id)| id);
         let index = self.pages.page_index(self.history.len() + self.cursor.row);
         self.pages.pages[index].styles.retain(id);
-        self.rows[self.cursor.row].style_page = Some(self.pages.pages[index].serial);
+        self.rows[self.cursor.row].resource_page = Some(self.pages.pages[index].serial);
         id
     }
 
@@ -913,10 +952,13 @@ impl Screen {
             Ok(id) => Ok(id),
             Err(error) => {
                 if self
-                    .grow_style_page(index, error == SetFull::OutOfMemory)
+                    .grow_resource_page(
+                        index,
+                        (error == SetFull::OutOfMemory).then_some(PageResource::Styles),
+                    )
                     .is_err()
                 {
-                    self.split_style_page(absolute)?;
+                    self.split_resource_page(absolute)?;
                 }
                 let index = self.pages.page_index(absolute);
                 acquire(&mut self.pages.pages[index].styles)
@@ -924,7 +966,82 @@ impl Screen {
         }
     }
 
-    fn exact_style_range_bytes(&self, start: usize, end: usize, columns: u16) -> usize {
+    fn acquire_grapheme(
+        &mut self,
+        absolute: usize,
+        len: u8,
+    ) -> Result<GraphemeAllocation, SetFull> {
+        loop {
+            let index = self.pages.page_index(absolute);
+            if let Ok(allocation) = self.pages.pages[index].graphemes.acquire(len) {
+                return Ok(allocation);
+            }
+            if self
+                .grow_resource_page(index, Some(PageResource::Graphemes))
+                .is_err()
+            {
+                self.split_resource_page(absolute)?;
+                let index = self.pages.page_index(absolute);
+                return self.pages.pages[index].graphemes.acquire(len);
+            }
+        }
+    }
+
+    pub(crate) fn append_grapheme(&mut self, col: usize, cp: char) -> Result<(), SetFull> {
+        let y = self.cursor.row;
+        let absolute = self.history.len() + y;
+        let mut index = self.pages.page_index(absolute);
+        let previous = self.rows[y].cells[col].grapheme;
+        let allocation = match self.pages.pages[index].graphemes.append(previous) {
+            Ok(allocation) => allocation,
+            Err(_) => {
+                if self
+                    .grow_resource_page(index, Some(PageResource::Graphemes))
+                    .is_err()
+                {
+                    self.split_resource_page(absolute)?;
+                }
+                index = self.pages.page_index(absolute);
+                self.pages.pages[index]
+                    .graphemes
+                    .append(self.rows[y].cells[col].grapheme)?
+            }
+        };
+        self.rows[y].resource_page = Some(self.pages.pages[index].serial);
+        self.rows[y].cells[col].grapheme = Some(allocation);
+        self.rows[y].cells[col].text.push(cp);
+        self.rows[y].dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn move_wrapped_grapheme(&mut self, source_col: usize, suffix: &str) {
+        let absolute = self.history.len() + self.cursor.row;
+        let Some(source) = absolute.checked_sub(1) else {
+            return;
+        };
+        let Some(allocation) = self.physical_row_mut(source).cells[source_col]
+            .grapheme
+            .take()
+        else {
+            return;
+        };
+        let source_index = self.pages.page_index(source);
+        let destination_index = self.pages.page_index(absolute);
+        if source_index == destination_index {
+            let cell = &mut self.rows[self.cursor.row].cells[self.cursor.col];
+            cell.grapheme = Some(allocation);
+            cell.text.push_str(suffix);
+        } else {
+            for cp in suffix.chars() {
+                if self.append_grapheme(self.cursor.col, cp).is_err() {
+                    break;
+                }
+            }
+            self.pages.pages[source_index].graphemes.release(allocation);
+        }
+    }
+
+    fn exact_resource_range_bytes(&self, start: usize, end: usize, columns: u16) -> usize {
         use crate::page_resources::BitmapAllocator;
         use std::collections::HashSet;
         let mut styles = HashSet::new();
@@ -937,9 +1054,10 @@ impl Screen {
                 if cell.style_id != 0 {
                     styles.insert(cell.style_id);
                 }
-                let suffix = cell.text.chars().count().saturating_sub(1);
-                if suffix != 0 {
-                    grapheme_bytes += BitmapAllocator::<16>::bytes_required(suffix * 4).unwrap();
+                if let Some(grapheme) = cell.grapheme {
+                    grapheme_bytes +=
+                        BitmapAllocator::<16>::bytes_required(usize::from(grapheme.len) * 4)
+                            .unwrap();
                 }
                 if let Some(uri) = &cell.hyperlink {
                     linked_cells += 1;
@@ -975,13 +1093,13 @@ impl Screen {
             .map_or(usize::MAX, |layout| layout.total_size)
     }
 
-    fn split_style_page(&mut self, absolute: usize) -> Result<(), SetFull> {
+    fn split_resource_page(&mut self, absolute: usize) -> Result<(), SetFull> {
         let index = self.pages.page_index(absolute);
         let (page, relative) = self.pages.page_at(absolute);
         let start = absolute - relative;
         let end = start + usize::from(page.rows);
-        let above = self.exact_style_range_bytes(start, absolute + 1, page.columns);
-        let below = self.exact_style_range_bytes(absolute, end, page.columns);
+        let above = self.exact_resource_range_bytes(start, absolute + 1, page.columns);
+        let below = self.exact_resource_range_bytes(absolute, end, page.columns);
         let split = if above < below && absolute + 1 < end {
             relative + 1
         } else {
@@ -993,7 +1111,7 @@ impl Screen {
         }
         if split != 0 {
             for row in start + split..end {
-                self.sync_style_row(row);
+                self.sync_resource_row(row);
             }
         }
         if referenced_cursor {
@@ -1002,30 +1120,47 @@ impl Screen {
         Ok(())
     }
 
-    fn rebuild_style_page<'a>(
+    fn rebuild_resource_page<'a>(
         page: &mut Page,
         rows: impl Iterator<Item = &'a mut Row>,
-        grow: bool,
+        grow: Option<PageResource>,
     ) -> Result<(), SetFull> {
         let mut capacity = page.capacity;
-        if grow {
-            let old = capacity.styles;
-            if old == u16::MAX {
+        if let Some(resource) = grow {
+            let (old, default, maximum, used) = match resource {
+                PageResource::Styles => (
+                    u64::from(capacity.styles),
+                    16,
+                    u64::from(u16::MAX),
+                    page.styles.count() as u64,
+                ),
+                PageResource::Graphemes => (
+                    u64::from(capacity.grapheme_bytes),
+                    1024,
+                    u64::from(u32::MAX),
+                    page.graphemes.used_bytes() as u64,
+                ),
+            };
+            if old == maximum {
                 return Err(SetFull::OutOfMemory);
             }
-            capacity.styles = if old == 0 { 16 } else { old.saturating_mul(2) };
+            let assign = |cap: &mut crate::page_layout::PageCapacity, value: u64| match resource {
+                PageResource::Styles => cap.styles = value as u16,
+                PageResource::Graphemes => cap.grapheme_bytes = value as u32,
+            };
+            let increased = if old == 0 {
+                default
+            } else {
+                (old * 2).min(maximum)
+            };
+            assign(&mut capacity, increased);
             capacity.layout().map_err(|_| SetFull::OutOfMemory)?;
-            let used = page.styles.count() as u64;
             if used != 0 && page.rows != 0 {
                 let density = used * u64::from(capacity.rows) / u64::from(page.rows);
-                let projected = (density + density / 4)
-                    .min(u64::from(old) * 32)
-                    .min(u64::from(u16::MAX)) as u16;
-                if projected > capacity.styles {
-                    let projected_capacity = crate::page_layout::PageCapacity {
-                        styles: projected,
-                        ..capacity
-                    };
+                let projected = (density + density / 4).min(old * 32).min(maximum);
+                if projected > increased {
+                    let mut projected_capacity = capacity;
+                    assign(&mut projected_capacity, projected);
                     if projected_capacity.layout().is_ok() {
                         capacity = projected_capacity;
                     }
@@ -1033,30 +1168,50 @@ impl Screen {
             }
         }
         let serial = page.serial;
-        let mut styles = StyleAdmission::new(capacity.metadata().unwrap().styles_layout);
-        let mut pending_ids = Vec::new();
-        for row in rows.filter(|row| row.style_page == Some(serial)) {
+        let layout = capacity.metadata().unwrap();
+        let mut styles = StyleAdmission::new(layout.styles_layout);
+        let mut graphemes = GraphemeAdmission::new(
+            layout.grapheme_alloc_layout,
+            layout.grapheme_map_layout.capacity as usize,
+        );
+        let mut pending = Vec::new();
+        for row in rows.filter(|row| row.resource_page == Some(serial)) {
             for cell in &mut row.cells {
-                if cell.style_id != 0 {
-                    let id =
-                        styles.acquire_with_id(*page.styles.get(cell.style_id), cell.style_id)?;
-                    pending_ids.push((&mut cell.style_id, id));
+                if cell.style_id == 0 && cell.grapheme.is_none() {
+                    continue;
                 }
+                let grapheme = cell
+                    .grapheme
+                    .map(|allocation| graphemes.acquire(allocation.len))
+                    .transpose()?;
+                let id = if cell.style_id == 0 {
+                    0
+                } else {
+                    styles.acquire_with_id(*page.styles.get(cell.style_id), cell.style_id)?
+                };
+                pending.push((cell, id, grapheme));
             }
         }
         // Reordering live entries can itself exhaust a collision chain. Until
         // every admission succeeds, cell IDs must still address the old set.
-        for (target, id) in pending_ids {
-            *target = id;
+        for (cell, id, grapheme) in pending {
+            cell.style_id = id;
+            cell.grapheme = grapheme;
         }
         page.capacity = capacity;
         page.styles = styles;
+        page.graphemes = graphemes;
+        page.layout_generation = page.layout_generation.wrapping_add(1);
         Ok(())
     }
 
-    fn grow_style_page(&mut self, index: usize, grow: bool) -> Result<(), SetFull> {
+    fn grow_resource_page(
+        &mut self,
+        index: usize,
+        grow: Option<PageResource>,
+    ) -> Result<(), SetFull> {
         let serial = self.pages.pages[index].serial;
-        Self::rebuild_style_page(
+        Self::rebuild_resource_page(
             &mut self.pages.pages[index],
             self.history.iter_mut().chain(&mut self.rows),
             grow,
@@ -1081,7 +1236,7 @@ impl Screen {
         source_id: u16,
     ) -> Result<u16, SetFull> {
         let index = self.pages.page_index(output.len());
-        line.style_page = Some(self.pages.pages[index].serial);
+        line.resource_page = Some(self.pages.pages[index].serial);
         if source_id == 0 {
             return Ok(0);
         }
@@ -1091,10 +1246,10 @@ impl Screen {
         {
             Ok(id) => Ok(id),
             Err(error) => {
-                Self::rebuild_style_page(
+                Self::rebuild_resource_page(
                     &mut self.pages.pages[index],
                     output.iter_mut().chain(std::iter::once(line)),
-                    error == SetFull::OutOfMemory,
+                    (error == SetFull::OutOfMemory).then_some(PageResource::Styles),
                 )?;
                 self.pages.pages[index]
                     .styles
@@ -1106,26 +1261,26 @@ impl Screen {
     /// Rehome complete rows after physical page movement. Same-page rotations
     /// keep their IDs; crossing a page copies with addWithId before releasing
     /// the source. The direction follows the native copy operation.
-    pub(crate) fn sync_style_pages(&mut self, reverse: bool) {
+    pub(crate) fn sync_resource_pages(&mut self, reverse: bool) {
         let count = self.rows.len();
         for offset in 0..count {
             let absolute = self.history.len() + if reverse { count - 1 - offset } else { offset };
-            self.sync_style_row(absolute);
+            self.sync_resource_row(absolute);
         }
         self.sync_cursor_style();
     }
 
-    fn sync_style_row(&mut self, absolute: usize) {
+    fn sync_resource_row(&mut self, absolute: usize) {
         let serial = self.pages.page_at(absolute).0.serial;
         let row = self.all_rows().nth(absolute).unwrap();
-        if row.style_page == Some(serial) {
+        if row.resource_page == Some(serial) {
             return;
         }
-        let previous = row.style_page;
+        let previous = row.resource_page;
         let old_styles = previous
             .and_then(|serial| self.pages.pages.iter().find(|page| page.serial == serial))
             .map(|page| &page.styles);
-        let styles: Vec<_> = row
+        let resources: Vec<_> = row
             .cells
             .iter()
             .map(|cell| {
@@ -1134,27 +1289,45 @@ impl Screen {
                 } else {
                     Style::default()
                 };
-                (cell.style_id, value)
+                (cell.style_id, value, cell.grapheme)
             })
             .collect();
         let row = self.physical_row_mut(absolute);
-        row.style_page = Some(serial);
+        row.resource_page = Some(serial);
         for cell in &mut row.cells {
             cell.style_id = 0;
+            cell.grapheme = None;
         }
-        for (col, (old_id, style)) in styles.into_iter().enumerate() {
-            if old_id == 0 {
-                continue;
+        for (col, (old_id, style, grapheme)) in resources.into_iter().enumerate() {
+            if let Some(grapheme) = grapheme {
+                let allocation = self.acquire_grapheme(absolute, grapheme.len).ok();
+                self.physical_row_mut(absolute).cells[col].grapheme = allocation;
+                if allocation.is_none() {
+                    let cell = &mut self.physical_row_mut(absolute).cells[col];
+                    cell.text
+                        .truncate(cell.text.chars().next().map_or(0, char::len_utf8));
+                }
             }
-            let id = self
-                .acquire_style(absolute, style, Some(old_id))
-                .unwrap_or(0);
-            self.physical_row_mut(absolute).cells[col].style_id = id;
-            if id == 0 {
-                self.physical_row_mut(absolute).cells[col].style = Style::default();
+            if old_id != 0 {
+                let id = self
+                    .acquire_style(absolute, style, Some(old_id))
+                    .unwrap_or(0);
+                self.physical_row_mut(absolute).cells[col].style_id = id;
+                if id == 0 {
+                    self.physical_row_mut(absolute).cells[col].style = Style::default();
+                }
             }
             if let Some(previous) = previous {
                 self.release_style(previous, old_id);
+                if let Some(grapheme) = grapheme
+                    && let Some(page) = self
+                        .pages
+                        .pages
+                        .iter_mut()
+                        .find(|page| page.serial == previous)
+                {
+                    page.graphemes.release(grapheme);
+                }
             }
         }
     }
@@ -1183,13 +1356,13 @@ impl Screen {
         if columns > source.cells.len() {
             row.cells[source.cells.len() - 1].spacer_head = false;
         }
-        let styles = row
+        let sources = row
             .cells
             .iter()
             .enumerate()
             .map(|(column, cell)| {
                 let owner = if column < end { Some(source) } else { recycled }
-                    .and_then(|row| row.style_page);
+                    .and_then(|row| row.resource_page);
                 let value = if cell.style_id == 0 {
                     Style::default()
                 } else {
@@ -1202,7 +1375,7 @@ impl Screen {
                 (owner, cell.style_id, value)
             })
             .collect();
-        RowCopy { row, styles }
+        RowCopy { row, sources }
     }
 
     /// A mixed-width IND row combines two source pages. Keep recycled cells
@@ -1215,25 +1388,54 @@ impl Screen {
     ) {
         let mut pending = Vec::new();
         let mut displaced = Vec::new();
+        let mut transferred = HashSet::new();
         for (y, mut copy) in copies {
             let index = self.pages.page_index(self.history.len() + y);
             let serial = self.pages.pages[index].serial;
-            copy.row.style_page = Some(serial);
-            for (cell, &(owner, id, _)) in copy.row.cells.iter_mut().zip(&copy.styles) {
+            copy.row.resource_page = Some(serial);
+            let mut graphemes = Vec::new();
+            for (cell, &(owner, id, _)) in copy.row.cells.iter_mut().zip(&copy.sources) {
                 if owner == Some(serial) {
                     self.pages.pages[index].styles.retain(id);
+                    if let Some(grapheme) = cell.grapheme {
+                        assert!(transferred.insert((serial, grapheme)));
+                    }
+                    graphemes.push(None);
                 } else {
                     cell.style_id = 0;
+                    graphemes.push(cell.grapheme.take().map(|grapheme| grapheme.len));
                 }
             }
             displaced.push(std::mem::replace(&mut self.rows[y], copy.row));
-            pending.push((y, serial, copy.styles));
+            pending.push((y, serial, copy.sources, graphemes));
         }
-        for row in displaced.iter().chain(discarded.iter()) {
-            self.release_row_styles(row);
+        for mut row in displaced.into_iter().chain(discarded) {
+            if let Some(owner) = row.resource_page {
+                for cell in &mut row.cells {
+                    if cell
+                        .grapheme
+                        .is_some_and(|allocation| transferred.remove(&(owner, allocation)))
+                    {
+                        cell.grapheme = None;
+                    }
+                }
+            }
+            self.release_row_resources(&row);
         }
-        for (y, serial, styles) in pending {
-            for (column, (owner, source_id, style)) in styles.into_iter().enumerate() {
+        assert!(
+            transferred.is_empty(),
+            "copied grapheme still has a source owner"
+        );
+        for (y, serial, sources, graphemes) in pending {
+            for (column, ((owner, source_id, style), grapheme)) in
+                sources.into_iter().zip(graphemes).enumerate()
+            {
+                if let Some(len) = grapheme {
+                    self.rows[y].cells[column].grapheme = Some(
+                        self.acquire_grapheme(self.history.len() + y, len)
+                            .expect("copied grapheme must fit after page growth"),
+                    );
+                }
                 if source_id == 0 || owner == Some(serial) {
                     continue;
                 }
@@ -1267,6 +1469,20 @@ impl Screen {
             .page_at(self.history.len() + destination)
             .0
             .serial;
+        if source_serial == destination_serial {
+            // Native margin scrolling moves cells within a page. Duplicating
+            // their suffixes would needlessly exhaust a full grapheme map.
+            self.edit_row(destination, |row| {
+                row.cells[start..end].fill(Cell::default())
+            });
+            for col in start..end {
+                self.rows[destination].cells[col] =
+                    std::mem::take(&mut self.rows[source].cells[col]);
+            }
+            self.rows[source].dirty = true;
+            self.edit_row(destination, |row| row.repair_wide(background));
+            return;
+        }
         let cells: Vec<_> = (start..end)
             .map(|col| {
                 let cell = self.rows[source]
@@ -1286,20 +1502,25 @@ impl Screen {
             row.cells[start..end].fill(Cell::default())
         });
         for (offset, (mut cell, style)) in cells.into_iter().enumerate() {
-            if cell.style_id != 0 {
-                let index = self.pages.page_index(self.history.len() + destination);
-                if source_serial == destination_serial {
-                    self.pages.pages[index].styles.retain(cell.style_id);
-                } else {
-                    cell.style_id = self
-                        .acquire_style(self.history.len() + destination, style, Some(cell.style_id))
-                        .unwrap_or(0);
-                    if cell.style_id == 0 {
-                        cell.style = Style::default();
-                    }
+            let source_id = cell.style_id;
+            let grapheme = cell.grapheme.take();
+            cell.style_id = 0;
+            self.rows[destination].cells[start + offset] = cell;
+            if let Some(grapheme) = grapheme {
+                self.rows[destination].cells[start + offset].grapheme = Some(
+                    self.acquire_grapheme(self.history.len() + destination, grapheme.len)
+                        .expect("copied grapheme must fit after page growth"),
+                );
+            }
+            if source_id != 0 {
+                let id = self
+                    .acquire_style(self.history.len() + destination, style, Some(source_id))
+                    .unwrap_or(0);
+                self.rows[destination].cells[start + offset].style_id = id;
+                if id == 0 {
+                    self.rows[destination].cells[start + offset].style = Style::default();
                 }
             }
-            self.rows[destination].cells[start + offset] = cell;
         }
         self.edit_row(destination, |row| row.repair_wide(background));
     }
@@ -1312,33 +1533,17 @@ impl Screen {
     ) {
         let old_pages = self.pages.clone();
         for (absolute, row) in contents.iter_mut().enumerate() {
-            let mut counts: HashMap<u16, isize> = HashMap::new();
-            for cell in &row.cells {
-                if cell.style_id != 0 {
-                    *counts.entry(cell.style_id).or_default() -= 1;
-                }
-            }
-            row.cells.resize(columns, Cell::default());
-            row.repair_wide(Color::Default);
             let index = old_pages.page_index(absolute);
             let source = &old_pages.pages[index];
+            Self::edit_owned_row(&mut self.pages.pages[index], row, |row| {
+                row.cells.resize(columns, Cell::default());
+                row.repair_wide(Color::Default);
+            });
             if columns > usize::from(source.columns)
                 && (columns > usize::from(source.capacity.cols) || spacer_heads[index])
             {
                 row.wrapped = false;
                 row.wrap_continuation = false;
-            }
-            for cell in &row.cells {
-                if cell.style_id != 0 {
-                    *counts.entry(cell.style_id).or_default() += 1;
-                }
-            }
-            if let Some(serial) = row.style_page {
-                for (id, count) in counts {
-                    for _ in 0..-count {
-                        self.release_style(serial, id);
-                    }
-                }
             }
         }
         self.pages.resize_columns(columns as u16, spacer_heads);
@@ -1350,13 +1555,13 @@ impl Screen {
             let index = pages.page_index(absolute);
             let serial = pages.pages[index].serial;
             let row = &mut contents[absolute];
-            if row.style_page == Some(serial) {
+            if row.resource_page == Some(serial) {
                 continue;
             }
-            let previous = row.style_page;
+            let previous = row.resource_page;
             let source =
                 previous.and_then(|owner| old_pages.pages.iter().find(|page| page.serial == owner));
-            let styles: Vec<_> = row
+            let resources: Vec<_> = row
                 .cells
                 .iter_mut()
                 .map(|cell| {
@@ -1368,33 +1573,50 @@ impl Screen {
                         } else {
                             source.map_or(cell.style, |page| *page.styles.get(id))
                         },
+                        cell.grapheme.take(),
                     )
                 })
                 .collect();
-            row.style_page = Some(serial);
-            for (col, (source_id, style)) in styles.into_iter().enumerate() {
-                if source_id == 0 {
-                    continue;
+            row.resource_page = Some(serial);
+            for (col, (source_id, style, grapheme)) in resources.into_iter().enumerate() {
+                if let Some(grapheme) = grapheme {
+                    let allocation = loop {
+                        if let Ok(allocation) = pages.pages[index].graphemes.acquire(grapheme.len) {
+                            break allocation;
+                        }
+                        Self::rebuild_resource_page(
+                            &mut pages.pages[index],
+                            contents.iter_mut(),
+                            Some(PageResource::Graphemes),
+                        )
+                        .expect("copied page resources must fit after growth");
+                    };
+                    contents[absolute].cells[col].grapheme = Some(allocation);
                 }
-                let acquired = pages.pages[index].styles.acquire_with_id(style, source_id);
-                let id = match acquired {
-                    Ok(id) => id,
-                    Err(error) => Self::rebuild_style_page(
-                        &mut pages.pages[index],
-                        contents.iter_mut(),
-                        error == SetFull::OutOfMemory,
-                    )
-                    .and_then(|()| pages.pages[index].styles.acquire_with_id(style, source_id))
-                    .unwrap_or(0),
-                };
-                contents[absolute].cells[col].style_id = id;
-                if id == 0 {
-                    contents[absolute].cells[col].style = Style::default();
+                if source_id != 0 {
+                    let acquired = pages.pages[index].styles.acquire_with_id(style, source_id);
+                    let id = match acquired {
+                        Ok(id) => id,
+                        Err(error) => Self::rebuild_resource_page(
+                            &mut pages.pages[index],
+                            contents.iter_mut(),
+                            (error == SetFull::OutOfMemory).then_some(PageResource::Styles),
+                        )
+                        .and_then(|()| pages.pages[index].styles.acquire_with_id(style, source_id))
+                        .unwrap_or(0),
+                    };
+                    contents[absolute].cells[col].style_id = id;
+                    if id == 0 {
+                        contents[absolute].cells[col].style = Style::default();
+                    }
                 }
                 if let Some(owner) = previous
                     && let Some(page) = pages.pages.iter_mut().find(|page| page.serial == owner)
                 {
                     page.styles.release(source_id);
+                    if let Some(grapheme) = grapheme {
+                        page.graphemes.release(grapheme);
+                    }
                 }
             }
         }
@@ -1419,30 +1641,25 @@ impl Screen {
             .take(usize::from(page.rows))
             .any(|row| row.cells.last().is_some_and(|cell| cell.spacer_head));
         let copy_rows = columns > usize::from(page.capacity.cols) || spacer_head;
+        let range = absolute - page_row..absolute - page_row + usize::from(page.rows);
+        let index = self.pages.page_index(absolute);
         self.release_cursor_style();
         let old_pages = self.pages.clone();
-        let range = self
-            .pages
-            .extend_page(absolute, columns as u16, spacer_head);
         let mut contents: Vec<_> = self.history.drain(..).chain(self.rows.drain(..)).collect();
         for row in &mut contents[range.clone()] {
-            let old_ids: Vec<_> = row.cells.iter().map(|cell| cell.style_id).collect();
-            row.cells.resize(columns, Cell::default());
-            row.repair_wide(Color::Default);
+            Self::edit_owned_row(&mut self.pages.pages[index], row, |row| {
+                row.cells.resize(columns, Cell::default());
+                row.repair_wide(Color::Default);
+            });
             if copy_rows {
                 // Native page copying into a wider blank row preserves the
                 // destination's wrap flags because the copied range is partial.
                 row.wrapped = false;
                 row.wrap_continuation = false;
             }
-            if let Some(serial) = row.style_page {
-                for (old_id, cell) in old_ids.into_iter().zip(&row.cells) {
-                    if old_id != cell.style_id {
-                        self.release_style(serial, old_id);
-                    }
-                }
-            }
         }
+        self.pages
+            .extend_page(absolute, columns as u16, spacer_head);
         Self::rehome_contents(&mut self.pages, &mut contents, &old_pages);
         self.rows = contents.split_off(history);
         self.history = contents.into();
@@ -1538,7 +1755,7 @@ impl Screen {
 
     pub(crate) fn push_history(&mut self, row: Row) {
         if self.limits.bytes == Some(0) {
-            self.release_row_styles(&row);
+            self.release_row_resources(&row);
             self.discard_row(row.id);
             return;
         }
@@ -1604,7 +1821,7 @@ impl Screen {
         }
         for _ in 0..count {
             let row = self.history.pop_front().unwrap();
-            self.release_row_styles(&row);
+            self.release_row_resources(&row);
             self.history_bytes = self.history_bytes.saturating_sub(row.storage_bytes());
             self.discard_row(row.id);
         }
@@ -1820,23 +2037,48 @@ impl Screen {
                     } else {
                         *source_page.styles.get(cell.style_id)
                     };
-                    let native_id = self
-                        .reflow_style(&mut output, &mut line, source_style, cell.style_id)
-                        .unwrap_or(0);
+                    let source_id = cell.style_id;
+                    let grapheme = cell.grapheme;
                     let mut cell = cell.clone();
-                    cell.style_id = native_id;
-                    if native_id == 0 && source_style != Style::default() {
-                        cell.style = Style::default();
-                    }
+                    cell.style_id = 0;
+                    cell.grapheme = None;
                     if cols == 1 && cell.width == 2 {
                         cell.text.clear();
                     }
                     cell.width = width as u8;
-                    line.cells[x] = cell.clone();
+                    line.cells[x] = cell;
+                    let index = self.pages.page_index(output.len());
+                    line.resource_page = Some(self.pages.pages[index].serial);
+                    if let Some(grapheme) = grapheme.filter(|_| !line.cells[x].text.is_empty()) {
+                        let allocation = loop {
+                            if let Ok(allocation) =
+                                self.pages.pages[index].graphemes.acquire(grapheme.len)
+                            {
+                                break allocation;
+                            }
+                            Self::rebuild_resource_page(
+                                &mut self.pages.pages[index],
+                                output.iter_mut().chain(std::iter::once(&mut line)),
+                                Some(PageResource::Graphemes),
+                            )
+                            .expect("reflow graphemes must fit after page growth");
+                        };
+                        line.cells[x].grapheme = Some(allocation);
+                    }
+                    let native_id = self
+                        .reflow_style(&mut output, &mut line, source_style, source_id)
+                        .unwrap_or(0);
+                    let cell = &mut line.cells[x];
+                    cell.style_id = native_id;
+                    if native_id == 0 && source_style != Style::default() {
+                        cell.style = Style::default();
+                    }
                     if width == 2 {
                         let index = self.pages.page_index(output.len());
                         self.pages.pages[index].styles.retain(cell.style_id);
+                        let mut cell = cell.clone();
                         cell.text.clear();
+                        cell.grapheme = None;
                         cell.width = 0;
                         line.cells[x + 1] = cell;
                     }
@@ -1900,7 +2142,7 @@ impl Screen {
                 })
             {
                 let row = output.pop().unwrap();
-                self.release_row_styles(&row);
+                self.release_row_resources(&row);
             }
             if self.pages.total_rows() > output.len() {
                 self.pages.truncate(output.len());
@@ -2056,7 +2298,7 @@ impl Screen {
             })
         {
             let row = contents.pop().unwrap();
-            self.release_row_styles(&row);
+            self.release_row_resources(&row);
             trim -= 1;
         }
         if self.pages.total_rows() > contents.len() {
@@ -2077,7 +2319,7 @@ impl Screen {
         let width = usize::from(self.pages.pages.back().unwrap().columns);
         contents.push(self.blank_row(width, Color::Default));
         for row in contents.drain(..removed) {
-            self.release_row_styles(&row);
+            self.release_row_resources(&row);
             self.discard_row(row.id);
         }
     }
@@ -2086,7 +2328,7 @@ impl Screen {
 type GridPointKey = (u64, usize);
 
 #[cfg(test)]
-mod style_tests {
+mod resource_tests {
     use super::*;
     use crate::Terminal;
     use crate::page_layout::PageCapacity;
@@ -2120,7 +2362,7 @@ mod style_tests {
             Row::new(1, 80, Color::Default),
         ];
         for row in &mut rows {
-            row.style_page = Some(original.serial);
+            row.resource_page = Some(original.serial);
         }
         for (cell, style) in rows[0].cells.iter_mut().zip(colliding) {
             cell.style = style;
@@ -2128,6 +2370,9 @@ mod style_tests {
         }
         rows[1].cells[0].style = ordinary;
         rows[1].cells[0].style_id = ordinary_id;
+        rows[0].cells[0].text = "a\u{301}\u{302}\u{303}\u{304}\u{305}".into();
+        let grapheme = original.graphemes.acquire(5).unwrap();
+        rows[0].cells[0].grapheme = Some(grapheme);
         let ids: Vec<_> = rows
             .iter()
             .flat_map(|row| row.cells.iter().map(|cell| cell.style_id))
@@ -2139,10 +2384,16 @@ mod style_tests {
             let mut page = original.clone();
             let mut copied_rows = rows.clone();
             assert_eq!(
-                Screen::rebuild_style_page(&mut page, copied_rows.iter_mut(), grow),
+                Screen::rebuild_resource_page(
+                    &mut page,
+                    copied_rows.iter_mut(),
+                    grow.then_some(PageResource::Styles)
+                ),
                 Err(SetFull::OutOfMemory)
             );
             assert_eq!(page.capacity, capacity);
+            assert_eq!(copied_rows[0].cells[0].grapheme, Some(grapheme));
+            page.graphemes.assert_allocations(std::iter::once(grapheme));
             assert_eq!(
                 copied_rows
                     .iter()
@@ -2181,7 +2432,7 @@ mod style_tests {
         assert_eq!(viewport.pages.pages[0].rows, source.pages.pages[0].rows);
         for (row, original) in viewport.rows.iter().zip(&source.rows) {
             assert_eq!(row.cells, original.cells);
-            assert_eq!(row.style_page, None);
+            assert_eq!(row.resource_page, None);
             assert!(row.cells.iter().all(|cell| cell.style_id == 0));
         }
         let point = viewport.point(0, 1).unwrap();
@@ -2199,11 +2450,21 @@ mod style_tests {
 
     fn assert_references(screen: &Screen) {
         let mut expected: HashMap<(u64, u16), usize> = HashMap::new();
+        let mut graphemes: HashMap<u64, Vec<GraphemeAllocation>> = HashMap::new();
         for (absolute, row) in screen.all_rows().enumerate() {
             let serial = screen.pages.page_at(absolute).0.serial;
             for cell in &row.cells {
+                assert_eq!(
+                    cell.text.chars().count().saturating_sub(1),
+                    cell.grapheme
+                        .map_or(0, |allocation| usize::from(allocation.len))
+                );
+                if let Some(allocation) = cell.grapheme {
+                    assert_eq!(row.resource_page, Some(serial));
+                    graphemes.entry(serial).or_default().push(allocation);
+                }
                 if cell.style_id != 0 {
-                    assert_eq!(row.style_page, Some(serial));
+                    assert_eq!(row.resource_page, Some(serial));
                     *expected.entry((serial, cell.style_id)).or_default() += 1;
                 }
             }
@@ -2220,6 +2481,12 @@ mod style_tests {
             *expected.entry((serial, id)).or_default() += 1;
         }
         for page in &screen.pages.pages {
+            page.graphemes.assert_allocations(
+                graphemes
+                    .remove(&page.serial)
+                    .unwrap_or_default()
+                    .into_iter(),
+            );
             for (id, _) in page.styles.iter() {
                 assert_eq!(
                     usize::from(page.styles.reference_count(id)),
@@ -2230,6 +2497,67 @@ mod style_tests {
             }
         }
         assert!(expected.is_empty(), "cells referenced a dead style");
+        assert!(
+            graphemes.is_empty(),
+            "cells referenced a retired grapheme page"
+        );
+    }
+
+    #[test]
+    fn live_grapheme_allocations_survive_mutations_and_restore() {
+        let mut terminal = Terminal::new(1024, 2, 100);
+        terminal.feed("a\u{301}".repeat(512).as_bytes());
+        assert_eq!(
+            terminal.screen().pages.pages[0].capacity.grapheme_bytes,
+            8192
+        );
+        terminal.feed("a\u{301}".as_bytes());
+        assert_eq!(
+            terminal.screen().pages.pages[0].capacity.grapheme_bytes,
+            235520
+        );
+        assert_references(terminal.screen());
+
+        for columns in [80, 1024] {
+            for length in [5, 64] {
+                let cluster = format!("a{}", "\u{301}".repeat(length));
+                let mut terminal = Terminal::with_limits(columns, 4, ScrollbackLimits::default());
+                terminal.feed(format!("\x1b[31m{}", cluster.repeat(513)).as_bytes());
+                assert_references(terminal.screen());
+                for sequence in [
+                    "\x1b[H\x1b[2@",
+                    "\x1b[2P",
+                    "\x1b[20X",
+                    "\x1b[2S",
+                    "\x1b[2T",
+                    "\x1b[2;4r\x1b[4;1H\n",
+                    "\x1b[r\x1b[?69h\x1b[2;79s\x1b[2S",
+                    "\x1b[?69l\x1b[H",
+                    "\x1b[?2027h\x1b[1;80H☺\u{200d}❤",
+                ] {
+                    terminal.feed(sequence.as_bytes());
+                    assert_references(terminal.screen());
+                }
+                for (cols, rows) in [(24, 6), (120, 3), (3, 4), (80, 4)] {
+                    terminal.resize(cols, rows);
+                    assert_references(terminal.screen());
+                }
+                let data = crate::snapshot::encode_to_vec(&terminal).unwrap();
+                let mut restored =
+                    crate::snapshot::decode(data.as_slice(), Default::default()).unwrap();
+                assert_references(restored.screen());
+                restored.feed(format!("\x1b[H\x1b[2J{}", cluster.repeat(513)).as_bytes());
+                assert_references(restored.screen());
+                let viewport = restored.screen().snapshot_viewport();
+                assert_eq!(viewport.pages.pages[0].graphemes.used_bytes(), 0);
+                assert!(
+                    viewport
+                        .all_rows()
+                        .all(|row| row.cells.iter().all(|cell| cell.grapheme.is_none()))
+                );
+                assert_references(restored.screen());
+            }
+        }
     }
 
     #[test]

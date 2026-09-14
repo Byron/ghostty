@@ -132,14 +132,24 @@ frame, playback state, loop budget/count and shown-at timestamp. A plain image
 has an implicit stopped root frame. Rust keeps its public absolute-deadline API;
 the adapter reports the corresponding delay, matching the native API.
 
-The 90 fixtures cover both screens, multiple images, stopped/loading/running
+The 90 timing fixtures cover both screens, multiple images, stopped/loading/running
 states, finite loops, gapless frames, late ticks, clock restarts and saturation,
 unplaced/replaced placements, terminal reset, frame arrival while loading, and
 client-driven controls. Unplaced images schedule no redraws; loading and finite
 loops park on the last displayed frame. Controls selecting the current frame
 or continuing playback preserve the deadline and do not invalidate its pixels.
-Frame editing/deletion, snapshot restoration and resource limits still need
-complete animation coverage.
+
+An additional 13 lifecycle scenarios (39 comparisons) are selected with
+`--protocols --case protocol/graphics/animation/lifecycle/`. They cover deleting
+the root/current/neighboring frames while retaining surviving pixels and
+deadlines; frame edits, composition and replies; PNG/zlib/raw frame uploads;
+excess/short raw data; chunk completion during playback or after deletion; and
+same-ID replacement through screen switches and reset. These checks found and
+fixed native frame-deletion indexing and chunk identity bugs, alongside Rust
+deletion, composition and raw-frame decoding differences. A renderer regression
+checks uploaded pixels and texture reuse through the same basic lifecycle.
+These are selected transitions, not an exhaustive editing/deletion matrix;
+snapshot restoration, resource limits and complete lifecycle coverage remain.
 
 
 `--protocols --case protocol/graphics/placements/placeholder/` compares native

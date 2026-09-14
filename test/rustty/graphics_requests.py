@@ -183,3 +183,18 @@ def requests():
                     b"\x1b_Ga=c,i=1,r=1,c=2,w=1,X=2\x1b\\",
                     b"\x1b_Ga=c,i=1,r=1,c=1,w=1\x1b\\",
                     b"\x1b_Ga=c,i=1,r=1,c=1,w=1,x=1,C=1\x1b\\"])
+    yield animation("lifecycle/frame-formats", [base,
+                    upload(png(1, 1, 8, 6, b"\0\x01\x02\x03\xff"), b"a=f,i=1,f=100"),
+                    upload(zlib.compress(bytes([4, 5, 6])), b"a=f,i=1,f=24,s=1,v=1,o=z"),
+                    raw(b"a=f,i=1,r=2", bytes([7, 8, 9, 255, 99])), control(b"c=2"),
+                    raw(b"a=f,i=1,r=2", bytes([10, 11, 12])),
+                    raw(b"a=q,i=1", bytes([7, 8, 9, 255, 99]))])
+    start = raw(b"a=f,i=1,m=1,z=25", bytes([1, 2]))
+    end = b"\x1b_Gm=0;A/8=\x1b\\"
+    yield animation("lifecycle/chunks", [base, start, end, control(b"c=2"),
+                    start, b"\x1b_Ga=d,d=I,i=1\x1b\\", end, base])
+    yield animation("lifecycle/chunks-during-playback", [frames((10, 20)) + control(b"s=3"),
+                    100, start, 110, end, 130])
+    yield animation("lifecycle/retransmit", [frames((10, 20)) + control(b"c=2,s=3"), 100,
+                    raw(b"i=1,a=T,C=1", bytes([77, 88, 99, 255])), 200,
+                    b"\x1b[?1049h" + raw(b"i=1,a=T,C=1"), b"\x1b[?1049l", b"\x1bc", 300])

@@ -121,6 +121,9 @@ pub struct Defaults {
     pub enquiry: Vec<u8>,
     pub xtversion: Vec<u8>,
     pub size_reports: bool,
+    /// Actual host geometry, independent of DEC's forced 80/132-column grid.
+    /// Also restores the host grid when DEC mode 40 changes.
+    pub size: Option<Size>,
 }
 
 impl Default for Defaults {
@@ -134,6 +137,7 @@ impl Default for Defaults {
                 .as_bytes()
                 .to_vec(),
             size_reports: true,
+            size: None,
         }
     }
 }
@@ -146,7 +150,9 @@ impl Defaults {
                 self.device_attributes.as_ref().map(|a| a.encode(kind))
             }
             Query::Enquiry => enquiry(&self.enquiry),
-            Query::Size(style) => self.size_reports.then(|| size.encode(style)),
+            Query::Size(style) => self
+                .size_reports
+                .then(|| self.size.unwrap_or(size).encode(style)),
             Query::Xtversion => xtversion(&self.xtversion),
         }
     }

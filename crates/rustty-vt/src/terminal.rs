@@ -302,8 +302,8 @@ impl Terminal {
     }
 
     /// Feed input with runtime `query_defaults` and return deferred host effects.
-    /// Query replies use the current terminal geometry. For fully headless or
-    /// readonly hosts, use `feed_with_handler` and opt into the needed callbacks.
+    /// Query replies use host geometry when supplied, otherwise terminal geometry.
+    /// Readonly hosts use `feed_with_handler` and opt into the needed callbacks.
     /// DND effects carry event tags; use `feed_with_handler` to observe the state
     /// at each event instead of the final state after the complete input batch.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Effect> {
@@ -1861,6 +1861,11 @@ impl Terminal {
                         } else {
                             screen.cursor.visible = value;
                         }
+                    }
+                }
+                40 => {
+                    if let Some(size) = self.query_defaults.size {
+                        self.resize(size.columns, size.rows);
                     }
                 }
                 47 | 1047 | 1049 => self.switch_screen(mode, value),

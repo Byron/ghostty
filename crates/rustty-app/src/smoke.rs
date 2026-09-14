@@ -344,7 +344,7 @@ impl Smoke {
                     .current_monitor()
                     .and_then(|monitor| monitor.refresh_rate_millihertz())
                     .map(|rate| f64::from(rate) / 1000.0);
-                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","reverse-video","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
+                let report = serde_json::json!({"passed":true,"capture_mode":if self.offscreen { "offscreen" } else { "surface" },"checks":["native-window","metal-wgpu-frame","pty-input-output","four-splits","tab-creation","quadrant-focus-and-zoom","cwd-uri-decoding","osc-progress","progress-animation","hover-scrolling","alternate-scrolling","file-drop-targeting","osc-pointer","reverse-video","dec-column-mode","synchronized-output","hidden-tab-titles","retained-pane-content","workspace-roundtrip","undo-keeps-pty","idle-rendering"],"frames":host.frames,"idle_frames":host.frames-self.idle_frames,"hidden_title_frames":self.hidden_title_frames,"header_updates":{"frames":self.header_frames,"pane_prepares":self.header_prepares},"progress_animation":{"frames":self.progress_frames,"seconds":self.progress_seconds,"fps":self.progress_frames as f64/self.progress_seconds,"monitor_refresh_hz":refresh_hz},"panes":app.panes.len(),"idle_phase_events":self.events,"hover_required":self.hover,"pointer":self.pointer.map(|position|[position.x,position.y])});
                 fs::write(
                     self.directory.join("result.json"),
                     serde_json::to_vec_pretty(&report)?,
@@ -531,6 +531,29 @@ fn check_terminal_frames(
                 return Err("reverse video did not change the rendered default colors".into());
             }
         }
+        let columns = app.panes[&id].session.terminal()?.cols;
+        for (sequence, expected) in [
+            (b"\x1b[?40h\x1b[?3h".as_slice(), 132),
+            (b"\x1b[?3l", 80),
+            (b"\x1b[?40l", columns),
+        ] {
+            let generation = {
+                let mut terminal = app.panes[&id].session.terminal()?;
+                terminal.feed(sequence);
+                terminal.generation
+            };
+            app.draw(event_loop, host)?;
+            if app.panes[&id].session.terminal()?.cols != expected
+                || host.prepared[&id].key.generation != generation
+            {
+                return Err("redraw undid DEC column mode or failed to render its grid".into());
+            }
+        }
+        app.panes[&id]
+            .session
+            .terminal()?
+            .feed(b"\x1b[2;3Hcomplete frame");
+        app.draw(event_loop, host)?;
         let previous = &host.prepared[&id];
         let generation = previous.key.generation;
         let cursor = previous.key.cursor;
@@ -585,7 +608,7 @@ fn check_terminal_frames(
     host.repaint();
     result?;
     eprintln!(
-        "Native smoke: reverse video changed default colors; synchronized output held partial frames and cursors, then released immediately"
+        "Native smoke: reverse video and DEC column mode rendered; synchronized output held partial frames and cursors, then released immediately"
     );
     Ok(())
 }

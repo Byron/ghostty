@@ -123,6 +123,7 @@ impl Session {
         terminal.linefeed_mode_events = true;
         terminal.query_defaults.color_scheme = options.color_scheme;
         terminal.query_defaults.focused = Some(options.focused);
+        terminal.query_defaults.size = Some(terminal.query_size());
         terminal.visible = options.visible;
         apply_appearance(&mut terminal, config);
         terminal.working_directory = options
@@ -314,22 +315,23 @@ impl Session {
     pub fn resize(&self, cols: u16, rows: u16, width_px: u16, height_px: u16) -> io::Result<()> {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        let size = query::Size {
+            columns: cols,
+            rows,
+            cell_width: u32::from(width_px) / u32::from(cols),
+            cell_height: u32::from(height_px) / u32::from(rows),
+        };
         let mut terminal = self.terminal()?;
-        if terminal.cols == cols
-            && terminal.rows == rows
+        // A redraw with unchanged host geometry must not undo DECCOLM.
+        if terminal.query_defaults.size == Some(size)
             && terminal.width_px == u32::from(width_px)
             && terminal.height_px == u32::from(height_px)
         {
             return Ok(());
         }
-        let effects = terminal.resize_with_cell_size(
-            cols,
-            rows,
-            Some((
-                u32::from(width_px) / u32::from(cols),
-                u32::from(height_px) / u32::from(rows),
-            )),
-        );
+        terminal.query_defaults.size = Some(size);
+        let effects =
+            terminal.resize_with_cell_size(cols, rows, Some((size.cell_width, size.cell_height)));
         terminal.set_pixel_size(width_px.into(), height_px.into());
         drop(terminal);
         let mut reply = Vec::new();
@@ -774,6 +776,58 @@ fn command(config: &Config, options: &SessionOptions) -> io::Result<CommandBuild
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn column_mode_survives_redraw_until_host_geometry_changes() {
+        let session = Session::spawn(
+            &Config::default(),
+            SessionOptions {
+                command: Some(Command::Direct(vec!["/bin/sleep".into(), "30".into()])),
+                ..SessionOptions::default()
+            },
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        session.resize(100, 10, 900, 180).unwrap();
+        session.terminal().unwrap().feed(b"\x1b[?40h\x1b[?3h");
+        let generation = session.terminal().unwrap().generation;
+        session.resize(100, 10, 900, 180).unwrap();
+        {
+            let mut terminal = session.terminal().unwrap();
+            assert_eq!(terminal.cols, 132);
+            assert_eq!(terminal.generation, generation);
+            assert_eq!(
+                terminal.feed(b"\x1b[14t\x1b[16t\x1b[18t\x1b[?2048h"),
+                [
+                    Effect::Write(b"\x1b[4;180;900t".to_vec()),
+                    Effect::Write(b"\x1b[6;18;9t".to_vec()),
+                    Effect::Write(b"\x1b[8;10;100t".to_vec()),
+                    Effect::Write(b"\x1b[48;10;100;180;900t".to_vec()),
+                ]
+            );
+            terminal.feed(b"\x1b[?3l");
+        }
+        session.resize(100, 10, 900, 180).unwrap();
+        {
+            let mut terminal = session.terminal().unwrap();
+            assert_eq!(terminal.cols, 80);
+            terminal.feed(b"\x1b[?40l");
+            assert_eq!(terminal.cols, 100);
+            terminal.feed(b"\x1b[?40h\x1b[?3h\x1b[?40h");
+            assert_eq!(terminal.cols, 100);
+            terminal.feed(b"\x1b[?3h");
+        }
+        // Even a pixel-only host resize restores the actual window grid.
+        session.resize(100, 10, 901, 180).unwrap();
+        assert_eq!(session.terminal().unwrap().cols, 100);
+        session.terminal().unwrap().feed(b"\x1b[?3h");
+        session.resize(90, 11, 810, 198).unwrap();
+        let mut terminal = session.terminal().unwrap();
+        assert_eq!((terminal.cols, terminal.rows), (90, 11));
+        terminal.feed(b"\x1b[?3h\x1b[?40l");
+        assert_eq!((terminal.cols, terminal.rows), (90, 11));
+    }
 
     #[cfg(unix)]
     #[test]

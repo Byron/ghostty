@@ -176,6 +176,12 @@ deletion, partial-region indexing, history clearing, narrowing and widening,
 with and without external pins. The minimized `generated/2/187` cursor failure
 also remains in the smoke suite.
 
+`--grid --case grid/resize/empty-continuation/` covers blank wrap continuations
+after narrowing and widening. Dropping an empty continuation does not add a hard
+line break; cursor/selection pins, prompt metadata and backgrounds can retain
+the row instead. The 216 fixtures pass 648 delivery comparisons, and the smoke
+suite retains the minimized `generated/2/291` case.
+
 `--grid --case grid/selectors/` compares `Screen::select_word`,
 `select_word_between`, `select_line`, `select_all` and `select_output` against
 the native queries.

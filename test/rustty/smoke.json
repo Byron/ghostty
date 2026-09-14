@@ -972,5 +972,39 @@
     "generated_sources": [
       "generated/2/187"
     ]
+  },
+  {
+    "request": {
+      "id": "terminal/resize/empty-wrap-continuation",
+      "cols": 12,
+      "rows": 4,
+      "operations": [
+        {
+          "op": "write",
+          "data": "09"
+        },
+        {
+          "op": "resize",
+          "cols": 3,
+          "rows": 4
+        },
+        {
+          "op": "write",
+          "data": "0a"
+        },
+        {
+          "op": "resize",
+          "cols": 7,
+          "rows": 3
+        }
+      ]
+    },
+    "covers": [
+      "terminal.resize",
+      "terminal.cursor"
+    ],
+    "generated_sources": [
+      "generated/2/291"
+    ]
   }
 ]

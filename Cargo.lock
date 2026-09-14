@@ -3065,6 +3065,10 @@ dependencies = [
  "objc2-core-text",
  "png",
  "tiny-skia",
+ "unicode-segmentation",
+ "windows",
+ "windows-core",
+ "windows-numerics",
 ]
 
 [[package]]

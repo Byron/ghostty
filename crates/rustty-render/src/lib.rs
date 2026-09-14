@@ -2,9 +2,9 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod prepare;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use prepare::{Preedit, RenderOptions, Renderer};
 
 #[derive(Debug)]

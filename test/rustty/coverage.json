@@ -174,7 +174,7 @@
     {
       "id": "snapshot.streaming",
       "status": "partial",
-      "remaining": "READY/history/FINISH state and source offsets are compared with live mutations and transport tails; complete reset-generation behavior, continuation replay, I/O failures and limits remain."
+      "remaining": "READY/history/FINISH state and source offsets are compared with live mutations and transport tails. Width changes away/back, permanent discard after a skipped PAGE, reset, alternate-screen recreation, height changes and limits pass 78 comparisons. Complete mutation-policy combinations, continuation replay and I/O failures remain."
     },
     {
       "id": "snapshot.fixtures",

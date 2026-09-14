@@ -867,7 +867,6 @@ pub struct Decoder<R> {
     finished: bool,
     cols: u16,
     identities: [Option<u64>; 2],
-    reflow_generations: [u64; 2],
     history_rows: [u64; 2],
     history_seen: [bool; 2],
     history_remaining: usize,
@@ -884,7 +883,6 @@ impl<R: Read> Decoder<R> {
             finished: false,
             cols: 0,
             identities: [None; 2],
-            reflow_generations: [0; 2],
             history_rows: [0; 2],
             history_seen: [false; 2],
             history_remaining: 0,
@@ -1077,7 +1075,6 @@ impl<R: Read> Decoder<R> {
             seen[key] = true;
             self.history_rows[key] = extent;
             self.identities[key] = Some(screen.metadata.identity);
-            self.reflow_generations[key] = screen.metadata.reflow_generation;
             if key == 0 {
                 terminal.primary = screen;
             } else {
@@ -1459,10 +1456,8 @@ impl<R: Read> Decoder<R> {
                 let mut count = 0;
                 if sequence.apply
                     && t.cols == self.cols
-                    && let Some(screen) = target.filter(|s| {
-                        Some(s.metadata.identity) == self.identities[sequence.key]
-                            && s.metadata.reflow_generation == self.reflow_generations[sequence.key]
-                    })
+                    && let Some(screen) = target
+                        .filter(|s| Some(s.metadata.identity) == self.identities[sequence.key])
                 {
                     let page = self.decode_page(&payload)?;
                     let mut rows = page.rows;
@@ -1575,7 +1570,6 @@ impl Default for TerminalMetadata {
 #[derive(Clone, Debug)]
 pub(crate) struct ScreenMetadata {
     pub identity: u64,
-    pub reflow_generation: u64,
     pub hyperlink_implicit_id: u32,
     pub protected_mode: u8,
     pub semantic_click: [u8; 2],
@@ -1587,7 +1581,6 @@ impl Default for ScreenMetadata {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
             identity: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            reflow_generation: 0,
             hyperlink_implicit_id: 0,
             protected_mode: 0,
             semantic_click: [0; 2],

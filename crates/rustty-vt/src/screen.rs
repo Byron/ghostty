@@ -1570,9 +1570,6 @@ impl Screen {
         self.release_cursor_style();
         let old_cols = self.columns;
         let columns_changed = cols != old_cols;
-        if columns_changed {
-            self.metadata.reflow_generation = self.metadata.reflow_generation.wrapping_add(1);
-        }
         self.columns = cols;
         let old_rows = self.rows.len();
         let cursor_y = self.cursor.row;

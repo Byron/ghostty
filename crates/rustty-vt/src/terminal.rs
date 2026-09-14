@@ -519,7 +519,6 @@ impl Terminal {
         );
         let limits = self.primary.limits;
         let primary_identity = self.primary.metadata.identity;
-        let reflow_generation = self.primary.metadata.reflow_generation;
         let terminfo_name = self.terminfo_name.take();
         let query_defaults = self.query_defaults.clone();
         let title_report = self.title_report;
@@ -562,7 +561,6 @@ impl Terminal {
         // RIS resets the existing primary screen. A streaming restore may
         // still deliver older history into that same screen afterward.
         self.primary.metadata.identity = primary_identity;
-        self.primary.metadata.reflow_generation = reflow_generation;
         self.terminfo_name = terminfo_name;
         self.query_defaults = query_defaults;
         self.title_report = title_report;

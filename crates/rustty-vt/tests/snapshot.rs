@@ -280,6 +280,42 @@ fn streaming_restore_obeys_page_budget_and_discards_history_after_resize() {
 }
 
 #[test]
+fn streaming_history_checks_width_when_each_page_arrives() {
+    for before in 0..=1 {
+        for consume_while_narrow in [false, true] {
+            let bytes = fixture();
+            let mut decoder = Decoder::new(bytes.as_slice(), DecodeOptions::default());
+            let mut terminal = decoder.ready().unwrap();
+            for _ in 0..before {
+                assert_eq!(
+                    decoder.next_history(&mut terminal).unwrap().unwrap().rows,
+                    2
+                );
+            }
+            terminal.resize(3, 3);
+            if consume_while_narrow {
+                assert_eq!(
+                    decoder.next_history(&mut terminal).unwrap().unwrap().rows,
+                    0
+                );
+            }
+            terminal.resize(2, 3);
+            while let Some(progress) = decoder.next_history(&mut terminal).unwrap() {
+                assert_eq!(progress.rows, if consume_while_narrow { 0 } else { 2 });
+            }
+            let expected = if !consume_while_narrow {
+                vec!["A", "", "B", ""]
+            } else if before == 1 {
+                vec!["B", ""]
+            } else {
+                vec![]
+            };
+            assert_eq!(text(&terminal.primary_screen().history), expected);
+        }
+    }
+}
+
+#[test]
 fn ghostty_sparse_page_preserves_styles_links_graphemes_and_wide_cells() {
     let mut stream = records(&encode_to_vec(&Terminal::new(3, 2, 100)).unwrap());
     stream[1].1[2..4].copy_from_slice(&1u16.to_le_bytes());

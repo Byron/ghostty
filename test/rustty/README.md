@@ -592,6 +592,10 @@ for OSC 52, which has no write acknowledgement or session grants. Cases compare
 binary data, text MIME preference, selectors, base64 validation, terminators,
 host decisions and ordering with other effects. No system clipboard is accessed.
 
+OSC 1337 `Copy=:` uses the same clipboard write callback and policy. Its cases
+also compare the fixed capture limit, case-insensitive key, rejected empty/query
+payloads, callback absence, ordering and direct reset during capture.
+
 Kitty OSC 5522 cases additionally compare metadata validation, read MIME filtering,
 targets listings, DATA chunk boundaries, streamed write transactions, aliases,
 write acknowledgements and remembered grants. Both adapters use the native

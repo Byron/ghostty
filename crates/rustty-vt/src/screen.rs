@@ -1135,10 +1135,15 @@ impl Screen {
         row.dirty = true;
     }
 
+    fn cursor_page_index(&self) -> usize {
+        self.pages
+            .page_index_from_end(self.rows.len() - 1 - self.cursor.row)
+    }
+
     /// Write the eligible ASCII prefix; the caller handles complex cells and wraps.
     pub(crate) fn write_cursor_ascii(&mut self, bytes: &[u8]) -> usize {
         self.sync_cursor_resources();
-        let index = self.pages.page_index(self.history.len() + self.cursor.row);
+        let index = self.cursor_page_index();
         let page = &mut self.pages.pages[index];
         let row = &mut self.rows[self.cursor.row];
         let style_id = self.cursor_style.map_or(0, |(_, id)| id);
@@ -1187,7 +1192,7 @@ impl Screen {
             previous.cells.last_mut().unwrap().spacer_head = false;
             previous.dirty = true;
         }
-        let index = self.pages.page_index(self.history.len() + y);
+        let index = self.cursor_page_index();
         let page = &mut self.pages.pages[index];
         let row = &mut self.rows[y];
         row.resource_page = Some(page.serial);
@@ -1268,9 +1273,8 @@ impl Screen {
     }
 
     fn acquire_cursor_link(&mut self, link: &Hyperlink) -> Option<(u64, u16)> {
-        let absolute = self.history.len() + self.cursor.row;
         loop {
-            let index = self.pages.page_index(absolute);
+            let index = self.cursor_page_index();
             match self.pages.pages[index].links.insert(link) {
                 Ok(id) => return Some((self.pages.pages[index].serial, id)),
                 Err(error) => self
@@ -1312,7 +1316,7 @@ impl Screen {
         {
             return;
         }
-        let index = self.pages.page_index(self.history.len() + self.cursor.row);
+        let index = self.cursor_page_index();
         let serial = self.pages.pages[index].serial;
         let moved = self.cursor_link.is_some_and(|(owner, _)| owner != serial);
         if moved {
@@ -1321,7 +1325,7 @@ impl Screen {
         }
         self.sync_cursor_style();
         if let Some((owner, id)) = self.cursor_link {
-            let page = self.pages.page_at(self.history.len() + self.cursor.row).0;
+            let page = &self.pages.pages[self.cursor_page_index()];
             if owner == page.serial {
                 let link = page.links.get(id);
                 if self.cursor.hyperlink.as_ref().is_some_and(|cursor_link| {
@@ -1341,9 +1345,8 @@ impl Screen {
     }
 
     pub(crate) fn set_cell_cursor_hyperlink(&mut self, col: usize) {
-        let absolute = self.history.len() + self.cursor.row;
         while let Some((_, id)) = self.cursor_link {
-            let index = self.pages.page_index(absolute);
+            let index = self.cursor_page_index();
             if self.pages.pages[index].links.retain_cell(id).is_ok() {
                 self.rows[self.cursor.row].cells[col].link_id = id;
                 return;
@@ -1409,7 +1412,7 @@ impl Screen {
         let absolute = self.history.len() + self.cursor.row;
         match self.acquire_style(absolute, self.cursor.style, None) {
             Ok(id) => {
-                self.cursor_style = Some((self.pages.page_at(absolute).0.serial, id));
+                self.cursor_style = Some((self.pages.pages[self.cursor_page_index()].serial, id));
                 true
             }
             Err(_) => false,
@@ -1422,20 +1425,10 @@ impl Screen {
         if self.cursor_style.is_none() && self.cursor.style == Style::default() {
             return;
         }
-        let serial = self
-            .pages
-            .page_at(self.history.len() + self.cursor.row)
-            .0
-            .serial;
+        let page = &self.pages.pages[self.cursor_page_index()];
         if let Some((owner, id)) = self.cursor_style
-            && owner == serial
-            && *self
-                .pages
-                .page_at(self.history.len() + self.cursor.row)
-                .0
-                .styles
-                .get(id)
-                == self.cursor.style
+            && owner == page.serial
+            && *page.styles.get(id) == self.cursor.style
         {
             return;
         }
@@ -1448,7 +1441,7 @@ impl Screen {
     pub(crate) fn retain_cursor_style_for_cell(&mut self) -> u16 {
         self.sync_cursor_style();
         let id = self.cursor_style.map_or(0, |(_, id)| id);
-        let index = self.pages.page_index(self.history.len() + self.cursor.row);
+        let index = self.cursor_page_index();
         self.pages.pages[index].styles.retain(id);
         self.rows[self.cursor.row].resource_page = Some(self.pages.pages[index].serial);
         id
@@ -1507,7 +1500,7 @@ impl Screen {
     pub(crate) fn append_grapheme(&mut self, col: usize, cp: char) -> Result<(), SetFull> {
         let y = self.cursor.row;
         let absolute = self.history.len() + y;
-        let mut index = self.pages.page_index(absolute);
+        let mut index = self.cursor_page_index();
         let previous = self.rows[y].cells[col].grapheme;
         assert!(previous.is_none_or(|allocation| allocation.len < 64));
         // Save the text before page growth can move its owner. A base scalar
@@ -1526,7 +1519,7 @@ impl Screen {
                 {
                     self.split_resource_page(absolute)?;
                 }
-                index = self.pages.page_index(absolute);
+                index = self.cursor_page_index();
                 self.pages.pages[index]
                     .graphemes
                     .append(self.rows[y].cells[col].grapheme)?
@@ -1878,7 +1871,10 @@ impl Screen {
     }
 
     fn sync_resource_row(&mut self, absolute: usize) {
-        let serial = self.pages.page_at(absolute).0.serial;
+        let index = self
+            .pages
+            .page_index_from_end(self.history.len() + self.rows.len() - 1 - absolute);
+        let serial = self.pages.pages[index].serial;
         let row = self.all_rows().nth(absolute).unwrap();
         if row.resource_page == Some(serial) {
             return;

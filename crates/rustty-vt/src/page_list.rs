@@ -139,6 +139,17 @@ impl PageList {
         panic!("row is outside the page list");
     }
 
+    /// Locate a row by its distance from the last row, skipping history pages.
+    pub fn page_index_from_end(&self, mut distance: usize) -> usize {
+        for (index, page) in self.pages.iter().enumerate().rev() {
+            if distance < usize::from(page.rows) {
+                return index;
+            }
+            distance -= usize::from(page.rows);
+        }
+        panic!("row is outside the page list");
+    }
+
     /// Renew cached-coordinate generations without changing resource owners.
     pub fn invalidate_layout(&mut self, first: usize, last: usize) {
         let start = self.page_index(first);
@@ -425,5 +436,36 @@ impl PageList {
             }
         }
         start..end
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reverse_lookup_matches_forward_after_page_changes() {
+        let mut pages = PageList::default();
+        let capacity = PageCapacity::initial(128).unwrap();
+        for rows in [2, 1, 4] {
+            pages.append(capacity, rows);
+        }
+        let compare = |pages: &PageList| {
+            let total = pages.total_rows();
+            for row in 0..total {
+                assert_eq!(
+                    pages.page_index_from_end(total - row - 1),
+                    pages.page_index(row),
+                    "row={row}, total={total}"
+                );
+            }
+        };
+        compare(&pages);
+        assert!(pages.split(2, 1));
+        compare(&pages);
+        pages.remove_prefix(3);
+        compare(&pages);
+        pages.remove_prefix(2);
+        compare(&pages);
     }
 }

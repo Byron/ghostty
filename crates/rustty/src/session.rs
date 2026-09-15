@@ -826,7 +826,10 @@ mod tests {
                         rustty_vt::Color::Default
                     },
                 );
-                assert_eq!(cells[2].text, "✔️");
+                assert_eq!(
+                    &*terminal.screen().cell_text(&terminal.screen().rows[0], 2),
+                    "✔️"
+                );
                 assert_eq!(
                     (cells[2].width, cells[3].width),
                     if wide { (2, 0) } else { (1, 1) }

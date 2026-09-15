@@ -8,7 +8,7 @@
 //! Column resizes reflow them; edits beyond a narrow row extend it safely.
 use crate::modes::Modes;
 use crate::page_layout::PageCapacity;
-use crate::page_list::PageList;
+use crate::page_list::{Page, PageList};
 use crate::page_resources::{
     GraphemeAdmission, Hyperlink as Link, HyperlinkAdmission, HyperlinkFull, StyleAdmission,
 };
@@ -376,13 +376,11 @@ fn encoding_capacity(
     }
 }
 
-fn encode_page(
-    rows: &[&Row],
-    capacity: PageCapacity,
-    columns: u16,
-    native_styles: &StyleAdmission,
-    native_links: &HyperlinkAdmission,
-) -> io::Result<Vec<u8>> {
+fn encode_page(rows: &[&Row], page: &Page) -> io::Result<Vec<u8>> {
+    let capacity = page.capacity;
+    let columns = page.columns;
+    let native_styles = &page.styles;
+    let native_links = &page.links;
     if rows
         .iter()
         .any(|row| row.cells.len() != usize::from(columns))
@@ -409,9 +407,14 @@ fn encode_page(
     for (row_index, row) in rows.iter().enumerate() {
         let mut words = Vec::with_capacity(usize::from(columns));
         for (col, cell) in row.cells.iter().enumerate() {
-            let mut chars = cell.text.chars();
-            let cp = chars.next().map_or(0, u32::from);
-            let tail: Vec<_> = chars.map(u32::from).collect();
+            let cp = cell.codepoint.map_or(0, u32::from);
+            let tail: Vec<_> = cell
+                .grapheme
+                .map_or("", |allocation| page.graphemes.text(allocation))
+                .chars()
+                .skip(1)
+                .map(u32::from)
+                .collect();
             let mut kind = u64::from(!tail.is_empty());
             let mut content = u64::from(cp);
             if !tail.is_empty() {
@@ -427,7 +430,7 @@ fn encode_page(
             } else {
                 cell.style == blank_style && cell.width == 1 && !cell.spacer_head
             };
-            if cell.text.is_empty() && inline_background {
+            if cell.codepoint.is_none() && inline_background {
                 match cell.style.background {
                     Color::Indexed(index) => {
                         kind = 2;
@@ -598,17 +601,7 @@ pub fn encode(terminal: &Terminal, destination: &mut impl Write) -> io::Result<(
             )?;
             for page in screen.pages.pages.iter().skip(active_page) {
                 let end = start + usize::from(page.rows);
-                record(
-                    destination,
-                    3,
-                    &encode_page(
-                        &rows[start..end],
-                        page.capacity,
-                        page.columns,
-                        &page.styles,
-                        &page.links,
-                    )?,
-                )?;
+                record(destination, 3, &encode_page(&rows[start..end], page)?)?;
                 start = end;
             }
         }
@@ -633,17 +626,7 @@ pub fn encode(terminal: &Terminal, destination: &mut impl Write) -> io::Result<(
             u32_bytes(&mut header, history_pages.len())?;
             record(destination, 4, &header)?;
             for (page, start, end) in history_pages.into_iter().rev() {
-                record(
-                    destination,
-                    3,
-                    &encode_page(
-                        &rows[start..end],
-                        page.capacity,
-                        page.columns,
-                        &page.styles,
-                        &page.links,
-                    )?,
-                )?;
+                record(destination, 3, &encode_page(&rows[start..end], page)?)?;
             }
         }
     }
@@ -1299,8 +1282,7 @@ impl<R: Read> Decoder<R> {
                 match kind {
                     0 | 1 => {
                         if content != 0 {
-                            cell.text
-                                .push(char::from_u32(content).unwrap_or('\u{fffd}'));
+                            cell.codepoint = Some(char::from_u32(content).unwrap_or('\u{fffd}'));
                         }
                     }
                     2 => cell.style.background = Color::Indexed(content as u8),
@@ -1365,7 +1347,7 @@ impl<R: Read> Decoder<R> {
                     .ok_or_else(|| invalid("snapshot suffix overflow"))?,
             )?;
             if let Some(cell) = result.get_mut(row).and_then(|r| r.cells.get_mut(col))
-                && !cell.text.is_empty()
+                && let Some(base) = cell.codepoint
                 && !assigned.contains(&(row, col))
             {
                 let mut suffix = ['\0'; 64];
@@ -1385,7 +1367,10 @@ impl<R: Read> Decoder<R> {
                     && let Ok(allocation) = graphemes.acquire(len as u8)
                 {
                     cell.grapheme = Some(allocation);
-                    cell.text.extend(&suffix[..len]);
+                    let text: String = std::iter::once(base)
+                        .chain(suffix[..len].iter().copied())
+                        .collect();
+                    graphemes.set_text(allocation, text.into());
                     assigned.insert((row, col));
                 }
             }

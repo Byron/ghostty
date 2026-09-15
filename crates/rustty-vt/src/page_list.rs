@@ -327,7 +327,10 @@ impl PageList {
     /// Copy allocation metadata for a detached viewport, preserving its page
     /// boundaries without allocating the live page's resource tables.
     pub fn clone_range(&self, start: usize, rows: usize) -> Self {
-        let mut result = Self::default();
+        let mut result = Self {
+            next_serial: self.next_serial,
+            ..Self::default()
+        };
         let mut offset = 0;
         for page in &self.pages {
             let end = offset + usize::from(page.rows);
@@ -337,13 +340,12 @@ impl PageList {
                     capacity: page.capacity,
                     columns: page.columns,
                     rows: count as u16,
-                    serial: result.next_serial,
+                    serial: page.serial,
                     layout_generation: 0,
                     styles: StyleAdmission::default(),
                     links: HyperlinkAdmission::default(),
                     graphemes: GraphemeAdmission::default(),
                 });
-                result.next_serial = result.next_serial.wrapping_add(1);
             }
             offset = end;
         }

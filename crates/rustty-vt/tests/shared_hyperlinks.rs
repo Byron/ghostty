@@ -1,10 +1,10 @@
-use rustty_vt::{Cell, Cursor, HyperlinkId, Terminal, snapshot};
+use rustty_vt::{Cell, HyperlinkId, Screen, Terminal, snapshot};
 use std::sync::Arc;
 
 #[test]
 fn cells_share_links_through_wide_text_reflow_viewports_and_snapshots() {
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Cell>(), 72);
+    assert_eq!(size_of::<Cell>(), 56);
 
     let mut terminal = Terminal::new(80, 4, 1000);
     terminal.feed(b"\x1b]8;id=shared;https://example.org/\xff\x07");
@@ -75,24 +75,34 @@ fn renewing_the_cursor_link_preserves_published_cell_identities() {
 
 #[test]
 fn shared_links_preserve_flat_cell_and_cursor_json() {
-    for mut value in [
-        serde_json::to_value(Cell::default()).unwrap(),
-        serde_json::to_value(Cursor::default()).unwrap(),
-    ] {
+    for cursor in [false, true] {
+        let terminal = Terminal::new(1, 1, 0);
+        let mut screen = serde_json::to_value(terminal.screen()).unwrap();
+        let value = if cursor {
+            &mut screen["cursor"]
+        } else {
+            &mut screen["rows"][0]["cells"][0]
+        };
         for field in ["hyperlink", "hyperlink_id", "hyperlink_raw"] {
             assert_eq!(value.get(field), Some(&serde_json::Value::Null));
         }
         value["hyperlink"] = serde_json::json!("https://example.org/�");
         value["hyperlink_id"] = serde_json::json!({"Explicit": [105, 100]});
         value["hyperlink_raw"] = serde_json::json!([255]);
-        if value.get("text").is_some() {
-            let cell: Cell = serde_json::from_value(value.clone()).unwrap();
-            assert_eq!(cell.hyperlink.as_ref().unwrap().uri_bytes(), &[255]);
-            assert_eq!(serde_json::to_value(cell).unwrap(), value);
+        let expected = value.clone();
+        let decoded: Screen = serde_json::from_value(screen).unwrap();
+        let link = if cursor {
+            &decoded.cursor.hyperlink
         } else {
-            let cursor: Cursor = serde_json::from_value(value.clone()).unwrap();
-            assert_eq!(cursor.hyperlink.as_ref().unwrap().uri_bytes(), &[255]);
-            assert_eq!(serde_json::to_value(cursor).unwrap(), value);
-        }
+            &decoded.rows[0].cells[0].hyperlink
+        };
+        assert_eq!(link.as_ref().unwrap().uri_bytes(), &[255]);
+        let encoded = serde_json::to_value(decoded).unwrap();
+        let actual = if cursor {
+            &encoded["cursor"]
+        } else {
+            &encoded["rows"][0]["cells"][0]
+        };
+        assert_eq!(actual, &expected);
     }
 }

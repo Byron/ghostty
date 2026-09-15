@@ -181,7 +181,7 @@ fn same_screen_switches_preserve_active_hyperlinks() {
                 Some(HyperlinkId::Implicit(1))
             );
             assert_eq!(
-                terminal.screen().rows[0].cells[0].text,
+                &*terminal.screen().cell_text(&terminal.screen().rows[0], 0),
                 if alternate && mode == 1049 { "" } else { "A" }
             );
         }

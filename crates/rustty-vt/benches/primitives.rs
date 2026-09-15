@@ -1,6 +1,6 @@
 //! Unit-level Criterion benchmarks; no PTY, session, font, renderer, or app.
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use rustty_vt::{Cell, Color, Row, Screen, ScrollbackLimits, Terminal, unicode};
+use rustty_vt::{Cell, Color, Row, Screen, ScrollbackLimits, Style, Terminal, unicode};
 use serde::Deserialize;
 use std::{hint::black_box, path::Path, process::Command, time::Duration};
 
@@ -366,5 +366,174 @@ fn primitives(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, primitives);
+// Six supplementary Rust-only workloads keep chunk boundaries visible without
+// changing any of the saved Rustty/Ghostty primitive comparisons.
+const MIXED_CELLS: [&str; 16] = [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "天",
+    "",
+    "地",
+    "",
+    "a\u{301}",
+    "b\u{302}",
+    "👩\u{200d}💻",
+    "",
+];
+
+fn mixed_input(stream: bool) -> String {
+    let pattern = MIXED_CELLS.concat();
+    let mut bytes = if stream {
+        String::new()
+    } else {
+        "\x1b[H".into()
+    };
+    for _ in 0..if stream { STREAM_RECORDS } else { 1 } {
+        for unit in 0..if stream { 12 } else { 128 } {
+            bytes.push_str(&format!(
+                "\x1b[{};{}m{pattern}",
+                if unit % 2 == 0 { 1 } else { 22 },
+                31 + unit % 4,
+            ));
+        }
+        bytes.push_str("\x1b[0m");
+        if stream {
+            bytes.push_str("\r\n");
+        }
+    }
+    bytes
+}
+
+fn check_mixed(terminal: &Terminal, stream: bool) {
+    let screen = terminal.screen();
+    assert_eq!(screen.rows.len(), usize::from(ROWS));
+    assert_eq!(screen.cursor.row, if stream { 31 } else { 15 });
+    assert_eq!(screen.cursor.col, if stream { 0 } else { 127 });
+    assert_eq!(screen.cursor.pending_wrap, !stream);
+    assert_eq!(screen.cursor.style, Style::default());
+    assert_eq!(screen.history.is_empty(), !stream);
+    assert!(screen.history.len() <= HISTORY_LINES);
+    let total_rows = screen.history.len() + screen.rows.len();
+    for (index, row) in screen.all_rows().enumerate() {
+        assert_eq!(row.cells.len(), usize::from(COLS));
+        let columns = if stream {
+            if index == total_rows - 1 {
+                0
+            } else if (total_rows - index) % 2 == 1 {
+                128
+            } else {
+                64
+            }
+        } else if index < 16 {
+            128
+        } else {
+            0
+        };
+        if stream {
+            assert_eq!(row.wrapped, columns == 128);
+            assert_eq!(row.wrap_continuation, columns == 64);
+        } else {
+            assert_eq!(row.wrapped, index < 15);
+            assert_eq!(row.wrap_continuation, (1..16).contains(&index));
+        }
+        for (col, cell) in row.cells.iter().enumerate() {
+            let populated = col < columns;
+            assert_eq!(
+                &*screen.cell_text(row, col),
+                if populated { MIXED_CELLS[col % 16] } else { "" }
+            );
+            assert_eq!(
+                cell.width,
+                if !populated {
+                    1
+                } else {
+                    match col % 16 {
+                        8 | 10 | 14 => 2,
+                        9 | 11 | 15 => 0,
+                        _ => 1,
+                    }
+                }
+            );
+            assert_eq!(
+                cell.style,
+                if populated {
+                    Style {
+                        foreground: Color::Indexed(1 + (col / 16 % 4) as u8),
+                        bold: col / 16 % 2 == 0,
+                        ..Style::default()
+                    }
+                } else {
+                    Style::default()
+                }
+            );
+        }
+    }
+}
+
+fn chunked_input(c: &mut Criterion) {
+    for stream in [false, true] {
+        let input = mixed_input(stream);
+        let setup = || {
+            if stream {
+                setup_stream(input.as_bytes())
+            } else {
+                let mut terminal = Terminal::with_limits(COLS, ROWS, ScrollbackLimits::NONE);
+                terminal.feed(b"\x1b[?2027h");
+                assert!(terminal.feed(input.as_bytes()).is_empty());
+                terminal
+            }
+        };
+        let mut reference = setup();
+        assert!(reference.feed(input.as_bytes()).is_empty());
+        check_mixed(&reference, stream);
+        let mut group = c.benchmark_group(if stream {
+            "rustty/chunked_stream_mixed"
+        } else {
+            "rustty/chunked_feed_mixed"
+        });
+        group.throughput(Throughput::Bytes(input.len() as u64));
+        for (name, chunk_size) in [("whole", input.len()), ("7_bytes", 7), ("4_KiB", 4096)] {
+            let mut terminal = setup();
+            for chunk in input.as_bytes().chunks(chunk_size) {
+                assert!(terminal.feed(chunk).is_empty());
+            }
+            let actual = terminal.screen();
+            let expected = reference.screen();
+            assert_eq!(actual.cursor, expected.cursor);
+            assert_eq!(actual.history.len(), expected.history.len());
+            for (row, expected_row) in actual.all_rows().zip(expected.all_rows()) {
+                assert_eq!(row.wrapped, expected_row.wrapped);
+                assert_eq!(row.wrap_continuation, expected_row.wrap_continuation);
+                for (col, (cell, expected_cell)) in
+                    row.cells.iter().zip(&expected_row.cells).enumerate()
+                {
+                    assert_eq!(
+                        &*actual.cell_text(row, col),
+                        &*expected.cell_text(expected_row, col)
+                    );
+                    assert_eq!(cell.width, expected_cell.width);
+                    assert_eq!(cell.style, expected_cell.style);
+                }
+            }
+            group.bench_function(name, |b| {
+                b.iter(|| {
+                    let terminal = black_box(&mut terminal);
+                    for chunk in black_box(input.as_bytes()).chunks(chunk_size) {
+                        black_box(terminal.feed(chunk));
+                    }
+                })
+            });
+            check_mixed(&terminal, stream);
+        }
+        group.finish();
+    }
+}
+
+criterion_group!(benches, primitives, chunked_input);
 criterion_main!(benches);

@@ -133,6 +133,32 @@ Allocator instrumentation is excluded from timing. The separate
 no allocations. Chinese text alone does not exercise the grapheme allocator;
 the combining and emoji cases do.
 
+### Supplemental chunked input
+
+The six Rust-only `rustty/chunked_feed_mixed` and
+`rustty/chunked_stream_mixed` cases deliver identical input whole, in 7-byte
+chunks, or in 4-KiB chunks. Chunk boundaries may split UTF-8, CSI, combining
+sequences and ZWJ emoji. Each 16-column unit is `abcdefgh天地áb̂👩‍💻`, with
+foreground/bold SGR changes between units, exposing short printable runs.
+
+The feed case overwrites 16 populated rows with 128 units (4,935 input bytes),
+including CUP and a final SGR reset, without scrollback. The stream case uses
+the same 32 wrapped 192-column records, 1,024-line history limit and 2,048-row
+priming as the original streams (14,976 input bytes per iteration). Throughput
+counts input bytes. Construction, input generation, priming and validation
+remain outside timing; each timed iteration includes all chunk deliveries.
+
+Before timing, all three deliveries must produce identical cursor, history,
+cell text, widths, styles and wrap flags. Exact expected cells and row layout
+are also checked independently before and after timing, including retained
+history. These groups leave the original 36 workloads and native helper
+unchanged. Save a separate baseline for them:
+
+```sh
+cargo bench --offline -p rustty-vt --bench primitives -- \
+  chunked_ --save-baseline chunked-before
+```
+
 ## Optimization measurements, 2026-09-15
 
 The table compares Rustty at `3116bbb` with the four optimizations ending at
@@ -471,6 +497,7 @@ After building a candidate, compare it with this baseline using:
 CRITERION_HOME="$PWD/target/criterion-baseline-71a0b4f" \
 GHOSTTY_PRIMITIVES_BIN="$PWD/target/criterion-baseline-71a0b4f/vt-primitives" \
   cargo bench --offline -p rustty-vt --bench primitives -- \
+  '^(rustty|ghostty)/(print|reflow|feed|stream|stream_styled|scalar|read|clone|width)/' \
   --baseline baseline-71a0b4f \
   --sample-size 50 --warm-up-time 0.5 --measurement-time 2
 ```

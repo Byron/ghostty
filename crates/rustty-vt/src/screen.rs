@@ -2713,10 +2713,15 @@ impl Screen {
             let mut x: usize = 0;
             let mut pin_x: usize = 0;
             let mut written_rows = 0;
-            for (old_index, old) in contents.iter().enumerate() {
+            // Source pages are immutable during reflow. Compute their resized
+            // capacities once and walk their rows without rescanning the list.
+            let mut source_rows = source_pages.pages.iter().flat_map(|page| {
+                let capacity = page.adjusted_capacity(cols as u16, true);
+                std::iter::repeat_n((page, capacity), usize::from(page.rows))
+            });
+            for old in &contents {
                 wanted.clear();
-                let source_page = source_pages.page_at(old_index).0;
-                let capacity = source_page.adjusted_capacity(cols as u16, true);
+                let (source_page, capacity) = source_rows.next().expect("source row has a page");
                 let mut used = if old.wrapped {
                     old.cells.len()
                 } else {

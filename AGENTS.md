@@ -31,6 +31,13 @@ A file for [guiding coding agents](https://agents.md/).
 - macOS app: `macos/`
 - GTK (Linux and FreeBSD) app: `src/apprt/gtk`
 
+## Rustty Scope
+
+- When working on Rustty, treat Ghostty's production code as a read-only
+  reference. Do not modify it unless explicitly asked.
+- Ghostty tools and utilities may be added or updated to support inspection,
+  profiling, and comparisons with Rustty.
+
 ## Commit Guidelines
 
 - After completing and validating each semantic change, create a commit

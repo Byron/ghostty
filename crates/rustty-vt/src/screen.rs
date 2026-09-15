@@ -1845,6 +1845,17 @@ impl Screen {
         if row.resource_page == Some(serial) {
             return;
         }
+        // Fresh scroll rows and resource-free copies need only an owner. Keep
+        // inline attributes; unowned hyperlink payloads still need adoption.
+        if row.cells.iter().all(|cell| {
+            cell.style_id == 0
+                && cell.link_id == 0
+                && cell.grapheme.is_none()
+                && cell.hyperlink.is_none()
+        }) {
+            self.physical_row_mut(absolute).resource_page = Some(serial);
+            return;
+        }
         let previous = row.resource_page;
         let old_page =
             previous.and_then(|serial| self.pages.pages.iter().find(|page| page.serial == serial));
@@ -3494,6 +3505,50 @@ mod resource_tests {
         let data = crate::snapshot::encode_to_vec(&terminal).unwrap();
         let restored = crate::snapshot::decode(data.as_slice(), Default::default()).unwrap();
         assert_references(restored.screen());
+    }
+
+    #[test]
+    fn rehoming_inline_rows_preserves_attributes_and_adopts_untracked_links() {
+        let mut terminal = Terminal::new(4, 2, 0);
+        let screen = terminal.screen_mut();
+        screen.rows[0].cells[0] = Cell {
+            codepoint: Some('X'),
+            style: Style {
+                background: Color::Indexed(4),
+                ..Style::default()
+            },
+            protected: true,
+            semantic: SemanticContent::Input,
+            ..Cell::default()
+        };
+        assert!(screen.rows[0].resource_page.is_none());
+        screen.sync_resource_row(0);
+        let cell = &screen.rows[0].cells[0];
+        assert_eq!(cell.style_id, 0);
+        assert_eq!(cell.codepoint, Some('X'));
+        assert_eq!(cell.style.background, Color::Indexed(4));
+        assert!(cell.protected);
+        assert_eq!(cell.semantic, SemanticContent::Input);
+        assert_eq!(
+            screen.rows[0].resource_page,
+            Some(screen.pages.page_at(0).0.serial)
+        );
+        assert_references(screen);
+
+        // Public cells may carry a hyperlink payload without a native handle.
+        let link = Arc::new(HyperlinkData::new(
+            b"https://example.org",
+            Some(HyperlinkId::Explicit(b"public".to_vec())),
+        ));
+        screen.rows[1].cells[0].hyperlink = Some(link.clone());
+        assert_eq!(screen.rows[1].cells[0].link_id, 0);
+        screen.sync_resource_row(1);
+        assert_ne!(screen.rows[1].cells[0].link_id, 0);
+        assert!(Arc::ptr_eq(
+            screen.rows[1].cells[0].hyperlink.as_ref().unwrap(),
+            &link
+        ));
+        assert_references(screen);
     }
 
     #[test]

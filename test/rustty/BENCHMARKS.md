@@ -206,3 +206,96 @@ suites passed 7,970 of 7,973 comparisons. The remaining three are chunking
 variants of the preexisting `pages/graphemes/wrap/3/1/1/alternate` discrepancy:
 Rustty preserves a ZWJ when wrapping a widening grapheme in a one-row alternate
 screen; Ghostty drops it. This also reproduces before the inline-cell changes.
+
+## Printing and scrolling follow-up, 2026-09-15
+
+This follow-up starts with the already optimized production code at `e112c2c`.
+The identical 36-case harness from `847ad1c` measures that baseline and the
+production changes ending at `d2911c9` (`5cc935a` replaces printed cells directly;
+`d2911c9` avoids building resource lists for rows without resources). Ghostty
+production code remains unchanged; only its benchmark utility was extended.
+
+Measurements use the same machine, compilers, release settings, and short
+Criterion sampling configuration described above. All builds and tests finished
+before serial timing. Values are medians in microseconds per complete workload.
+The `feed` and stream byte/scalar counts are defined in the workload tables;
+they are not the same amount of work as the original `print` case.
+
+ASCII printing improves 3.38× and Chinese printing 1.87×. Parsed ASCII overwrites
+improve 2.73×, plain ASCII streams 2.66×, and styled ASCII streams 2.18×. This
+pass does not reach the proposed 5× printing target. Ghostty's printable-run
+batching remains a substantial opportunity for parsed output. Cell size stays
+56 bytes. The ASCII/combining direct scalar-scan controls are about 3% slower
+in this run, roughly 0.04 microseconds per 4,096-cell scan; those regressions
+are retained in the table rather than treated as improvements.
+
+Sampling used optimized Rust binaries with debug information and frame pointers,
+at nominal 1 kHz for eight seconds per workload. Timings above use the normal
+release binaries without profiling. Shares below describe physical symbols;
+inlined work contributes to its enclosing symbol, and shares are independently
+normalized for each run.
+
+- Before the change, cursor/style/link helpers account for about 32% of ASCII
+  printing samples, and erase-before-replace accounts for another 10%.
+- After replacement was consolidated, `sync_resource_row` accounted for 29% of
+  ASCII stream samples. After skipping resource-list construction for rows
+  without resources, its share falls to 6.4%.
+- Final ASCII streaming spends about 28% in cell writing, 16% in the enclosing
+  print operation, 11% accounting for row storage, and 8% allocating/initializing
+  cell rows. These identify remaining costs beyond printable-run batching.
+
+Two native reference cases need special interpretation. Combining overwrite
+still hits the full 512-entry grapheme-map cliff. Parsed Chinese overwrite hits
+another existing cliff: the native batch writer scans the remaining eligible
+Unicode run, rejects an existing wide destination cell, prints one character,
+and rescans the suffix. That is roughly half a million eligibility checks for
+1,024 characters. A confirming profile attributes 96.4% of samples to
+`Terminal.printSlice`. Fresh-row Chinese streaming batches successfully. The
+Chinese `feed` result therefore does not describe general Chinese throughput.
+Neither native production behavior was changed.
+
+Final validation: all 293 `rustty-vt` tests, all 72 Rust/native benchmark smoke
+cases, strict all-target Clippy, formatting, and the app check pass. Charset,
+style, hyperlink, and grapheme differential suites pass 2,013 of 2,016 cases;
+the three failures are the same previously documented alternate-screen ZWJ
+mismatch in whole/scalar/chunked input variants. Independent review found no
+correctness issues in either production change.
+
+| Operation | Corpus | Rustty before µs | Rustty after µs | Ghostty µs | Speedup |
+| --- | --- | ---: | ---: | ---: | ---: |
+| print | ascii | 43.466 | 12.861 | 6.236 | 3.38× |
+| print | chinese | 57.447 | 30.717 | 12.130 | 1.87× |
+| print | combining | 50.903 | 34.039 | 404.776 | 1.50× |
+| print | emoji | 47.003 | 37.587 | 15.084 | 1.25× |
+| feed | ascii | 46.080 | 16.875 | 0.502 | 2.73× |
+| feed | chinese | 61.892 | 35.659 | 441.271 | 1.74× |
+| feed | combining | 56.481 | 38.841 | 436.534 | 1.45× |
+| feed | emoji | 52.625 | 42.016 | 17.382 | 1.25× |
+| stream | ascii | 465.277 | 175.223 | 5.749 | 2.66× |
+| stream | chinese | 371.331 | 179.941 | 9.311 | 2.06× |
+| stream | combining | 906.178 | 563.151 | 502.738 | 1.61× |
+| stream | emoji | 864.453 | 633.851 | 743.788 | 1.36× |
+| stream_styled | ascii | 545.556 | 249.981 | 7.908 | 2.18× |
+| stream_styled | chinese | 420.376 | 220.568 | 35.590 | 1.91× |
+| stream_styled | combining | 1032.979 | 739.317 | 541.605 | 1.40× |
+| stream_styled | emoji | 1010.541 | 808.619 | 772.004 | 1.25× |
+| read | ascii | 1.792 | 1.743 | 1.940 | 1.03× |
+| read | chinese | 1.793 | 1.751 | 2.030 | 1.02× |
+| read | combining | 2.541 | 2.508 | 5.932 | 1.01× |
+| read | emoji | 2.529 | 2.488 | 2.568 | 1.02× |
+| clone | ascii | 10.987 | 11.146 | 5.734 | 0.99× |
+| clone | chinese | 12.086 | 11.916 | 5.737 | 1.01× |
+| clone | combining | 13.198 | 12.888 | 17.418 | 1.02× |
+| clone | emoji | 12.174 | 11.802 | 9.545 | 1.03× |
+| reflow | ascii | 69.160 | 68.539 | 23.560 | 1.01× |
+| reflow | chinese | 71.441 | 70.129 | 24.780 | 1.02× |
+| reflow | combining | 64.546 | 64.676 | 51.886 | 1.00× |
+| reflow | emoji | 57.025 | 57.145 | 41.325 | 1.00× |
+| width | ascii | 0.479 | 0.480 | 0.361 | 1.00× |
+| width | chinese | 0.481 | 0.480 | 0.343 | 1.00× |
+| width | combining | 0.444 | 0.437 | 0.431 | 1.02× |
+| width | emoji | 0.342 | 0.328 | 0.321 | 1.04× |
+| scalar | ascii | 1.558 | 1.598 | 1.308 | 0.97× |
+| scalar | chinese | 1.542 | 1.553 | 1.310 | 0.99× |
+| scalar | combining | 1.569 | 1.609 | 1.304 | 0.97× |
+| scalar | emoji | 1.547 | 1.535 | 1.304 | 1.01× |

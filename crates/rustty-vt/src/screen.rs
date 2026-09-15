@@ -1132,6 +1132,41 @@ impl Screen {
         row.dirty = true;
     }
 
+    /// Write the eligible ASCII prefix; the caller handles complex cells and wraps.
+    pub(crate) fn write_cursor_ascii(&mut self, bytes: &[u8]) -> usize {
+        self.sync_cursor_resources();
+        let index = self.pages.page_index(self.history.len() + self.cursor.row);
+        let page = &mut self.pages.pages[index];
+        let row = &mut self.rows[self.cursor.row];
+        let style_id = self.cursor_style.map_or(0, |(_, id)| id);
+        let mut written = 0;
+        for (cell, &byte) in row.cells[self.cursor.col..].iter_mut().zip(bytes) {
+            if cell.width != 1
+                || cell.grapheme.is_some()
+                || cell.link_id != 0
+                || cell.hyperlink.is_some()
+            {
+                break;
+            }
+            if cell.style_id != style_id {
+                page.styles.release(cell.style_id);
+                page.styles.retain(style_id);
+            }
+            cell.codepoint = Some(char::from(byte));
+            cell.style_id = style_id;
+            cell.style = self.cursor.style;
+            cell.protected = self.cursor.protected;
+            cell.semantic = self.cursor.semantic;
+            cell.spacer_head = false;
+            written += 1;
+        }
+        if written != 0 {
+            row.resource_page = Some(page.serial);
+            row.dirty = true;
+        }
+        written
+    }
+
     /// Replace printed cells directly, keeping references whose style is unchanged.
     /// Physical row extension must precede this: it can rebuild resource tables.
     pub(crate) fn write_cursor_cell(
@@ -3517,6 +3552,38 @@ mod resource_tests {
                 .id,
             original_link.id
         );
+        let data = crate::snapshot::encode_to_vec(&terminal).unwrap();
+        let restored = crate::snapshot::decode(data.as_slice(), Default::default()).unwrap();
+        assert_references(restored.screen());
+    }
+
+    #[test]
+    fn ascii_runs_replace_resources_and_cross_pages() {
+        let boundary = usize::from(PageCapacity::initial(32).unwrap().rows);
+        let mut terminal = Terminal::new(32, 8, boundary + 16);
+        terminal.feed(b"\x1b[?2027h");
+        for _ in 0..boundary + 3 {
+            terminal.feed(
+                "\x1b[31m\x1b]8;;https://example.org\x1b\\界a\u{301}\x1b]8;;\x1b\\ plain\r\n"
+                    .as_bytes(),
+            );
+        }
+        let screen = terminal.screen();
+        assert_ne!(
+            screen.pages.page_at(screen.history.len()).0.serial,
+            screen
+                .pages
+                .page_at(screen.history.len() + screen.rows.len() - 1)
+                .0
+                .serial,
+        );
+        assert_references(terminal.screen());
+        for style in [b"\x1b[32m".as_slice(), b"\x1b[0m", b"\x1b[1;34m"] {
+            terminal.feed(b"\x1b[H");
+            terminal.feed(style);
+            terminal.feed(&[b'x'; 32 * 8 + 7]);
+            assert_references(terminal.screen());
+        }
         let data = crate::snapshot::encode_to_vec(&terminal).unwrap();
         let restored = crate::snapshot::decode(data.as_slice(), Default::default()).unwrap();
         assert_references(restored.screen());

@@ -3,7 +3,7 @@ use crate::query::{self, Query};
 use crate::screen::*;
 use crate::unicode::{self, properties};
 use crate::{clipboard, dnd};
-use rustty_parser::{Event, MAX_OSC_BYTES, Parser};
+use rustty_parser::{BatchEvent, Event, MAX_OSC_BYTES, Parser};
 
 /// Host actions are returned in input order. The terminal never accesses the OS.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -310,7 +310,14 @@ impl Terminal {
         let mut effects = Vec::new();
         let mut pending = Vec::new();
         let mut parser = std::mem::take(&mut self.parser);
-        parser.advance(bytes, |event| {
+        parser.advance_batched(bytes, |event| {
+            let event = match event {
+                BatchEvent::PrintAscii(bytes) => {
+                    self.print_ascii(bytes);
+                    return;
+                }
+                BatchEvent::Event(event) => event,
+            };
             self.handle(event, &mut pending, true, true);
             for effect in pending.drain(..) {
                 match effect {
@@ -335,7 +342,14 @@ impl Terminal {
         let mut parser = std::mem::take(&mut self.parser);
         let read_enabled = handler.clipboard_read_enabled();
         let write_enabled = handler.clipboard_write_enabled();
-        parser.advance(bytes, |event| {
+        parser.advance_batched(bytes, |event| {
+            let event = match event {
+                BatchEvent::PrintAscii(bytes) => {
+                    self.print_ascii(bytes);
+                    return;
+                }
+                BatchEvent::Event(event) => event,
+            };
             self.handle(event, &mut effects, write_enabled, read_enabled);
             self.dispatch_effects(effects.drain(..), handler, write_enabled, read_enabled);
         });
@@ -876,6 +890,58 @@ impl Terminal {
             Event::OscOverflow => {
                 effects.push(Effect::UnknownSequence("OSC exceeded capture limit".into()))
             }
+        }
+    }
+
+    /// Fill ordinary row spans without repeating cursor and page lookup per cell.
+    fn print_ascii(&mut self, mut bytes: &[u8]) {
+        if self.status_display {
+            return;
+        }
+        let screen = self.screen();
+        if self.modes.get(false, 4)
+            || !self.modes.dec(7)
+            || screen.charset.single.is_some()
+            || !matches!(
+                screen.charset.slots[screen.charset.gl],
+                Charset::Utf8 | Charset::Ascii
+            )
+            || screen.cursor.hyperlink.is_some()
+        {
+            for &byte in bytes {
+                self.print(char::from(byte));
+            }
+            return;
+        }
+        while !bytes.is_empty() {
+            self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
+            self.clamp_cursor();
+            // Reuse scalar wrapping, including margins, scrolling and prompt state.
+            if self.screen().cursor.pending_wrap {
+                self.print(char::from(bytes[0]));
+                bytes = &bytes[1..];
+                continue;
+            }
+            let col = self.screen().cursor.col;
+            let right = if col > self.margins.right {
+                usize::from(self.cols) - 1
+            } else {
+                self.margins.right
+            };
+            let count = bytes.len().min(right - col + 1);
+            let written = self.screen_mut().write_cursor_ascii(&bytes[..count]);
+            if written == 0 {
+                // Wide cells, graphemes and links retain the scalar replacement rules.
+                self.print(char::from(bytes[0]));
+                bytes = &bytes[1..];
+                continue;
+            }
+            self.previous_char = Some(char::from(bytes[written - 1]));
+            let cursor = &mut self.screen_mut().cursor;
+            cursor.pending_wrap = col + written > right;
+            cursor.col = (col + written).min(right);
+            self.generation = self.generation.wrapping_add(written as u64);
+            bytes = &bytes[written..];
         }
     }
 

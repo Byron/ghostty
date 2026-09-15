@@ -102,6 +102,14 @@ pub enum Event<'a> {
     OscOverflow,
 }
 
+/// Parser events with printable ASCII runs borrowed directly from the input.
+/// Non-ASCII text and controls retain the scalar [`Event`] representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BatchEvent<'a> {
+    PrintAscii(&'a [u8]),
+    Event(Event<'a>),
+}
+
 #[derive(Clone, Debug)]
 pub struct Parser {
     state: State,
@@ -278,6 +286,26 @@ impl Parser {
     pub fn advance(&mut self, bytes: &[u8], mut handler: impl FnMut(Event<'_>)) {
         for &byte in bytes {
             self.advance_byte(byte, &mut handler);
+        }
+        self.retain_continuation(bytes);
+    }
+
+    /// Like [`Self::advance`], but emit contiguous bytes in `0x20..=0x7e` as
+    /// borrowed runs. Pending UTF-8 and escape sequences keep their scalar path.
+    pub fn advance_batched(&mut self, bytes: &[u8], mut handler: impl FnMut(BatchEvent<'_>)) {
+        let mut remaining = bytes;
+        while let Some(&byte) = remaining.first() {
+            if (b' '..=b'~').contains(&byte) && self.is_ground() {
+                let len = remaining
+                    .iter()
+                    .position(|byte| !(b' '..=b'~').contains(byte))
+                    .unwrap_or(remaining.len());
+                handler(BatchEvent::PrintAscii(&remaining[..len]));
+                remaining = &remaining[len..];
+            } else {
+                self.advance_byte(byte, &mut |event| handler(BatchEvent::Event(event)));
+                remaining = &remaining[1..];
+            }
         }
         self.retain_continuation(bytes);
     }
@@ -504,6 +532,51 @@ mod tests {
         );
         assert!(result.iter().any(|s| s.contains("params: [31]")));
         assert_eq!(result.last().unwrap(), "Print('X')");
+    }
+
+    #[test]
+    fn ascii_batches_preserve_scalar_events_and_continuations() {
+        let bytes = b"hello\x7f world\x80\xc2\x9b\xf0\x9fASCII\xed\xa0\x80\xf0\x9f\x1b[31mred\x1b[0m\x07\x1b]2;title\x07\x1bP1;2qraw ascii\x1b\\\x1b_Ga=t;AAAA\x1b\\end\xf0\x9f\x98\x84\x1b[38:2::1:2";
+        for limit in [MAX_OSC_BYTES, 4] {
+            for split in 0..=bytes.len() {
+                let mut scalar = Parser::new();
+                scalar.set_osc_limit(limit);
+                scalar.set_continuation_limit(limit);
+                let mut batched = scalar.clone();
+                let mut expected = Vec::new();
+                let mut actual = Vec::new();
+                let mut runs = Vec::new();
+                for chunk in [&bytes[..split], &bytes[split..]] {
+                    scalar.advance(chunk, |event| expected.push(format!("{event:?}")));
+                    batched.advance_batched(chunk, |event| match event {
+                        BatchEvent::PrintAscii(run) => {
+                            assert!(!run.is_empty());
+                            assert!(run.iter().all(|byte| (b' '..=b'~').contains(byte)));
+                            assert!(run.as_ptr() >= chunk.as_ptr());
+                            assert!(run.as_ptr_range().end <= chunk.as_ptr_range().end);
+                            runs.push(run.to_vec());
+                            actual.extend(
+                                run.iter()
+                                    .map(|&byte| format!("{:?}", Event::Print(byte as char))),
+                            );
+                        }
+                        BatchEvent::Event(event) => actual.push(format!("{event:?}")),
+                    });
+                    assert_eq!(actual, expected, "split={split}");
+                    assert_eq!(batched.state(), scalar.state(), "split={split}");
+                    assert_eq!(batched.is_ground(), scalar.is_ground(), "split={split}");
+                    assert_eq!(
+                        batched.continuation(),
+                        scalar.continuation(),
+                        "split={split}"
+                    );
+                }
+                if split == 0 {
+                    assert_eq!(runs[0], b"hello");
+                    assert_eq!(runs[1], b" world");
+                }
+            }
+        }
     }
 
     #[test]

@@ -679,6 +679,54 @@ fn check_terminal_frames(
         if host.deadline.is_some() {
             return Err("erasing blinking text left a redraw timer running".into());
         }
+        // Only the progress overlay changes during these frames. Keep the
+        // terminal composition and GPU input alive across the animation.
+        let activity = std::mem::take(&mut app.panes.get_mut(&id).unwrap().activity);
+        app.panes
+            .get_mut(&id)
+            .unwrap()
+            .activity
+            .progress_reported(3, None, Instant::now());
+        let result = (|| -> Result<()> {
+            host.focused = false;
+            app.draw(event_loop, host)?;
+            let frame = host
+                .composed
+                .as_ref()
+                .ok_or("missing terminal frame")?
+                .frame
+                .clone();
+            let prepares = host.pane_prepares;
+            for _ in 0..3 {
+                app.draw(event_loop, host)?;
+                if !Arc::ptr_eq(&frame, &host.composed.as_ref().unwrap().frame)
+                    || host.pane_prepares != prepares
+                {
+                    return Err("progress animation rebuilt unchanged terminal content".into());
+                }
+            }
+            let frames = host.frames;
+            host.occluded = true;
+            let hidden = app.draw(event_loop, host);
+            host.occluded = false;
+            hidden?;
+            if host.frames != frames {
+                return Err("occluded progress animation kept drawing".into());
+            }
+            app.panes[&id]
+                .session
+                .terminal()?
+                .feed(b"changed behind cover");
+            app.draw(event_loop, host)?;
+            if host.frames != frames + 1
+                || Arc::ptr_eq(&frame, &host.composed.as_ref().unwrap().frame)
+            {
+                return Err("revealing the window did not refresh terminal content".into());
+            }
+            Ok(())
+        })();
+        app.panes.get_mut(&id).unwrap().activity = activity;
+        result?;
         Ok(())
     })();
     let pane = app.panes.get_mut(&id).unwrap();
@@ -695,7 +743,7 @@ fn check_terminal_frames(
     host.repaint();
     result?;
     eprintln!(
-        "Native smoke: reverse video, DEC column mode, and text blink rendered; synchronized output held partial frames and cursors, then released immediately"
+        "Native smoke: terminal rendering and synchronized output passed; progress reused terminal content, stopped while occluded, and refreshed after reveal"
     );
     Ok(())
 }

@@ -299,3 +299,95 @@ correctness issues in either production change.
 | scalar | chinese | 1.542 | 1.553 | 1.310 | 0.99× |
 | scalar | combining | 1.569 | 1.609 | 1.304 | 0.97× |
 | scalar | emoji | 1.547 | 1.535 | 1.304 | 1.01× |
+
+## Mode lookup and reflow follow-up, 2026-09-15
+
+This pass compares the session baseline `f56b1af` with `1bc18ab`. The benchmark
+harness, corpora, release profile and 56-byte cells are unchanged. Both binaries
+were built before the final serial measurements, with task builds and tests
+stopped. Runs use the same machine described above, macOS 26.7, Rust 1.98.1,
+Criterion 0.8.2, thin LTO and one codegen unit: 20 samples, 0.3 seconds of warmup
+and 1 second of measurement. Values below are medians in microseconds per
+complete workload. Ghostty remains the unchanged correctness reference; its
+previous timing results were not remeasured in this pass.
+
+Printing improves 1.15–1.71× and reflow improves 1.13–1.35×. The changes are
+separate commits:
+
+- `9f8e5ba` stores current, saved and default modes in their existing snapshot
+  bit order. Constant mode queries compile to a single bit extraction instead
+  of searching a tree for every printed scalar. Save/reset lifetimes and
+  snapshot encoding are preserved. The public serde map shape is retained for
+  complete supported mode sets; incomplete or unknown-key maps are rejected.
+- `ad838f6` defers cell allocation for independent blank reflow rows until they
+  contain copied cells or survive trailing-row trimming. Row identities,
+  anchors and metadata remain available throughout the copy. Exact capacities
+  are preserved even at widths 1–3, keeping history memory accounting stable.
+- `1bc18ab` walks immutable source pages in order and computes each page's
+  resized capacity once, avoiding repeated page scans and layout arithmetic.
+
+An eight-second, nominal 1 kHz profile of baseline ASCII reflow attributed about
+25% of active samples to cell-vector initialization and 11% to page layout,
+metadata and column adjustment. These are physical-symbol shares from an
+optimized build with debug information and frame pointers; inlined work is
+charged to its enclosing symbol. The timing table uses normal release builds.
+
+Parsed input and streaming medians also improve. Short-run means for some
+stream and clone cases have large outliers, so those median changes should not
+be read as precise application-throughput predictions. Scalar/read/clone
+controls include small regressions in the table; no speedup is claimed for
+those paths.
+
+| Operation | Corpus | Before µs | After µs | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| print | ascii | 13.161 | 11.477 | 1.15× |
+| print | chinese | 31.467 | 18.434 | 1.71× |
+| print | combining | 33.994 | 27.429 | 1.24× |
+| print | emoji | 38.509 | 29.471 | 1.31× |
+| reflow | ascii | 69.740 | 54.291 | 1.28× |
+| reflow | chinese | 71.336 | 63.227 | 1.13× |
+| reflow | combining | 65.486 | 49.447 | 1.32× |
+| reflow | emoji | 57.817 | 42.693 | 1.35× |
+| feed | ascii | 17.204 | 15.544 | 1.11× |
+| feed | chinese | 36.674 | 24.164 | 1.52× |
+| feed | combining | 40.151 | 34.358 | 1.17× |
+| feed | emoji | 44.339 | 34.744 | 1.28× |
+| stream | ascii | 181.088 | 166.024 | 1.09× |
+| stream | chinese | 185.136 | 145.148 | 1.28× |
+| stream | combining | 584.987 | 492.292 | 1.19× |
+| stream | emoji | 647.918 | 532.768 | 1.22× |
+| stream_styled | ascii | 254.692 | 241.795 | 1.05× |
+| stream_styled | chinese | 225.149 | 187.023 | 1.20× |
+| stream_styled | combining | 764.780 | 692.608 | 1.10× |
+| stream_styled | emoji | 819.850 | 734.812 | 1.12× |
+| scalar | ascii | 1.621 | 1.626 | 1.00× |
+| scalar | chinese | 1.572 | 1.585 | 0.99× |
+| scalar | combining | 1.618 | 1.643 | 0.98× |
+| scalar | emoji | 1.553 | 1.559 | 1.00× |
+| read | ascii | 1.799 | 1.793 | 1.00× |
+| read | chinese | 1.836 | 1.787 | 1.03× |
+| read | combining | 2.530 | 2.606 | 0.97× |
+| read | emoji | 2.563 | 2.591 | 0.99× |
+| clone | ascii | 11.268 | 11.133 | 1.01× |
+| clone | chinese | 11.997 | 11.876 | 1.01× |
+| clone | combining | 13.124 | 13.517 | 0.97× |
+| clone | emoji | 12.045 | 12.330 | 0.98× |
+| width | ascii | 0.488 | 0.491 | 0.99× |
+| width | chinese | 0.489 | 0.490 | 1.00× |
+| width | combining | 0.453 | 0.445 | 1.02× |
+| width | emoji | 0.335 | 0.335 | 1.00× |
+
+A longer control confirmation used 50 samples, 0.5 seconds of warmup and
+2 seconds of measurement, again running the same binaries serially. Combining
+clone measured 13.204 → 13.186 µs (no significant change), and emoji clone
+12.138 → 11.938 µs. The combining scalar scan measured 1.664 → 1.582 µs,
+so its short-run regression did not repeat. Combining full-text reads did
+confirm a small regression: 2.493 → 2.535 µs, or 1.7% per 4,096-cell scan.
+
+Validation passed all 288 VT tests, strict all-target VT Clippy, formatting,
+the app check and all 72 Rust/native benchmark smoke cases. The selected mode,
+snapshot, resize and reflow differential suites passed all 2,515 comparisons.
+Review checked mode save/reset behavior, snapshot bit order, page alignment,
+resource rebuilding and anchor preservation. The new regression checks retained
+blank gaps, viewport padding, snapshot round trips, subsequent printing and
+exact capacities at widths 1–3.

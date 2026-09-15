@@ -529,13 +529,14 @@ impl LinkMatcher {
         for row in screen.all_rows() {
             let mut col = 0;
             while col < row.cells.len() {
-                let Some(uri) = &row.cells[col].hyperlink else {
+                let Some(link) = &row.cells[col].hyperlink else {
                     col += 1;
                     continue;
                 };
                 let start = col;
                 while col + 1 < row.cells.len()
-                    && row.cells[col + 1].hyperlink.as_ref() == Some(uri)
+                    && row.cells[col + 1].hyperlink.as_ref().map(|link| &link.uri)
+                        == Some(&link.uri)
                 {
                     col += 1;
                 }
@@ -555,7 +556,7 @@ impl LinkMatcher {
                         row: row.id,
                         col: end,
                     },
-                    uri: uri.clone(),
+                    uri: link.uri.clone(),
                 });
                 col += 1;
             }
@@ -688,6 +689,20 @@ mod tests {
         assert_eq!(links[0].uri, "https://actual");
         assert!(links[0].contains(terminal.screen(), links[0].end));
     }
+    #[test]
+    fn explicit_links_group_by_display_uri_across_distinct_ids_and_raw_bytes() {
+        let mut terminal = Terminal::new(8, 1, 0);
+        terminal.feed(
+            b"\x1b]8;id=first;https://x/\xff\x07A\x1b]8;id=second;https://x/\xfe\x07B\x1b]8;;https://other\x07C\x1b]8;;\x07",
+        );
+        let links = LinkMatcher::default().links(terminal.screen());
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].uri, "https://x/\u{fffd}");
+        assert_eq!((links[0].start.col, links[0].end.col), (0, 1));
+        assert_eq!(links[1].uri, "https://other");
+        assert_eq!((links[1].start.col, links[1].end.col), (2, 2));
+    }
+
     #[test]
     fn matching_crosses_soft_wraps_and_keeps_cell_coordinates() {
         let mut t = Terminal::new(8, 4, 10);

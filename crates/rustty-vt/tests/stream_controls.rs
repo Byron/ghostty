@@ -240,7 +240,10 @@ fn scroll_clear_counts_background_cells_and_preserves_cursor_attributes() {
     assert_eq!((cursor.row, cursor.col), (1, 3));
     assert_eq!(cursor.style.background, rustty_vt::Color::Indexed(4));
     assert!(cursor.protected);
-    assert_eq!(cursor.hyperlink.as_deref(), Some("https://example.org"));
+    assert_eq!(
+        cursor.hyperlink.as_deref().map(|link| link.uri.as_str()),
+        Some("https://example.org")
+    );
     assert!(
         terminal
             .screen()

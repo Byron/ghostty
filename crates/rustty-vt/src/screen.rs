@@ -1132,6 +1132,70 @@ impl Screen {
         row.dirty = true;
     }
 
+    /// Replace printed cells directly, keeping references whose style is unchanged.
+    /// Physical row extension must precede this: it can rebuild resource tables.
+    pub(crate) fn write_cursor_cell(
+        &mut self,
+        codepoint: Option<char>,
+        width: u8,
+        spacer_head: bool,
+    ) {
+        self.sync_cursor_resources();
+        let y = self.cursor.row;
+        let col = self.cursor.col;
+        let old_width = self.rows[y].cells[col].width;
+        if y > 0 && col <= 1 && old_width != width && old_width != 1 {
+            let previous = &mut self.rows[y - 1];
+            previous.cells.last_mut().unwrap().spacer_head = false;
+            previous.dirty = true;
+        }
+        let index = self.pages.page_index(self.history.len() + y);
+        let page = &mut self.pages.pages[index];
+        let row = &mut self.rows[y];
+        row.resource_page = Some(page.serial);
+        let style_id = self.cursor_style.map_or(0, |(_, id)| id);
+        let end = (col + usize::from(width)).min(row.cells.len());
+        // Retire both halves when a write overlaps an existing wide glyph.
+        let clear_start = col - usize::from(old_width == 0 && col > 0);
+        let clear_end = end + usize::from(end < row.cells.len() && row.cells[end - 1].width == 2);
+        for (offset, cell) in row.cells[clear_start..clear_end].iter_mut().enumerate() {
+            let x = clear_start + offset;
+            let replacement_style = if x >= col && x < end { style_id } else { 0 };
+            if cell.style_id != replacement_style {
+                page.styles.release(cell.style_id);
+                page.styles.retain(replacement_style);
+            }
+            page.links.release_cell(cell.link_id);
+            if let Some(grapheme) = cell.grapheme {
+                page.graphemes.release(grapheme);
+            }
+            *cell = if x < col || x >= end {
+                Cell::blank(self.cursor.style.background)
+            } else {
+                Cell {
+                    style_id,
+                    link_id: 0,
+                    grapheme: None,
+                    codepoint: if x == col { codepoint } else { None },
+                    width: if x == col { width } else { 0 },
+                    style: self.cursor.style,
+                    hyperlink: self.cursor.hyperlink.clone(),
+                    protected: self.cursor.protected,
+                    semantic: self.cursor.semantic,
+                    spacer_head,
+                }
+            };
+        }
+        row.dirty = true;
+        if self.cursor.hyperlink.is_some() {
+            // Installing links can grow the page, so retain no page borrow here.
+            self.set_cell_cursor_hyperlink(col);
+            if width == 2 && col + 1 < self.rows[y].cells.len() {
+                self.set_cell_cursor_hyperlink(col + 1);
+            }
+        }
+    }
+
     pub(crate) fn release_cursor_style(&mut self) {
         if let Some((serial, id)) = self.cursor_style.take() {
             self.release_style(serial, id);
@@ -1203,6 +1267,13 @@ impl Screen {
     /// Page movement renews implicit cursor links. Resource growth on the same
     /// page reinstalls their existing identities; printed cells retain theirs.
     pub(crate) fn sync_cursor_resources(&mut self) {
+        if self.cursor_style.is_none()
+            && self.cursor_link.is_none()
+            && self.cursor.style == Style::default()
+            && self.cursor.hyperlink.is_none()
+        {
+            return;
+        }
         let index = self.pages.page_index(self.history.len() + self.cursor.row);
         let serial = self.pages.pages[index].serial;
         let moved = self.cursor_link.is_some_and(|(owner, _)| owner != serial);
@@ -1310,6 +1381,9 @@ impl Screen {
     /// Cursor page changes own a reference independently of printed cells.
     /// Saved cursor values and detached renderer snapshots own none.
     pub(crate) fn sync_cursor_style(&mut self) {
+        if self.cursor_style.is_none() && self.cursor.style == Style::default() {
+            return;
+        }
         let serial = self
             .pages
             .page_at(self.history.len() + self.cursor.row)
@@ -3331,6 +3405,95 @@ mod resource_tests {
             graphemes.is_empty(),
             "cells referenced a retired grapheme page"
         );
+    }
+
+    #[test]
+    fn printing_replaces_cells_without_leaking_page_resources() {
+        let mut terminal = Terminal::new(8, 3, 0);
+        terminal.feed(b"\x1b[31m\x1b]8;id=shared;https://example.org\x1b\\");
+        terminal.screen_mut().cursor.protected = true;
+        terminal.screen_mut().cursor.semantic = SemanticContent::Input;
+        terminal.feed("界\u{301}界\u{301}".as_bytes());
+        let snapshot = terminal.screen().snapshot_viewport();
+        let style_id = terminal.screen().rows[0].cells[0].style_id;
+        let link_id = terminal.screen().rows[0].cells[0].link_id;
+        assert_references(terminal.screen());
+
+        // The style and link stay the same, but the suffix and attributes do not.
+        terminal.cursor_position(1, 1);
+        terminal.screen_mut().cursor.protected = false;
+        terminal.screen_mut().cursor.semantic = SemanticContent::Output;
+        terminal.print('語');
+        let cell = &terminal.screen().rows[0].cells[0];
+        assert_eq!(cell.style_id, style_id);
+        assert_eq!(cell.link_id, link_id);
+        assert!(cell.grapheme.is_none());
+        assert!(!cell.protected);
+        assert_eq!(cell.semantic, SemanticContent::Output);
+        assert_references(terminal.screen());
+
+        // Overlap the old tail and the next head: both outside halves go blank.
+        terminal.cursor_position(1, 2);
+        terminal.print('文');
+        let row = &terminal.screen().rows[0];
+        assert!(row.cells[0].codepoint.is_none());
+        assert_eq!(row.cells[1].codepoint, Some('文'));
+        assert_eq!(row.cells[1].width, 2);
+        assert_eq!(row.cells[2].width, 0);
+        assert!(row.cells[3].codepoint.is_none());
+        assert_references(terminal.screen());
+
+        // A default, unlinked narrow write clears the old head and its resources.
+        terminal.feed(b"\x1b[0m\x1b]8;;\x1b\\\x1b[1;3HX");
+        let row = &terminal.screen().rows[0];
+        assert!(row.cells[1].codepoint.is_none());
+        assert_eq!(row.cells[2].codepoint, Some('X'));
+        assert_eq!(row.cells[2].style, Style::default());
+        assert!(row.cells.iter().all(|cell| cell.link_id == 0));
+        assert_references(terminal.screen());
+
+        terminal.feed("\x1b[2;8H界".as_bytes());
+        assert!(terminal.screen().rows[1].cells[7].spacer_head);
+        terminal.feed(b"\x1b[3;1HX");
+        assert!(!terminal.screen().rows[1].cells[7].spacer_head);
+        assert_eq!(terminal.screen().rows[2].cells[1].width, 1);
+        assert_references(terminal.screen());
+        assert_eq!(snapshot.row_text(&snapshot.rows[0]), "界\u{301}界\u{301}");
+        assert!(snapshot.rows[0].cells[0].protected);
+        assert_eq!(snapshot.rows[0].cells[0].semantic, SemanticContent::Input);
+        assert!(snapshot.rows[0].cells[0].hyperlink.is_some());
+
+        // Derive the page boundary from the native layout, without ABI constants.
+        let boundary = usize::from(PageCapacity::initial(128).unwrap().rows);
+        let mut terminal = Terminal::new(128, (boundary + 1) as u16, 0);
+        terminal.cursor_position(boundary, 1);
+        terminal.feed("\x1b[31m\x1b]8;;https://example.org\x1b\\a\u{301}".as_bytes());
+        let snapshot = terminal.screen().snapshot_viewport();
+        let original_link = terminal.screen().cursor.hyperlink.clone().unwrap();
+        let original_owner = terminal.screen().cursor_style.unwrap().0;
+        terminal.cursor_position(boundary + 1, 1);
+        terminal.feed("b\u{301}".as_bytes());
+        assert_ne!(terminal.screen().cursor_style.unwrap().0, original_owner);
+        assert_ne!(
+            terminal.screen().cursor.hyperlink.as_ref().unwrap().id,
+            original_link.id
+        );
+        assert_references(terminal.screen());
+        terminal.cursor_position(boundary, 1);
+        terminal.print('C');
+        assert_references(terminal.screen());
+        assert_eq!(snapshot.row_text(&snapshot.rows[boundary - 1]), "a\u{301}");
+        assert_eq!(
+            snapshot.rows[boundary - 1].cells[0]
+                .hyperlink
+                .as_ref()
+                .unwrap()
+                .id,
+            original_link.id
+        );
+        let data = crate::snapshot::encode_to_vec(&terminal).unwrap();
+        let restored = crate::snapshot::decode(data.as_slice(), Default::default()).unwrap();
+        assert_references(restored.screen());
     }
 
     #[test]

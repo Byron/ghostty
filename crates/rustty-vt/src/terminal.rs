@@ -436,6 +436,7 @@ impl Terminal {
         request.reply(result)
     }
 
+    #[inline(always)]
     fn ensure_row_cells(&mut self, row: usize, end: usize) {
         let columns = usize::from(self.cols);
         if self.screen().rows[row].cells.len() < end.min(columns) {
@@ -884,27 +885,28 @@ impl Terminal {
         }
         self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
         self.clamp_cursor();
-        let current = self.screen().cursor.clone();
-        let right = if current.col > self.margins.right {
+        let cursor = &self.screen().cursor;
+        let (row, col, pending_wrap) = (cursor.row, cursor.col, cursor.pending_wrap);
+        let right = if col > self.margins.right {
             self.cols as usize - 1
         } else {
             self.margins.right
         };
-        let previous_col = if current.pending_wrap && self.modes.dec(7) {
-            Some(current.col)
+        let previous_col = if cp as u32 <= 255 {
+            None
+        } else if pending_wrap && self.modes.dec(7) {
+            Some(col)
         } else if self.modes.dec(2027)
             && !self.modes.dec(7)
-            && current.col == right
-            && self.screen().rows[current.row].cells[right]
-                .codepoint
-                .is_some()
+            && col == right
+            && self.screen().rows[row].cells[right].codepoint.is_some()
         {
             Some(right)
         } else {
-            current.col.checked_sub(1)
+            col.checked_sub(1)
         };
         let previous_col = previous_col.map(|col| {
-            if self.screen().rows[current.row].cells[col].width == 0 {
+            if self.screen().rows[row].cells[col].width == 0 {
                 col.saturating_sub(1)
             } else {
                 col
@@ -913,14 +915,14 @@ impl Terminal {
 
         if cp as u32 > 255
             && self.modes.dec(2027)
-            && current.col > 0
+            && col > 0
             && let Some(col) = previous_col
         {
-            let previous = &self.screen().rows[current.row].cells[col];
+            let previous = &self.screen().rows[row].cells[col];
             let previous_width = previous.width;
             let last = if previous.grapheme.is_some() {
                 self.screen()
-                    .cell_text(&self.screen().rows[current.row], col)
+                    .cell_text(&self.screen().rows[row], col)
                     .chars()
                     .last()
             } else {
@@ -954,7 +956,7 @@ impl Terminal {
                 return;
             }
             if let Some(col) = previous_col {
-                let previous = &self.screen().rows[current.row].cells[col];
+                let previous = &self.screen().rows[row].cells[col];
                 if previous.codepoint.is_none() {
                     return;
                 }
@@ -970,7 +972,7 @@ impl Terminal {
             return;
         }
         self.previous_char = Some(cp);
-        if current.pending_wrap && self.modes.dec(7) {
+        if pending_wrap && self.modes.dec(7) {
             self.print_wrap();
         }
         if self.modes.get(false, 4)
@@ -991,10 +993,11 @@ impl Terminal {
             self.put_cell(Some(cp), width, false);
         }
         let x = self.screen().cursor.col;
-        self.ensure_row_cells(self.screen().cursor.row, x + usize::from(width) + 1);
         self.screen_mut().cursor.pending_wrap = x + width as usize > right;
         self.screen_mut().cursor.col = (x + width as usize).min(right);
-        self.changed();
+        // put_cell synchronized the cursor's resources. Advancing within this
+        // row changes neither its owning page nor its style or hyperlink.
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn append_grapheme(&mut self, mut col: usize, cp: char, width: u8, right: usize) {
@@ -1071,7 +1074,6 @@ impl Terminal {
     }
 
     fn put_cell(&mut self, codepoint: Option<char>, width: u8, spacer_head: bool) {
-        self.screen_mut().sync_cursor_resources();
         // Map only when writing a cell. Width, combining behavior, and REP
         // use the original scalar; even an empty spacer consumes one shift.
         let charset = &mut self.screen_mut().charset;
@@ -1080,56 +1082,10 @@ impl Terminal {
         let codepoint = codepoint
             .map(|cp| map_charset(cp, charset.slots[slot]))
             .filter(|&cp| cp != '\0');
-        let cursor = self.screen().cursor.clone();
-        self.ensure_row_cells(cursor.row, cursor.col + usize::from(width));
-        let old_width = self.screen().rows[cursor.row].cells[cursor.col].width;
-        if cursor.row > 0 && cursor.col <= 1 && old_width != width && old_width != 1 {
-            let previous = &mut self.screen_mut().rows[cursor.row - 1];
-            previous.cells.last_mut().unwrap().spacer_head = false;
-            previous.dirty = true;
-        }
-        self.screen_mut().erase_row_cells(
-            cursor.row,
-            cursor.col,
-            cursor.col + width as usize,
-            cursor.style.background,
-            false,
-        );
-        let style_id = self.screen_mut().retain_cursor_style_for_cell();
-        if width == 2 {
-            self.screen_mut().retain_cursor_style_for_cell();
-        }
-        let row = &mut self.screen_mut().rows[cursor.row];
-        let cell = Cell {
-            style_id,
-            link_id: 0,
-            grapheme: None,
-            codepoint,
-            width,
-            style: cursor.style,
-            hyperlink: cursor.hyperlink,
-            protected: cursor.protected,
-            semantic: cursor.semantic,
-            spacer_head,
-        };
-        row.cells[cursor.col] = cell.clone();
-        if width == 2 && cursor.col + 1 < row.cells.len() {
-            row.cells[cursor.col + 1] = Cell {
-                codepoint: None,
-                width: 0,
-                ..cell
-            };
-        }
-        row.dirty = true;
-        if self.screen().rows[cursor.row].cells[cursor.col]
-            .hyperlink
-            .is_some()
-        {
-            self.screen_mut().set_cell_cursor_hyperlink(cursor.col);
-            if width == 2 {
-                self.screen_mut().set_cell_cursor_hyperlink(cursor.col + 1);
-            }
-        }
+        // print and append_grapheme extend the source row; print_wrap extends
+        // the destination row before any wrapped write reaches this helper.
+        self.screen_mut()
+            .write_cursor_cell(codepoint, width, spacer_head);
     }
 
     fn print_wrap(&mut self) {

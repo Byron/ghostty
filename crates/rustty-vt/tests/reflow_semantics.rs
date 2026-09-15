@@ -1,6 +1,46 @@
 use rustty_vt::{GridPoint, Selection, SemanticContent, Terminal, snapshot};
 
 #[test]
+fn reflow_initializes_retained_blank_gaps_and_viewport_padding() {
+    let mut terminal = Terminal::new(8, 6, 20);
+    terminal.feed(b"A\x1b[3;1HZ");
+    for width in [4, 8] {
+        terminal.resize(width, 6);
+        let screen = terminal.screen();
+        assert!(
+            screen
+                .all_rows()
+                .all(|row| row.cells.len() == usize::from(width))
+        );
+        assert_eq!(
+            screen
+                .rows
+                .iter()
+                .map(|row| screen.row_text(row))
+                .collect::<Vec<_>>(),
+            ["A", "", "Z", "", "", ""],
+        );
+        assert_eq!((screen.cursor.row, screen.cursor.col), (2, 1));
+        let bytes = snapshot::encode_to_vec(&terminal).unwrap();
+        terminal = snapshot::decode(bytes.as_slice(), Default::default()).unwrap();
+    }
+    // Editing a retained gap after reflow must have real cell storage.
+    terminal.feed(b"\x1b[2;8HX");
+    assert_eq!(terminal.screen().rows[1].cells[7].codepoint, Some('X'));
+
+    // Tiny rows must keep exact capacities: history memory limits charge them.
+    for width in [1, 2, 3] {
+        terminal.resize(width, 6);
+        assert!(
+            terminal
+                .screen()
+                .all_rows()
+                .all(|row| row.cells.capacity() == usize::from(width))
+        );
+    }
+}
+
+#[test]
 fn narrowing_with_more_active_rows_counts_continuations_at_the_active_boundary() {
     let mut terminal = Terminal::new(4, 2, 20);
     terminal.feed(b"ABCDEFGHI");

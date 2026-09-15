@@ -2707,7 +2707,9 @@ impl Screen {
             let mut map = HashMap::<GridPointKey, GridPoint>::new();
             let mut wanted = Vec::new();
             let mut output = Vec::new();
-            let mut line = self.blank_row(cols, Color::Default);
+            // Independent blank rows may be discarded at the end. Keep their
+            // identities for anchors, but allocate cells only when retained.
+            let mut line = self.blank_row(0, Color::Default);
             let mut x: usize = 0;
             let mut pin_x: usize = 0;
             let mut written_rows = 0;
@@ -2778,6 +2780,9 @@ impl Screen {
                     }
                 };
                 if used > 0 {
+                    if line.cells.is_empty() {
+                        line.cells = vec![Cell::default(); cols];
+                    }
                     while self.pages.total_rows() <= output.len() {
                         self.pages.reflow_row(capacity);
                     }
@@ -2917,7 +2922,7 @@ impl Screen {
                 }
                 if !old.wrapped {
                     output.push(line);
-                    line = self.blank_row(cols, Color::Default);
+                    line = self.blank_row(0, Color::Default);
                     x = 0;
                 }
             }
@@ -2946,6 +2951,11 @@ impl Screen {
             while output.len() > written_rows {
                 let row = output.pop().unwrap();
                 self.release_row_resources(&row);
+            }
+            for row in &mut output {
+                if row.cells.is_empty() {
+                    row.cells = vec![Cell::default(); cols];
+                }
             }
             if self.pages.total_rows() > output.len() {
                 self.pages.truncate(output.len());

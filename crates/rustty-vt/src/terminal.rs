@@ -1499,7 +1499,7 @@ impl Terminal {
         screen.rows.insert(m.bottom, blank);
         screen.discard_row(row.id);
         screen.install_row_copies(copies, Some(row));
-        screen.sync_resource_pages(false);
+        screen.sync_resource_pages(false, m.bottom);
     }
 
     fn scrolls_above_cursor(&self) -> bool {
@@ -1612,7 +1612,7 @@ impl Terminal {
                     screen.release_row_resources(&row);
                     screen.discard_row(row.id);
                 }
-                screen.sync_resource_pages(false);
+                screen.sync_resource_pages(false, m.bottom);
             } else {
                 for y in m.top..m.bottom {
                     self.copy_row_region(y + 1, y, m.left, m.right + 1, bg);
@@ -1653,7 +1653,7 @@ impl Terminal {
                 screen.release_row_resources(&row);
                 screen.discard_row(row.id);
                 screen.rows.insert(m.top, blank);
-                screen.sync_resource_pages(true);
+                screen.sync_resource_pages(true, m.top);
             } else {
                 for y in (m.top + 1..=m.bottom).rev() {
                     self.copy_row_region(y - 1, y, m.left, m.right + 1, bg);

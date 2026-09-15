@@ -1964,8 +1964,17 @@ impl Screen {
 
     /// Rehome complete rows after physical page movement. Same-page rotations
     /// keep their IDs; crossing a page copies with addWithId before releasing
-    /// the source. The direction follows the native copy operation.
-    pub(crate) fn sync_resource_pages(&mut self, reverse: bool) {
+    /// the source. The direction follows the native copy operation. The newly
+    /// inserted blank row has no resources to scan or transfer.
+    pub(crate) fn sync_resource_pages(&mut self, reverse: bool, blank: usize) {
+        debug_assert!(self.rows[blank].cells.iter().all(|cell| {
+            cell.style_id == 0
+                && cell.link_id == 0
+                && cell.grapheme.is_none()
+                && cell.hyperlink.is_none()
+        }));
+        let index = self.pages.page_index_from_end(self.rows.len() - 1 - blank);
+        self.rows[blank].resource_page = Some(self.pages.pages[index].serial);
         let count = self.rows.len();
         for offset in 0..count {
             let absolute = self.history.len() + if reverse { count - 1 - offset } else { offset };
@@ -3734,6 +3743,36 @@ mod resource_tests {
             &link
         ));
         assert_references(screen);
+    }
+
+    #[test]
+    fn fresh_scroll_rows_preserve_background_and_resource_references() {
+        for (command, blank) in [
+            ("\x1b[48;1H\n", 47),
+            ("\x1b[2;48r\x1b[48;1H\x1bD", 47),
+            ("\x1b[1;47r\x1b[S", 46),
+            ("\x1b[H\x1b[T", 0),
+        ] {
+            let mut terminal = Terminal::with_limits(1024, 48, ScrollbackLimits::default());
+            terminal.feed(b"\x1b[?2027h\x1b[31m\x1b]8;id=shared;https://example.org\x1b\\");
+            for row in 1..=48 {
+                terminal.feed(format!("\x1b[{row};1Ha\u{301}界").as_bytes());
+            }
+            terminal.feed(b"\x1b[44m");
+            terminal.feed(command.as_bytes());
+            let screen = terminal.screen();
+            assert!(screen.rows[blank].cells.iter().all(|cell| {
+                cell.codepoint.is_none()
+                    && cell.width == 1
+                    && cell.style.background == Color::Indexed(4)
+                    && cell.style_id == 0
+                    && cell.hyperlink.is_none()
+            }));
+            assert_references(screen);
+            let encoded = crate::snapshot::encode_to_vec(&terminal).unwrap();
+            let restored = crate::snapshot::decode(encoded.as_slice(), Default::default()).unwrap();
+            assert_references(restored.screen());
+        }
     }
 
     #[test]

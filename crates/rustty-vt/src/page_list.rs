@@ -233,42 +233,54 @@ impl PageList {
     ) -> ScrollbackLimits {
         let capacity = PageCapacity::initial(columns).expect("validated screen dimensions");
         let minimum_lines = usize::from(capacity.rows);
-        let standard_bytes = PageCapacity::STANDARD
-            .layout()
-            .expect("standard page layout")
-            .allocation_bytes(false);
-        let minimum_bytes = standard_bytes * (active_rows.max(1).div_ceil(minimum_lines) + 1);
         ScrollbackLimits {
-            bytes: limits.bytes.map(|bytes| bytes.max(minimum_bytes)),
+            bytes: limits.bytes.map(|bytes| {
+                let standard_bytes = PageCapacity::STANDARD
+                    .layout()
+                    .expect("standard page layout")
+                    .total_size;
+                let minimum_bytes =
+                    standard_bytes * (active_rows.max(1).div_ceil(minimum_lines) + 1);
+                bytes.max(minimum_bytes)
+            }),
             lines: limits.lines.map(|lines| lines.max(minimum_lines)),
         }
     }
 
     /// Grow one physical row and return the number of recycled history rows.
     pub fn grow(&mut self, columns: u16, active_rows: usize, limits: ScrollbackLimits) -> usize {
-        let effective = Self::effective_limits(columns, active_rows, limits);
         let last = self.pages.back_mut().expect("a screen has pages");
         if last.rows < last.capacity.rows {
             last.rows += 1;
+            // Existing allocations ignore byte limits. The native line floor
+            // only raises the requested limit, so normalize it only on overflow.
+            if limits
+                .lines
+                .is_none_or(|limit| self.total_rows().saturating_sub(active_rows) <= limit)
+            {
+                return 0;
+            }
             return self.prune(
                 active_rows,
-                ScrollbackLimits {
-                    bytes: None,
-                    ..effective
-                },
+                Self::effective_limits(
+                    columns,
+                    active_rows,
+                    ScrollbackLimits {
+                        bytes: None,
+                        ..limits
+                    },
+                ),
             );
         }
 
+        let effective = Self::effective_limits(columns, active_rows, limits);
         let capacity = PageCapacity::initial(columns).expect("validated screen dimensions");
-        let standard_bytes = PageCapacity::STANDARD
-            .layout()
-            .unwrap()
-            .allocation_bytes(false);
         let mut removed = 0;
         if self.pages.len() > 1
-            && effective
-                .bytes
-                .is_some_and(|limit| self.allocation_bytes() + standard_bytes > limit)
+            && effective.bytes.is_some_and(|limit| {
+                let standard_bytes = PageCapacity::STANDARD.layout().unwrap().total_size;
+                self.allocation_bytes() + standard_bytes > limit
+            })
         {
             let first_rows = usize::from(self.pages.front().unwrap().rows);
             if self.total_rows() - first_rows + 1 >= active_rows {
@@ -442,6 +454,80 @@ impl PageList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growth_preserves_native_line_and_byte_floors() {
+        let columns = 1024;
+        let minimum = usize::from(PageCapacity::initial(columns).unwrap().rows);
+        for lines in [
+            None,
+            Some(0),
+            Some(minimum - 1),
+            Some(minimum),
+            Some(minimum + 1),
+        ] {
+            let limits = ScrollbackLimits { bytes: None, lines };
+            let mut pages = PageList::new(columns, 2);
+            for _ in 0..minimum {
+                assert_eq!(pages.grow(columns, 2, limits), 0);
+            }
+            assert_eq!(pages.total_rows(), minimum + 2);
+            assert_eq!(
+                pages.grow(columns, 2, limits),
+                if lines.is_some_and(|limit| limit <= minimum) {
+                    minimum
+                } else {
+                    0
+                },
+            );
+            assert_eq!(
+                pages.grow(columns, 2, limits),
+                if lines == Some(minimum + 1) {
+                    minimum
+                } else {
+                    0
+                },
+            );
+            assert_eq!(
+                pages.total_rows(),
+                if lines.is_none() { minimum + 4 } else { 4 }
+            );
+        }
+
+        let standard_bytes = PageCapacity::STANDARD.layout().unwrap().total_size;
+        for bytes in [
+            None,
+            Some(0),
+            Some(standard_bytes),
+            Some(3 * standard_bytes),
+        ] {
+            let limits = ScrollbackLimits { bytes, lines: None };
+            let mut pages = PageList::new(columns, 2);
+            // The two-page floor permits filling both existing allocations;
+            // only requesting a third page can recycle the oldest one.
+            for _ in 2..2 * minimum {
+                assert_eq!(pages.grow(columns, 2, limits), 0);
+            }
+            let recycled = bytes.is_some_and(|limit| limit < 3 * standard_bytes);
+            assert_eq!(
+                pages.grow(columns, 2, limits),
+                if recycled { minimum } else { 0 }
+            );
+            assert_eq!(pages.pages.len(), if recycled { 2 } else { 3 });
+        }
+        assert_eq!(
+            PageList::effective_limits(
+                columns,
+                minimum + 1,
+                ScrollbackLimits {
+                    bytes: Some(0),
+                    lines: None
+                },
+            )
+            .bytes,
+            Some(3 * standard_bytes),
+        );
+    }
 
     #[test]
     fn reverse_lookup_matches_forward_after_page_changes() {

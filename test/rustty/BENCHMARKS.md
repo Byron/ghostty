@@ -418,7 +418,7 @@ resource rebuilding and anchor preservation. The new regression checks retained
 blank gaps, viewport padding, snapshot round trips, subsequent printing and
 exact capacities at widths 1–3.
 
-## Current Rustty/Ghostty baseline, 2026-09-15
+## Pre-batching Rustty/Ghostty baseline, 2026-09-15
 
 Fresh measurements at `71a0b4f` (Rustty production code through `1bc18ab`),
 using the unchanged 36-case harness for both engines. Both binaries were built
@@ -501,3 +501,160 @@ GHOSTTY_PRIMITIVES_BIN="$PWD/target/criterion-baseline-71a0b4f/vt-primitives" \
   --baseline baseline-71a0b4f \
   --sample-size 50 --warm-up-time 0.5 --measurement-time 2
 ```
+
+## Parsed input and streaming batches, 2026-09-15
+
+This pass compares production code at `c98fa109c`, built with the 42-case
+harness from `329efa7`, against `d43d848` using that same harness. The original
+36 workloads are unchanged; the six mixed/chunked workloads described above
+are Rust-only. Both Rust binaries were built before measurement. Runs were
+serial, without concurrent builds or tests, using 50 samples, 0.5 seconds of
+warmup and 2 seconds of measurement on the same machine and release settings
+documented above. Values are median microseconds per complete workload.
+Speedup is Rustty before/after; Rustty/Ghostty is Rustty after/native, so values
+above 1 in the last column mean Ghostty is faster. The Ghostty column is a
+fresh measurement of the unchanged native binary. Its feed/stream timings
+remain variable; differences from the preceding native table are not code gains.
+
+ASCII `feed` improves 10.01×; plain and styled ASCII streams improve 2.73× and
+3.24×. Chinese improves 2.17× for `feed`, 1.61× for plain streams and 1.86× for
+styled streams. Mixed/chunked feed improves 1.22–1.36× and mixed streams
+1.28–1.45×. Emoji streaming is effectively unchanged. The remaining plain
+ASCII/Chinese stream gap is still about 9× versus this native reference.
+
+| Operation | Corpus | Before µs | After µs | Speedup | Ghostty µs | Rustty/Ghostty |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| print | ascii | 10.995 | 11.997 | 0.92× | 6.272 | 1.91× |
+| print | chinese | 17.245 | 18.705 | 0.92× | 12.054 | 1.55× |
+| print | combining | 25.836 | 29.111 | 0.89× | 403.290 | 0.07× |
+| print | emoji | 27.595 | 30.627 | 0.90× | 14.952 | 2.05× |
+| reflow | ascii | 51.155 | 46.414 | 1.10× | 29.833 | 1.56× |
+| reflow | chinese | 59.949 | 54.820 | 1.09× | 30.655 | 1.79× |
+| reflow | combining | 47.148 | 43.399 | 1.09× | 58.479 | 0.74× |
+| reflow | emoji | 39.934 | 36.813 | 1.08× | 40.957 | 0.90× |
+| feed | ascii | 14.897 | 1.488 | 10.01× | 0.517 | 2.88× |
+| feed | chinese | 22.969 | 10.599 | 2.17× | 455.221 | 0.02× |
+| feed | combining | 31.005 | 28.260 | 1.10× | 424.773 | 0.07× |
+| feed | emoji | 32.570 | 30.399 | 1.07× | 17.923 | 1.70× |
+| stream | ascii | 156.583 | 57.349 | 2.73× | 6.306 | 9.09× |
+| stream | chinese | 134.491 | 83.300 | 1.61× | 9.455 | 8.81× |
+| stream | combining | 476.665 | 407.896 | 1.17× | 501.901 | 0.81× |
+| stream | emoji | 509.672 | 506.101 | 1.01× | 744.528 | 0.68× |
+| stream_styled | ascii | 225.466 | 69.691 | 3.24× | 8.354 | 8.34× |
+| stream_styled | chinese | 169.992 | 91.279 | 1.86× | 37.203 | 2.45× |
+| stream_styled | combining | 635.924 | 493.403 | 1.29× | 521.173 | 0.95× |
+| stream_styled | emoji | 663.016 | 661.051 | 1.00× | 771.199 | 0.86× |
+| scalar | ascii | 1.442 | 1.526 | 0.94× | 1.320 | 1.16× |
+| scalar | chinese | 1.434 | 1.486 | 0.96× | 1.318 | 1.13× |
+| scalar | combining | 1.461 | 1.539 | 0.95× | 1.292 | 1.19× |
+| scalar | emoji | 1.433 | 1.488 | 0.96× | 1.299 | 1.15× |
+| read | ascii | 1.896 | 1.969 | 0.96× | 1.957 | 1.01× |
+| read | chinese | 2.006 | 1.972 | 1.02× | 1.939 | 1.02× |
+| read | combining | 2.589 | 2.734 | 0.95× | 5.889 | 0.46× |
+| read | emoji | 2.851 | 2.820 | 1.01× | 2.422 | 1.16× |
+| clone | ascii | 10.404 | 10.821 | 0.96× | 6.366 | 1.70× |
+| clone | chinese | 11.544 | 11.585 | 1.00× | 6.547 | 1.77× |
+| clone | combining | 12.392 | 12.555 | 0.99× | 17.871 | 0.70× |
+| clone | emoji | 11.578 | 11.523 | 1.00× | 10.109 | 1.14× |
+| width | ascii | 0.473 | 0.480 | 0.99× | 0.343 | 1.40× |
+| width | chinese | 0.471 | 0.492 | 0.96× | 0.341 | 1.44× |
+| width | combining | 0.432 | 0.449 | 0.96× | 0.427 | 1.05× |
+| width | emoji | 0.323 | 0.334 | 0.97× | 0.322 | 1.04× |
+
+| Mixed workload | Delivery | Before µs | After µs | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| chunked_feed_mixed | whole | 84.936 | 62.873 | 1.35× |
+| chunked_feed_mixed | 7_bytes | 95.365 | 78.000 | 1.22× |
+| chunked_feed_mixed | 4_KiB | 84.310 | 62.020 | 1.36× |
+| chunked_stream_mixed | whole | 348.392 | 240.529 | 1.45× |
+| chunked_stream_mixed | 7_bytes | 384.482 | 299.843 | 1.28× |
+| chunked_stream_mixed | 4_KiB | 350.149 | 241.958 | 1.45× |
+
+The parser now delivers borrowed ASCII and valid UTF-8 runs to the terminal.
+Eligible spans share cursor, page and style work across multiple cells.
+Scalar printing still handles wrapping, grapheme joins and complex destination
+cells. Insert mode, disabled autowrap, legacy character mappings and hyperlinks
+retain scalar handling; UTF-8 batching also falls back for horizontal margins.
+Both `feed` and `feed_with_handler` preserve input order and chunk continuation.
+
+Three shared changes reduce scrolling costs: blank rows initialize cells
+directly instead of cloning their resource-bearing type; row accounting adds
+only present payloads and creates a hyperlink deduplication set only when
+needed; resource-page lookup searches from the active end of history. Cell
+size remains 56 bytes, and owned-history charges retain their previous
+saturating arithmetic and sharing rules. Ghostty production code is unchanged.
+
+The full run records 8–13% slower direct printing and smaller regressions in
+several scan/read controls. A second 50-sample run measured the final binary
+first, then the before binary, with the same settings. The larger Unicode-print
+slowdowns did not repeat; ASCII printing and combining reads remained about 4%
+slower. The complete first-run table is retained above, and the reverse-order
+controls below show the timing sensitivity. No scan/read speedup is claimed.
+Positive changes here mean the final binary is slower.
+
+| Reverse-order control | Corpus | Before µs | After µs | Change |
+| --- | --- | ---: | ---: | ---: |
+| print | ascii | 11.253 | 11.684 | +3.8% |
+| print | chinese | 17.885 | 18.087 | +1.1% |
+| print | combining | 26.487 | 26.036 | -1.7% |
+| print | emoji | 28.241 | 27.648 | -2.1% |
+| scalar | ascii | 1.499 | 1.510 | +0.7% |
+| read | combining | 2.638 | 2.735 | +3.7% |
+| width | ascii | 0.475 | 0.481 | +1.3% |
+
+Adding the Unicode run writer made LLVM outline the shared grapheme check;
+keeping that check inline reduced the resulting Chinese-print slowdown.
+Future comparisons should retain the complete harness as well as the
+production revision, compiler and release settings: adding benchmarks can
+also change generated code in unchanged operations.
+
+Validation passed 294 VT tests, 12 parser tests and all 78 Rust/native benchmark
+smoke cases. The scalar-reference table covers 2,088 delivery variants across
+Unicode, terminal modes, margins, overwrites and host-handler paths, with
+additional checks for ignored scalars after public cursor edits, effect order
+and snapshot continuation. Native differential testing passed 6,966 of 6,969
+comparisons. The three failures are the previously documented whole/scalar/
+chunked variants of `pages/graphemes/wrap/3/1/1/alternate`: Rustty preserves a
+ZWJ that Ghostty drops when a widening grapheme wraps in a one-row alternate
+screen. Strict parser/VT Clippy, formatting and the app check also passed.
+
+The local results are in `target/criterion-batching/`: `comparison.json` and
+`comparison.md` contain the table; `metadata.json` identifies revisions,
+toolchains, binary SHA-256 hashes and validation logs. Rust estimates use the
+`matched-before` and `final` labels, from `matched-before.log` and
+`matched-after.log`. Native `final` estimates come from the earlier `final.log`
+run. `reverse-controls.json`/`reverse-controls.md` retain the confirmation
+table. The final profiling captures and summaries are under `profiles/`.
+
+To repeat the Rust comparison with the retained executables, keep builds and
+other benchmarks stopped during both runs. The fresh directory below avoids
+replacing the recorded results. Build any new candidate before either run and
+retain this same 42-case harness:
+
+```sh
+CRITERION_HOME="$PWD/target/criterion-batching-repeat" \
+  target/criterion-batching/primitives-before --bench '^rustty/' \
+  --save-baseline matched-before \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+CRITERION_HOME="$PWD/target/criterion-batching-repeat" \
+  target/criterion-batching/primitives-final --bench '^rustty/' \
+  --baseline matched-before \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+```
+
+Final eight-second, nominal 1 kHz profiles used an optimized Rust build with
+debug information and frame pointers. ASCII streaming spent 20% of active
+samples in `sync_resource_row`, 17% in `scroll_up` (including inlined blank-row
+initialization), 17% in `Row::storage_bytes`, and 11% in `print_ascii`. Chinese
+streaming spent 31% in `print_utf8`, 15% in row synchronization, 12% in scrolling
+and 11% in storage accounting. These are physical-symbol shares, including
+inlined work. Row synchronization also scans fresh blank cells; its full cost
+is not page lookup. Row lifecycle/accounting and layout calculations therefore
+remain candidates for the next plain-stream pass.
+
+The native combining overwrite and Chinese `feed` cliffs still limit those
+comparisons. Use bounded `stream` and `stream_styled` results to assess ongoing
+output, and the mixed/chunked cases to check fallback and delivery overhead.
+Combining and ZWJ-heavy input still needs scalar grapheme work. The reflow
+workload remains limited to the active screen; history reflow needs separate
+workloads before choosing its next optimization.

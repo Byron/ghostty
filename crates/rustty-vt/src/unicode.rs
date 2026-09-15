@@ -64,6 +64,8 @@ fn indic_extend(g: u8) -> bool {
 }
 
 /// Controls are handled by the VT parser before this tailored segmentation.
+// Sharing this with run printing must not add a call per scalar print.
+#[inline(always)]
 pub(crate) fn grapheme_break(a: char, b: char, state: &mut u8) -> bool {
     let a = properties(a).grapheme;
     let b = properties(b).grapheme;

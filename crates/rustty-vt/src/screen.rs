@@ -1175,6 +1175,110 @@ impl Screen {
         written
     }
 
+    /// Consume simple Unicode cells in one row, stopping before a scalar fallback.
+    /// The caller handles wraps and enables this only with full horizontal margins.
+    pub(crate) fn write_cursor_utf8(
+        &mut self,
+        text: &str,
+        right: usize,
+        graphemes: bool,
+        state: &mut u8,
+    ) -> (usize, usize) {
+        // Combining-heavy overwrites usually fall back immediately. Reject them
+        // before looking up a page or checking its cursor resource handles.
+        if self.rows[self.cursor.row].cells[self.cursor.col]
+            .grapheme
+            .is_some()
+            || text
+                .chars()
+                .next()
+                .is_none_or(|cp| cp as u32 > 255 && crate::unicode::codepoint_width(cp) == 0)
+        {
+            return (0, 0);
+        }
+        let index = self.cursor_page_index();
+        let page = &mut self.pages.pages[index];
+        // Ignored or capped scalar anchors may not have synchronized a public
+        // cursor edit. Let scalar printing do that after its grapheme check.
+        if self.cursor_link.is_some() {
+            return (0, 0);
+        }
+        let style_id = match self.cursor_style {
+            Some((owner, id))
+                if owner == page.serial && *page.styles.get(id) == self.cursor.style =>
+            {
+                id
+            }
+            None if self.cursor.style == Style::default() => 0,
+            _ => return (0, 0),
+        };
+        let row = &mut self.rows[self.cursor.row];
+        let mut col = self.cursor.col;
+        let (mut bytes, mut scalars) = (0, 0);
+        for cp in text.chars() {
+            let width = if cp as u32 <= 255 {
+                1
+            } else {
+                crate::unicode::codepoint_width(cp)
+            };
+            let end = col + usize::from(width);
+            if width == 0 || end > right + 1 {
+                break;
+            }
+            let mut next_state = *state;
+            if cp as u32 > 255 && graphemes && col > 0 {
+                let mut previous = col - 1;
+                if row.cells[previous].width == 0 {
+                    previous = previous.saturating_sub(1);
+                }
+                let previous = &row.cells[previous];
+                if previous.grapheme.is_some()
+                    || previous.codepoint.is_some_and(|last| {
+                        !crate::unicode::grapheme_break(last, cp, &mut next_state)
+                    })
+                {
+                    break;
+                }
+            }
+            let cells = &mut row.cells[col..end];
+            let same_width = cells[0].width == width && (width == 1 || cells[1].width == 0);
+            if (!same_width && !cells.iter().all(|cell| cell.width == 1))
+                || cells.iter().any(|cell| {
+                    cell.grapheme.is_some() || cell.link_id != 0 || cell.hyperlink.is_some()
+                })
+            {
+                break;
+            }
+            for (offset, cell) in cells.iter_mut().enumerate() {
+                if cell.style_id != style_id {
+                    page.styles.release(cell.style_id);
+                    page.styles.retain(style_id);
+                }
+                cell.codepoint = (offset == 0).then_some(cp);
+                cell.width = if offset == 0 { width } else { 0 };
+                cell.style_id = style_id;
+                cell.style = self.cursor.style;
+                cell.protected = self.cursor.protected;
+                cell.semantic = self.cursor.semantic;
+                cell.spacer_head = false;
+            }
+            *state = next_state;
+            col = end;
+            bytes += cp.len_utf8();
+            scalars += 1;
+            if col > right {
+                break;
+            }
+        }
+        if bytes != 0 {
+            row.resource_page = Some(page.serial);
+            row.dirty = true;
+            self.cursor.col = col.min(right);
+            self.cursor.pending_wrap = col > right;
+        }
+        (bytes, scalars)
+    }
+
     /// Replace printed cells directly, keeping references whose style is unchanged.
     /// Physical row extension must precede this: it can rebuild resource tables.
     pub(crate) fn write_cursor_cell(
@@ -3557,7 +3661,7 @@ mod resource_tests {
     }
 
     #[test]
-    fn ascii_runs_replace_resources_and_cross_pages() {
+    fn printable_runs_replace_resources_and_cross_pages() {
         let boundary = usize::from(PageCapacity::initial(32).unwrap().rows);
         let mut terminal = Terminal::new(32, 8, boundary + 16);
         terminal.feed(b"\x1b[?2027h");
@@ -3580,7 +3684,7 @@ mod resource_tests {
         for style in [b"\x1b[32m".as_slice(), b"\x1b[0m", b"\x1b[1;34m"] {
             terminal.feed(b"\x1b[H");
             terminal.feed(style);
-            terminal.feed(&[b'x'; 32 * 8 + 7]);
+            terminal.feed("x界".repeat(88).as_bytes());
             assert_references(terminal.screen());
         }
         let data = crate::snapshot::encode_to_vec(&terminal).unwrap();

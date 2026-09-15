@@ -316,6 +316,10 @@ impl Terminal {
                     self.print_ascii(bytes);
                     return;
                 }
+                BatchEvent::PrintUtf8(text) => {
+                    self.print_utf8(text);
+                    return;
+                }
                 BatchEvent::Event(event) => event,
             };
             self.handle(event, &mut pending, true, true);
@@ -346,6 +350,10 @@ impl Terminal {
             let event = match event {
                 BatchEvent::PrintAscii(bytes) => {
                     self.print_ascii(bytes);
+                    return;
+                }
+                BatchEvent::PrintUtf8(text) => {
+                    self.print_utf8(text);
                     return;
                 }
                 BatchEvent::Event(event) => event,
@@ -942,6 +950,50 @@ impl Terminal {
             cursor.col = (col + written).min(right);
             self.generation = self.generation.wrapping_add(written as u64);
             bytes = &bytes[written..];
+        }
+    }
+
+    fn print_utf8(&mut self, mut text: &str) {
+        if self.status_display {
+            return;
+        }
+        let screen = self.screen();
+        if self.modes.get(false, 4)
+            || !self.modes.dec(7)
+            || screen.charset.single.is_some()
+            || !matches!(
+                screen.charset.slots[screen.charset.gl],
+                Charset::Utf8 | Charset::Ascii
+            )
+            || screen.cursor.hyperlink.is_some()
+            || self.margins.left != 0
+            || self.margins.right != usize::from(self.cols) - 1
+        {
+            for cp in text.chars() {
+                self.print(cp);
+            }
+            return;
+        }
+        let right = usize::from(self.cols) - 1;
+        let graphemes = self.modes.dec(2027);
+        while let Some(cp) = text.chars().next() {
+            // Anchor each span with the full scalar path, including wrapping,
+            // page growth and grapheme joins across input chunk boundaries.
+            self.print(cp);
+            text = &text[cp.len_utf8()..];
+            if text.is_empty() || self.screen().cursor.pending_wrap {
+                continue;
+            }
+            let mut state = self.grapheme_state;
+            let (bytes, scalars) = self
+                .screen_mut()
+                .write_cursor_utf8(text, right, graphemes, &mut state);
+            if bytes != 0 {
+                self.grapheme_state = state;
+                self.previous_char = text[..bytes].chars().next_back();
+                self.generation = self.generation.wrapping_add(scalars as u64);
+                text = &text[bytes..];
+            }
         }
     }
 

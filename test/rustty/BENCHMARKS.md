@@ -391,3 +391,86 @@ Review checked mode save/reset behavior, snapshot bit order, page alignment,
 resource rebuilding and anchor preservation. The new regression checks retained
 blank gaps, viewport padding, snapshot round trips, subsequent printing and
 exact capacities at widths 1–3.
+
+## Current Rustty/Ghostty baseline, 2026-09-15
+
+Fresh measurements at `71a0b4f` (Rustty production code through `1bc18ab`),
+using the unchanged 36-case harness for both engines. Both binaries were built
+and all 72 smoke cases passed before timing; the native benchmark unit checks
+also passed. All 72 measured cases completed their content validations.
+
+Runs were serial, with task builds and tests stopped, on the same Apple M4 Max
+running macOS 26.7, Rust 1.98.1, Zig 0.16.0 and Criterion 0.8.2. Rust uses thin
+LTO and one codegen unit; Ghostty uses ReleaseFast. Each case uses 50 samples,
+0.5 seconds of warmup and 2 seconds of measurement. These longer samples
+establish a new baseline; differences from earlier tables are not additional
+optimization gains.
+
+Values are median microseconds per complete workload, including a complete
+resize round trip for reflow. **Rustty/Ghostty** divides the two medians:
+values above 1 mean Ghostty is faster; values below 1 mean Rustty is faster.
+
+| Operation | Corpus | Rustty µs | Ghostty µs | Rustty/Ghostty |
+| --- | --- | ---: | ---: | ---: |
+| print | ascii | 11.421 | 6.373 | 1.79× |
+| print | chinese | 17.819 | 12.506 | 1.42× |
+| print | combining | 27.075 | 415.678 | 0.07× |
+| print | emoji | 29.982 | 15.165 | 1.98× |
+| reflow | ascii | 54.219 | 31.227 | 1.74× |
+| reflow | chinese | 63.615 | 33.106 | 1.92× |
+| reflow | combining | 55.219 | 56.655 | 0.97× |
+| reflow | emoji | 42.314 | 38.129 | 1.11× |
+| feed | ascii | 15.390 | 0.514 | 29.94× |
+| feed | chinese | 23.855 | 537.443 | 0.04× |
+| feed | combining | 32.799 | 547.380 | 0.06× |
+| feed | emoji | 34.472 | 21.564 | 1.60× |
+| stream | ascii | 162.761 | 8.835 | 18.42× |
+| stream | chinese | 142.041 | 14.678 | 9.68× |
+| stream | combining | 497.660 | 595.353 | 0.84× |
+| stream | emoji | 537.748 | 952.646 | 0.56× |
+| stream_styled | ascii | 236.498 | 13.001 | 18.19× |
+| stream_styled | chinese | 181.230 | 49.334 | 3.67× |
+| stream_styled | combining | 656.783 | 587.584 | 1.12× |
+| stream_styled | emoji | 694.627 | 836.617 | 0.83× |
+| scalar | ascii | 1.596 | 1.327 | 1.20× |
+| scalar | chinese | 1.559 | 1.335 | 1.17× |
+| scalar | combining | 1.606 | 1.329 | 1.21× |
+| scalar | emoji | 1.544 | 1.327 | 1.16× |
+| read | ascii | 1.813 | 1.983 | 0.91× |
+| read | chinese | 1.784 | 1.999 | 0.89× |
+| read | combining | 2.594 | 6.060 | 0.43× |
+| read | emoji | 2.558 | 2.508 | 1.02× |
+| clone | ascii | 11.020 | 6.470 | 1.70× |
+| clone | chinese | 11.683 | 6.480 | 1.80× |
+| clone | combining | 13.101 | 18.500 | 0.71× |
+| clone | emoji | 11.776 | 10.706 | 1.10× |
+| width | ascii | 0.490 | 0.358 | 1.37× |
+| width | chinese | 0.488 | 0.351 | 1.39× |
+| width | combining | 0.450 | 0.437 | 1.03× |
+| width | emoji | 0.336 | 0.326 | 1.03× |
+
+Combining `print`/`feed` still encounter Ghostty's 512-cluster grapheme-map
+cliff, and Chinese `feed` still encounters its wide-destination suffix-rescan
+cliff. These cases do not describe general native Unicode throughput. Reflow
+still excludes scrollback; stream cases use the requested 1,024-line history
+limit. Native batches construct a fresh primed terminal while Rust retains its
+primed terminal, with setup excluded from both timers.
+
+Some native feed/stream medians remain variable. For example, the 95% median
+confidence intervals are 8.387–9.433 µs for ASCII `stream` and
+493.845–600.944 µs for combining `feed`. The saved estimates and samples retain
+all confidence intervals for subsequent comparisons.
+
+The local Criterion baseline is **`baseline-71a0b4f`**, under
+`target/criterion-baseline-71a0b4f/`. That directory also retains the benchmark
+binaries, SHA-256 hashes and toolchain metadata in `metadata.json`, the run and
+smoke logs, and the extracted `comparison.json`/`comparison.md` table.
+After building a candidate, compare it with this baseline using:
+
+```sh
+CRITERION_HOME="$PWD/target/criterion-baseline-71a0b4f" \
+GHOSTTY_PRIMITIVES_BIN="$PWD/target/criterion-baseline-71a0b4f/vt-primitives" \
+  cargo bench --offline -p rustty-vt --bench primitives -- \
+  --baseline baseline-71a0b4f \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+```

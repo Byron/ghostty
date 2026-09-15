@@ -254,24 +254,50 @@ pub enum SemanticClick {
 
 /// A cell's text, borrowing page-owned clusters or encoding one inline scalar.
 #[derive(Clone, Debug)]
-pub enum CellText<'a> {
-    Scalar { bytes: [u8; 4], len: u8 },
+pub struct CellText<'a>(CellTextStorage<'a>);
+
+// Keep encoded bytes private: only `scalar` can construct them.
+#[derive(Clone, Debug)]
+enum CellTextStorage<'a> {
+    Scalar {
+        codepoint: Option<char>,
+        bytes: [u8; 4],
+        len: u8,
+    },
     Grapheme(&'a str),
 }
 
 impl CellText<'_> {
+    #[inline]
     fn scalar(codepoint: Option<char>) -> Self {
         let mut bytes = [0; 4];
         let len = codepoint.map_or(0, |cp| cp.encode_utf8(&mut bytes).len()) as u8;
-        Self::Scalar { bytes, len }
+        Self(CellTextStorage::Scalar {
+            codepoint,
+            bytes,
+            len,
+        })
     }
 
+    /// Iterate inline scalars directly; only graphemes need UTF-8 decoding.
+    #[inline]
+    pub fn chars(&self) -> impl DoubleEndedIterator<Item = char> + Clone + '_ {
+        let (scalar, text) = match &self.0 {
+            CellTextStorage::Scalar { codepoint, .. } => (*codepoint, ""),
+            CellTextStorage::Grapheme(text) => (None, *text),
+        };
+        scalar.into_iter().chain(text.chars())
+    }
+
+    #[inline]
     pub fn as_str(&self) -> &str {
-        match self {
-            Self::Scalar { bytes, len } => {
-                std::str::from_utf8(&bytes[..usize::from(*len)]).unwrap()
+        match &self.0 {
+            CellTextStorage::Scalar { bytes, len, .. } => {
+                // SAFETY: private storage is built only by `scalar`, using
+                // char::encode_utf8 (or an empty slice for an empty cell).
+                unsafe { std::str::from_utf8_unchecked(&bytes[..usize::from(*len)]) }
             }
-            Self::Grapheme(text) => text,
+            CellTextStorage::Grapheme(text) => text,
         }
     }
 }
@@ -730,6 +756,7 @@ impl Screen {
     }
 
     /// Resolve text against its owning screen. Ordinary scalar reads allocate nothing.
+    #[inline]
     pub fn cell_text<'a>(&'a self, row: &Row, col: usize) -> CellText<'a> {
         let cell = &row.cells[col];
         if cell.codepoint.is_some()
@@ -741,7 +768,7 @@ impl Screen {
                 .iter()
                 .find(|page| Some(page.serial) == row.resource_page)
                 .expect("grapheme row must have a live owning page");
-            CellText::Grapheme(page.graphemes.text(allocation))
+            CellText(CellTextStorage::Grapheme(page.graphemes.text(allocation)))
         } else {
             CellText::scalar(cell.codepoint)
         }
@@ -2981,6 +3008,31 @@ impl Screen {
 }
 
 type GridPointKey = (u64, usize);
+
+#[cfg(test)]
+mod text_tests {
+    use super::{CellText, CellTextStorage};
+
+    #[test]
+    fn inline_text_matches_utf8_for_every_scalar() {
+        let empty = CellText::scalar(None);
+        assert_eq!(empty.as_str(), "");
+        assert_eq!(empty.chars().next(), None);
+        for cp in (0..=0x10ffff).filter_map(char::from_u32) {
+            let text = CellText::scalar(Some(cp));
+            assert_eq!(text.as_str(), cp.encode_utf8(&mut [0; 4]));
+            assert_eq!(text.chars().next(), Some(cp));
+            assert_eq!(text.chars().next_back(), Some(cp));
+            assert_eq!(text.chars().count(), 1);
+        }
+        for value in ["", "a\u{301}", "👩\u{200d}💻"] {
+            let text = CellText(CellTextStorage::Grapheme(value));
+            assert_eq!(text.as_str(), value);
+            assert!(text.chars().eq(value.chars()));
+            assert!(text.chars().rev().eq(value.chars().rev()));
+        }
+    }
+}
 
 #[cfg(test)]
 mod resource_tests {

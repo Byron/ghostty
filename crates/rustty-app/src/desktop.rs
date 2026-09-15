@@ -235,7 +235,7 @@ impl PaneRenderKey {
 
 struct PreparedPane {
     key: PaneRenderKey,
-    frame: Frame,
+    frame: Arc<Frame>,
     text: TerminalText,
     ime_rect: egui::Rect,
 }
@@ -286,9 +286,49 @@ impl PreparedPane {
         );
         Ok(Self {
             key,
-            frame,
+            frame: Arc::new(frame),
             text,
             ime_rect,
+        })
+    }
+}
+
+struct ComposedPane {
+    frame: Arc<Frame>,
+    rect: [f32; 4],
+    dim: Option<rustty_render::Color>,
+}
+
+struct ComposedFrame {
+    panes: Vec<ComposedPane>,
+    frame: Arc<Frame>,
+}
+
+impl ComposedFrame {
+    fn matches(&self, size: [u32; 2], panes: &[ComposedPane]) -> bool {
+        self.frame.size == size
+            && self.panes.len() == panes.len()
+            && self.panes.iter().zip(panes).all(|(old, new)| {
+                Arc::ptr_eq(&old.frame, &new.frame) && old.rect == new.rect && old.dim == new.dim
+            })
+    }
+
+    fn new(
+        size: [u32; 2],
+        panes: Vec<ComposedPane>,
+    ) -> std::result::Result<Self, rustty_render::ComposeError> {
+        let mut frame = Frame::empty(size);
+        for pane in &panes {
+            frame.append_clipped(&pane.frame, [pane.rect[0], pane.rect[1]], pane.rect)?;
+            if let Some(color) = pane.dim {
+                frame
+                    .quads
+                    .push(rustty_render::Quad::solid(pane.rect, color));
+            }
+        }
+        Ok(Self {
+            panes,
+            frame: Arc::new(frame),
         })
     }
 }
@@ -301,6 +341,7 @@ struct Host {
     fonts: rustty_render::Renderer,
     rects: BTreeMap<Id, egui::Rect>,
     prepared: BTreeMap<Id, PreparedPane>,
+    composed: Option<ComposedFrame>,
     pane_prepares: u64,
     content: Rect,
     divider_drag: Option<(Id, Axis, Rect)>,
@@ -444,10 +485,15 @@ impl DirectoryBadge {
     }
 }
 
-struct GpuRenderers(HashMap<Id, rustty_render_wgpu::Renderer>);
+struct GpuRenderer {
+    renderer: rustty_render_wgpu::Renderer,
+    frame: Option<Arc<Frame>>,
+    prepares: u64,
+}
+struct GpuRenderers(HashMap<Id, GpuRenderer>);
 struct TerminalPaint {
     window: Id,
-    frame: Frame,
+    frame: Arc<Frame>,
     format: wgpu::TextureFormat,
 }
 impl egui_wgpu::CallbackTrait for TerminalPaint {
@@ -467,9 +513,26 @@ impl egui_wgpu::CallbackTrait for TerminalPaint {
             .unwrap()
             .0
             .entry(self.window)
-            .or_insert_with(|| rustty_render_wgpu::Renderer::new(device, self.format));
-        if let Err(error) = renderer.prepare(device, queue, &self.frame) {
-            eprintln!("Rustty renderer: {error}");
+            .or_insert_with(|| GpuRenderer {
+                renderer: rustty_render_wgpu::Renderer::new(device, self.format),
+                frame: None,
+                prepares: 0,
+            });
+        if !renderer
+            .frame
+            .as_ref()
+            .is_some_and(|frame| Arc::ptr_eq(frame, &self.frame))
+        {
+            // A failed upload can replace part of the GPU state. Retry it even
+            // when the next UI frame still retains the same terminal content.
+            renderer.frame = None;
+            match renderer.renderer.prepare(device, queue, &self.frame) {
+                Ok(()) => {
+                    renderer.frame = Some(Arc::clone(&self.frame));
+                    renderer.prepares += 1;
+                }
+                Err(error) => eprintln!("Rustty renderer: {error}"),
+            }
         }
         Vec::new()
     }
@@ -483,7 +546,7 @@ impl egui_wgpu::CallbackTrait for TerminalPaint {
             .get::<GpuRenderers>()
             .and_then(|all| all.0.get(&self.window))
         {
-            renderer.paint(pass);
+            renderer.renderer.paint(pass);
         }
     }
 }
@@ -1001,6 +1064,7 @@ impl App {
             fonts,
             rects: BTreeMap::new(),
             prepared: BTreeMap::new(),
+            composed: None,
             pane_prepares: 0,
             content: Rect::UNIT,
             divider_drag: None,
@@ -2727,15 +2791,14 @@ impl App {
                         })
                         .collect();
                     host.prepared.retain(|id, _| host.rects.contains_key(id));
-                    let mut composed = Frame::empty([size.width, size.height]);
+                    let mut composed = None;
                     let mut accessible = Vec::new();
                     let mut terminal_ime_rect = None;
                     // An atlas eviction can happen halfway through a multi-pane frame.
                     // Rebuild against its new generation before handing a frame to WGPU.
                     for attempt in 0..2 {
-                        composed = Frame::empty([size.width, size.height]);
+                        let mut composition = Vec::with_capacity(host.rects.len());
                         accessible.clear();
-                        let mut retry = false;
                         for (&id, &rect) in &host.rects {
                             let Some(pane) = self.panes.get_mut(&id) else {
                                 continue;
@@ -2880,48 +2943,48 @@ impl App {
                                 && is_focused
                                 && !pane.exited
                                 && prepared.frame.blinking_text;
-                            if composed
-                                .append_clipped(
-                                    &prepared.frame,
-                                    [rect.left() * scale, rect.top() * scale],
-                                    [
-                                        rect.left() * scale,
-                                        rect.top() * scale,
-                                        physical.x,
-                                        physical.y,
-                                    ],
-                                )
-                                .is_err()
-                            {
-                                retry = true;
-                                break;
-                            }
-                            if id != focused && config.unfocused_split_opacity < 1.0 {
-                                let color =
-                                    config.unfocused_split_fill.unwrap_or(config.background);
-                                composed.quads.push(rustty_render::Quad::solid(
-                                    [
-                                        rect.left() * scale,
-                                        rect.top() * scale,
-                                        physical.x,
-                                        physical.y,
-                                    ],
-                                    rustty_render::Color::rgb([color.r, color.g, color.b])
-                                        .opacity(1.0 - config.unfocused_split_opacity),
-                                ));
-                            }
+                            composition.push(ComposedPane {
+                                frame: Arc::clone(&prepared.frame),
+                                rect: [
+                                    rect.left() * scale,
+                                    rect.top() * scale,
+                                    physical.x,
+                                    physical.y,
+                                ],
+                                dim: (id != focused && config.unfocused_split_opacity < 1.0).then(
+                                    || {
+                                        let color = config
+                                            .unfocused_split_fill
+                                            .unwrap_or(config.background);
+                                        rustty_render::Color::rgb([color.r, color.g, color.b])
+                                            .opacity(1.0 - config.unfocused_split_opacity)
+                                    },
+                                ),
+                            });
                             accessible.push((id, rect));
                             if id == focused && !pane.exited {
                                 terminal_ime_rect = Some(prepared.ime_rect);
                             }
                         }
-                        if !retry {
+                        let size = [size.width, size.height];
+                        if let Some(retained) = &host.composed
+                            && retained.matches(size, &composition)
+                        {
+                            composed = Some(Arc::clone(&retained.frame));
                             break;
                         }
-                        if attempt == 1 {
-                            render_error =
-                                Some("Visible glyphs exceed the shared atlas budget".into());
-                            composed = Frame::empty([size.width, size.height]);
+                        match ComposedFrame::new(size, composition) {
+                            Ok(retained) => {
+                                composed = Some(Arc::clone(&retained.frame));
+                                host.composed = Some(retained);
+                                break;
+                            }
+                            Err(_) if attempt == 0 => {}
+                            Err(_) => {
+                                render_error =
+                                    Some("Visible glyphs exceed the shared atlas budget".into());
+                                host.composed = None;
+                            }
                         }
                     }
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -2931,7 +2994,9 @@ impl App {
                         ),
                         TerminalPaint {
                             window: host.id,
-                            frame: composed,
+                            frame: composed.unwrap_or_else(|| {
+                                Arc::new(Frame::empty([size.width, size.height]))
+                            }),
                             format,
                         },
                     ));
@@ -4976,6 +5041,85 @@ mod tests {
             sync.update(&mut terminal, later),
             Some(later + Duration::from_secs(1))
         );
+    }
+
+    #[test]
+    fn retained_window_frames_follow_panes_geometry_and_split_dimming() {
+        let mut frame = Frame::empty([20, 20]);
+        frame.quads.push(rustty_render::Quad::solid(
+            [0.0, 0.0, 20.0, 20.0],
+            rustty_render::Color::rgb([255; 3]),
+        ));
+        let frame = Arc::new(frame);
+        let pane = || ComposedPane {
+            frame: Arc::clone(&frame),
+            rect: [10.0, 15.0, 20.0, 20.0],
+            dim: None,
+        };
+        let retained = ComposedFrame::new([60, 60], vec![pane()]).unwrap();
+        assert_eq!(retained.frame.quads[0].rect, pane().rect);
+        assert!(retained.matches([60, 60], &[pane()]));
+        assert!(!retained.matches([61, 60], &[pane()]));
+        assert!(!retained.matches([60, 60], &[]));
+        assert!(!retained.matches([60, 60], &[pane(), pane()]));
+
+        let mut changed = pane();
+        changed.rect[0] += 1.0;
+        assert!(!retained.matches([60, 60], &[changed]));
+        let mut changed = pane();
+        changed.dim = Some(rustty_render::Color::rgb([0; 3]).opacity(0.5));
+        assert!(!retained.matches([60, 60], &[changed]));
+        let mut changed = pane();
+        changed.frame = Arc::new((*frame).clone());
+        assert!(!retained.matches([60, 60], &[changed]));
+    }
+
+    #[test]
+    fn retained_gpu_frames_skip_preparation_and_retry_after_errors() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("GPU adapter");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let mut resources = egui_wgpu::CallbackResources::default();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [20, 20],
+            pixels_per_point: 1.0,
+        };
+        let mut frame = Frame::empty([20, 20]);
+        frame.quads.push(rustty_render::Quad::solid(
+            [0.0, 0.0, 20.0, 20.0],
+            rustty_render::Color::rgb([255; 3]),
+        ));
+        let original = Arc::new(frame);
+        let mut prepare = |frame: Arc<Frame>| {
+            let paint = TerminalPaint {
+                window: 1,
+                frame,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            };
+            egui_wgpu::CallbackTrait::prepare(
+                &paint,
+                &device,
+                &queue,
+                &screen,
+                &mut encoder,
+                &mut resources,
+            );
+            let renderer = &resources.get::<GpuRenderers>().unwrap().0[&1];
+            (renderer.prepares, renderer.frame.is_some())
+        };
+        assert_eq!(prepare(Arc::clone(&original)), (1, true));
+        assert_eq!(prepare(Arc::clone(&original)), (1, true));
+        let replacement = Arc::new((*original).clone());
+        assert_eq!(prepare(Arc::clone(&replacement)), (2, true));
+
+        let mut invalid = (*original).clone();
+        invalid.quads[0].rect[0] = f32::NAN;
+        assert_eq!(prepare(Arc::new(invalid)), (2, false));
+        assert_eq!(prepare(replacement), (3, true));
     }
 
     #[test]

@@ -473,6 +473,18 @@ impl Terminal {
         self.changed();
     }
 
+    /// Bound owned history-row storage independently of native page limits.
+    /// Counts Rust cell/vector capacities and text/hyperlink allocations, but
+    /// excludes active rows, graphics, page tables and deque spare capacity.
+    /// Retained through reset; hosts reapply it after decoding a snapshot.
+    pub fn set_scrollback_memory_limit(&mut self, bytes: Option<usize>) {
+        for screen in std::iter::once(&mut self.primary).chain(self.alternate.iter_mut()) {
+            screen.memory_limit = bytes;
+            screen.enforce_memory_limit();
+        }
+        self.changed();
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if cols == 0 || rows == 0 {
             return;
@@ -560,6 +572,7 @@ impl Terminal {
             self.string_overflow,
         );
         let limits = self.primary.limits;
+        let memory_limit = self.primary.memory_limit;
         let primary_identity = self.primary.metadata.identity;
         let terminfo_name = self.terminfo_name.take();
         let query_defaults = self.query_defaults.clone();
@@ -594,6 +607,7 @@ impl Terminal {
         let mut modes = self.modes.clone();
         modes.reset();
         *self = Self::with_limits(self.cols, self.rows, limits);
+        self.primary.memory_limit = memory_limit;
         (
             self.parser,
             self.dcs,
@@ -1940,11 +1954,10 @@ impl Terminal {
         let charset = self.screen().charset.clone();
         self.end_hyperlink();
         if enabled && self.alternate.is_none() {
-            self.alternate = Some(Screen::new(
-                self.cols.into(),
-                self.rows.into(),
-                ScrollbackLimits::NONE,
-            ));
+            let mut alternate =
+                Screen::new(self.cols.into(), self.rows.into(), ScrollbackLimits::NONE);
+            alternate.memory_limit = self.primary.memory_limit;
+            self.alternate = Some(alternate);
         }
         self.alternate_active = enabled;
         self.screen_mut().charset = charset;

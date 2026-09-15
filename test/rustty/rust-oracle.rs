@@ -1000,13 +1000,13 @@ fn screen(screen: &Screen) -> Value {
             CursorShape::Underline => "underline", CursorShape::HollowBlock => "block_hollow",
         },"style":style(c.style),"hyperlink":hyperlink(c.hyperlink.as_deref()),
         "protected":c.protected,"semantic":semantic(c.semantic)},
-        "rows":screen.rows.iter().map(row).collect::<Vec<_>>(),
-        "history":screen.history.iter().map(row).collect::<Vec<_>>()})
+        "rows":screen.rows.iter().map(|r| row(screen, r)).collect::<Vec<_>>(),
+        "history":screen.history.iter().map(|r| row(screen, r)).collect::<Vec<_>>()})
 }
 
-fn row(row: &rustty_vt::Row) -> Value {
-    json!({"wrapped":row.wrapped,"cells":row.cells.iter().map(|cell| json!({
-        "text":cell.text.chars().map(u32::from).collect::<Vec<_>>(),
+fn row(screen: &Screen, row: &rustty_vt::Row) -> Value {
+    json!({"wrapped":row.wrapped,"cells":row.cells.iter().enumerate().map(|(col, cell)| json!({
+        "text":screen.cell_text(row, col).chars().map(u32::from).collect::<Vec<_>>(),
         "width":cell.width,"spacer_head":cell.spacer_head,"style":style(cell.style),
         "hyperlink":hyperlink(cell.hyperlink.as_deref()),
         "protected":cell.protected,

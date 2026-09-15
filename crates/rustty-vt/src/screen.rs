@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+#[path = "screen/serde.rs"]
+mod serde_impl;
+
 use crate::page_list::{Page, PageAllocationInfo, PageList};
 use crate::page_resources::{
     GraphemeAdmission, GraphemeAllocation, Hyperlink, HyperlinkAdmission, HyperlinkFull, SetFull,
@@ -249,7 +252,41 @@ pub enum SemanticClick {
     CursorKeys { motion: ClickMotion },
 }
 
+/// A cell's text, borrowing page-owned clusters or encoding one inline scalar.
+#[derive(Clone, Debug)]
+pub enum CellText<'a> {
+    Scalar { bytes: [u8; 4], len: u8 },
+    Grapheme(&'a str),
+}
+
+impl CellText<'_> {
+    fn scalar(codepoint: Option<char>) -> Self {
+        let mut bytes = [0; 4];
+        let len = codepoint.map_or(0, |cp| cp.encode_utf8(&mut bytes).len()) as u8;
+        Self::Scalar { bytes, len }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Scalar { bytes, len } => {
+                std::str::from_utf8(&bytes[..usize::from(*len)]).unwrap()
+            }
+            Self::Grapheme(text) => text,
+        }
+    }
+}
+
+impl std::ops::Deref for CellText<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// Cell attributes and an inline scalar. Grapheme handles require the owning
+/// Screen; use Screen::cell_text or snapshot_viewport to retain detached text.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Cell {
     #[serde(skip)]
     pub(crate) style_id: u16,
@@ -257,8 +294,9 @@ pub struct Cell {
     pub(crate) link_id: u16,
     #[serde(skip)]
     pub(crate) grapheme: Option<GraphemeAllocation>,
-    /// Empty for unwritten cells and the continuation of a wide glyph.
-    pub text: String,
+    /// Inline scalar; absent for unwritten cells and wide-glyph continuations.
+    #[serde(skip)]
+    pub codepoint: Option<char>,
     /// Zero denotes the continuation of a two-cell glyph.
     pub width: u8,
     pub style: Style,
@@ -270,27 +308,13 @@ pub struct Cell {
     pub spacer_head: bool,
 }
 
-impl PartialEq for Cell {
-    fn eq(&self, other: &Self) -> bool {
-        self.text == other.text
-            && self.width == other.width
-            && self.style == other.style
-            && self.hyperlink == other.hyperlink
-            && self.protected == other.protected
-            && self.semantic == other.semantic
-            && self.spacer_head == other.spacer_head
-    }
-}
-
-impl Eq for Cell {}
-
 impl Default for Cell {
     fn default() -> Self {
         Self {
             style_id: 0,
             link_id: 0,
             grapheme: None,
-            text: String::new(),
+            codepoint: None,
             width: 1,
             style: Style::default(),
             hyperlink: None,
@@ -318,15 +342,17 @@ impl Cell {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.width != 0
+        self.codepoint.is_none() && self.width != 0
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Row {
     #[serde(skip)]
     pub(crate) resource_page: Option<u64>,
     pub id: u64,
+    #[serde(skip)]
     pub cells: Vec<Cell>,
     pub wrapped: bool,
     pub wrap_continuation: bool,
@@ -339,6 +365,7 @@ pub struct Row {
 pub(crate) struct RowCopy {
     row: Row,
     sources: Vec<(Option<u64>, u16, Style, u16)>,
+    graphemes: Vec<Option<Arc<str>>>,
 }
 
 impl Row {
@@ -354,22 +381,6 @@ impl Row {
         }
     }
 
-    pub fn text(&self) -> String {
-        let mut result = String::new();
-        for cell in &self.cells {
-            if cell.width == 0 || cell.spacer_head {
-                continue;
-            }
-            if cell.text.is_empty() {
-                result.push(' ');
-            } else {
-                result.push_str(&cell.text);
-            }
-        }
-        result.truncate(result.trim_end_matches(' ').len());
-        result
-    }
-
     pub(crate) fn storage_bytes(&self) -> usize {
         // Shared payloads are charged once per row, conservatively again across
         // rows, so cached history charges remain additive as owners come and go.
@@ -377,15 +388,19 @@ impl Row {
         size_of::<Self>()
             .saturating_add(self.cells.capacity().saturating_mul(size_of::<Cell>()))
             .saturating_add(self.cells.iter().fold(0usize, |bytes, cell| {
-                bytes.saturating_add(cell.text.capacity()).saturating_add(
-                    cell.hyperlink.as_ref().map_or(0, |link| {
+                bytes
+                    .saturating_add(cell.grapheme.map_or(0, |allocation| {
+                        // Conservative full UTF-8 payload plus Arc counters. Shared
+                        // clusters are charged per cell so row totals stay additive.
+                        2 * size_of::<usize>() + 4 * (usize::from(allocation.len) + 1)
+                    }))
+                    .saturating_add(cell.hyperlink.as_ref().map_or(0, |link| {
                         if links.insert(Arc::as_ptr(link)) {
                             link.storage_bytes()
                         } else {
                             0
                         }
-                    }),
-                )
+                    }))
             }))
     }
 
@@ -393,7 +408,7 @@ impl Row {
         self.cells
             .iter()
             .rposition(|c| {
-                !c.text.is_empty() || c.width == 0 || c.style.background != Color::Default
+                c.codepoint.is_some() || c.width == 0 || c.style.background != Color::Default
             })
             .map_or(0, |i| i + 1)
     }
@@ -623,7 +638,9 @@ pub struct Screen {
     /// Logical width. Restored physical rows retain their own width until a
     /// column resize reflows them or an edit needs additional cells.
     pub columns: usize,
+    #[serde(skip)]
     pub rows: Vec<Row>,
+    #[serde(skip)]
     pub history: VecDeque<Row>,
     pub cursor: Cursor,
     pub selection: Option<Selection>,
@@ -653,22 +670,6 @@ pub struct Screen {
     pub(crate) next_row: u64,
     #[serde(skip)]
     tracked: TrackedPoints,
-}
-
-// Derive the field handlers above, but rebuild allocation-dependent caches.
-impl Serialize for Screen {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Self::serialize(self, serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Screen {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut screen = Self::deserialize(deserializer)?;
-        // JSON stores values, not shared allocation identities or capacities.
-        screen.history_bytes = screen.history.iter().map(Row::storage_bytes).sum();
-        Ok(screen)
-    }
 }
 
 impl Screen {
@@ -728,6 +729,65 @@ impl Screen {
         self.history.iter().chain(self.rows.iter())
     }
 
+    /// Resolve text against its owning screen. Ordinary scalar reads allocate nothing.
+    pub fn cell_text<'a>(&'a self, row: &Row, col: usize) -> CellText<'a> {
+        let cell = &row.cells[col];
+        if cell.codepoint.is_some()
+            && let Some(allocation) = cell.grapheme
+        {
+            let page = self
+                .pages
+                .pages
+                .iter()
+                .find(|page| Some(page.serial) == row.resource_page)
+                .expect("grapheme row must have a live owning page");
+            CellText::Grapheme(page.graphemes.text(allocation))
+        } else {
+            CellText::scalar(cell.codepoint)
+        }
+    }
+
+    pub fn row_text(&self, row: &Row) -> String {
+        let mut result = String::new();
+        for (col, cell) in row.cells.iter().enumerate() {
+            if cell.width == 0 || cell.spacer_head {
+                continue;
+            }
+            if cell.codepoint.is_none() {
+                result.push(' ');
+            } else {
+                result.push_str(&self.cell_text(row, col));
+            }
+        }
+        result.truncate(result.trim_end_matches(' ').len());
+        result
+    }
+
+    /// Replace the text of an active cell, retaining its other attributes.
+    /// Clusters have the same 64-suffix-scalar limit as printed text.
+    pub fn set_cell_text(&mut self, row: usize, col: usize, text: &str) {
+        let mut chars = text.chars();
+        let codepoint = chars.next();
+        let suffix_len = chars.count();
+        assert!(suffix_len <= 64, "cell grapheme is too long");
+        self.edit_row(row, |line| {
+            line.cells[col].codepoint = codepoint;
+            line.cells[col].grapheme = None;
+            line.dirty = true;
+        });
+        if suffix_len != 0 {
+            let absolute = self.history.len() + row;
+            let allocation = self
+                .acquire_grapheme(absolute, suffix_len as u8)
+                .expect("cell grapheme must fit after page growth");
+            let index = self.pages.page_index(absolute);
+            self.pages.pages[index]
+                .graphemes
+                .set_text(allocation, Arc::from(text));
+            self.rows[row].cells[col].grapheme = Some(allocation);
+        }
+    }
+
     /// Native allocation capacities and physical boundaries of the live pages.
     pub fn page_allocations(&self) -> impl Iterator<Item = PageAllocationInfo> + '_ {
         self.pages.allocations()
@@ -746,23 +806,39 @@ impl Screen {
         cursor.row = cursor.row.saturating_add(self.viewport_offset);
         cursor.visible &= cursor.row < self.rows.len();
         cursor.row = cursor.row.min(self.rows.len() - 1);
+        let mut pages = self.pages.clone_range(
+            self.history.len().saturating_sub(self.viewport_offset),
+            self.rows.len(),
+        );
+        let rows: Vec<_> = self
+            .viewport()
+            .map(|source| {
+                let mut row = source.clone();
+                for cell in &mut row.cells {
+                    cell.style_id = 0;
+                    cell.link_id = 0;
+                }
+                row
+            })
+            .collect();
+        for page in &mut pages.pages {
+            let source = self
+                .pages
+                .pages
+                .iter()
+                .find(|source| source.serial == page.serial)
+                .unwrap();
+            page.graphemes = source.graphemes.clone_subset(
+                rows.iter()
+                    .filter(|row| row.resource_page == Some(page.serial))
+                    .flat_map(|row| row.cells.iter().filter_map(|cell| cell.grapheme)),
+            );
+        }
         Self {
             metadata: self.metadata.clone(),
             graphics: self.graphics.snapshot(self),
             columns: self.columns,
-            rows: self
-                .viewport()
-                .map(|row| {
-                    let mut row = row.clone();
-                    row.resource_page = None;
-                    for cell in &mut row.cells {
-                        cell.style_id = 0;
-                        cell.link_id = 0;
-                        cell.grapheme = None;
-                    }
-                    row
-                })
-                .collect(),
+            rows,
             history: VecDeque::new(),
             cursor,
             selection: self.selection,
@@ -776,10 +852,7 @@ impl Screen {
             limits: ScrollbackLimits::NONE,
             memory_limit: None,
             history_bytes: 0,
-            pages: self.pages.clone_range(
-                self.history.len().saturating_sub(self.viewport_offset),
-                self.rows.len(),
-            ),
+            pages,
             cursor_style: None,
             cursor_link: None,
             next_row: self.next_row,
@@ -1296,6 +1369,8 @@ impl Screen {
         let y = self.cursor.row;
         let absolute = self.history.len() + y;
         let mut index = self.pages.page_index(absolute);
+        let mut text = self.cell_text(&self.rows[y], col).to_string();
+        text.push(cp);
         let previous = self.rows[y].cells[col].grapheme;
         let allocation = match self.pages.pages[index].graphemes.append(previous) {
             Ok(allocation) => allocation,
@@ -1314,7 +1389,9 @@ impl Screen {
         };
         self.rows[y].resource_page = Some(self.pages.pages[index].serial);
         self.rows[y].cells[col].grapheme = Some(allocation);
-        self.rows[y].cells[col].text.push(cp);
+        self.pages.pages[index]
+            .graphemes
+            .set_text(allocation, Arc::from(text));
         self.rows[y].dirty = true;
         Ok(())
     }
@@ -1322,9 +1399,17 @@ impl Screen {
     pub(crate) fn move_wrapped_grapheme(&mut self, source_col: usize, suffix: &str) {
         let absolute = self.history.len() + self.cursor.row;
         let source = absolute.checked_sub(1).and_then(|source| {
+            let before =
+                (source < self.history.len()).then(|| self.history[source].storage_bytes());
             let allocation = self.physical_row_mut(source).cells[source_col]
                 .grapheme
                 .take()?;
+            if let Some(before) = before {
+                self.history_bytes = self
+                    .history_bytes
+                    .saturating_sub(before)
+                    .saturating_add(self.history[source].storage_bytes());
+            }
             Some((self.pages.page_index(source), allocation))
         });
         let destination_index = self.pages.page_index(absolute);
@@ -1333,7 +1418,12 @@ impl Screen {
         {
             let cell = &mut self.rows[self.cursor.row].cells[self.cursor.col];
             cell.grapheme = Some(allocation);
-            cell.text.push_str(suffix);
+            let mut text = String::with_capacity(4 + suffix.len());
+            text.push(cell.codepoint.expect("wrapped grapheme has a base"));
+            text.push_str(suffix);
+            self.pages.pages[destination_index]
+                .graphemes
+                .set_text(allocation, Arc::from(text));
         } else {
             // A host memory cap may evict the source row during wrapping.
             // The saved suffix still belongs to the active destination cell.
@@ -1508,7 +1598,11 @@ impl Screen {
                 }
                 let grapheme = cell
                     .grapheme
-                    .map(|allocation| graphemes.acquire(allocation.len))
+                    .map(|allocation| {
+                        let next = graphemes.acquire(allocation.len)?;
+                        graphemes.set_text(next, page.graphemes.text_arc(allocation));
+                        Ok(next)
+                    })
                     .transpose()?;
                 let link_id = if cell.link_id == 0 {
                     0
@@ -1644,9 +1738,9 @@ impl Screen {
             return;
         }
         let previous = row.resource_page;
-        let old_styles = previous
-            .and_then(|serial| self.pages.pages.iter().find(|page| page.serial == serial))
-            .map(|page| &page.styles);
+        let old_page =
+            previous.and_then(|serial| self.pages.pages.iter().find(|page| page.serial == serial));
+        let old_styles = old_page.map(|page| &page.styles);
         let resources: Vec<_> = row
             .cells
             .iter()
@@ -1659,7 +1753,15 @@ impl Screen {
                 (
                     cell.style_id,
                     value,
-                    cell.grapheme,
+                    cell.grapheme.map(|allocation| {
+                        (
+                            allocation,
+                            old_page
+                                .expect("grapheme has an owner")
+                                .graphemes
+                                .text_arc(allocation),
+                        )
+                    }),
                     cell.link_id,
                     Hyperlink::from_cell(cell),
                 )
@@ -1674,14 +1776,15 @@ impl Screen {
         }
         for (col, (old_id, style, grapheme, old_link_id, link)) in resources.into_iter().enumerate()
         {
-            if let Some(grapheme) = grapheme {
+            if let Some((grapheme, text)) = &grapheme {
                 let allocation = self.acquire_grapheme(absolute, grapheme.len).ok();
-                self.physical_row_mut(absolute).cells[col].grapheme = allocation;
-                if allocation.is_none() {
-                    let cell = &mut self.physical_row_mut(absolute).cells[col];
-                    cell.text
-                        .truncate(cell.text.chars().next().map_or(0, char::len_utf8));
+                if let Some(allocation) = allocation {
+                    let index = self.pages.page_index(absolute);
+                    self.pages.pages[index]
+                        .graphemes
+                        .set_text(allocation, text.clone());
                 }
+                self.physical_row_mut(absolute).cells[col].grapheme = allocation;
             }
             if let Some(link) = link {
                 let id = self
@@ -1705,7 +1808,7 @@ impl Screen {
             if let Some(previous) = previous {
                 self.release_style(previous, old_id);
                 self.release_link_cell(previous, old_link_id);
-                if let Some(grapheme) = grapheme
+                if let Some((grapheme, _)) = grapheme
                     && let Some(page) = self
                         .pages
                         .pages
@@ -1761,7 +1864,28 @@ impl Screen {
                 (owner, cell.style_id, value, cell.link_id)
             })
             .collect();
-        RowCopy { row, sources }
+        let graphemes = row
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(col, cell)| {
+                cell.grapheme.map(|allocation| {
+                    let owner = if col < end { Some(source) } else { recycled }.unwrap();
+                    self.pages
+                        .pages
+                        .iter()
+                        .find(|page| Some(page.serial) == owner.resource_page)
+                        .unwrap()
+                        .graphemes
+                        .text_arc(allocation)
+                })
+            })
+            .collect();
+        RowCopy {
+            row,
+            sources,
+            graphemes,
+        }
     }
 
     /// A mixed-width IND row combines two source pages. Keep recycled cells
@@ -1780,7 +1904,13 @@ impl Screen {
             let serial = self.pages.pages[index].serial;
             copy.row.resource_page = Some(serial);
             let mut graphemes = Vec::new();
-            for (cell, &(owner, id, _, link_id)) in copy.row.cells.iter_mut().zip(&copy.sources) {
+            for ((cell, &(owner, id, _, link_id)), text) in copy
+                .row
+                .cells
+                .iter_mut()
+                .zip(&copy.sources)
+                .zip(copy.graphemes)
+            {
                 if owner == Some(serial) {
                     self.pages.pages[index].styles.retain(id);
                     self.pages.pages[index].links.retain_moved_cell(link_id);
@@ -1791,7 +1921,11 @@ impl Screen {
                 } else {
                     cell.style_id = 0;
                     cell.link_id = 0;
-                    graphemes.push(cell.grapheme.take().map(|grapheme| grapheme.len));
+                    graphemes.push(
+                        cell.grapheme
+                            .take()
+                            .map(|grapheme| (grapheme.len, text.unwrap())),
+                    );
                 }
             }
             displaced.push(std::mem::replace(&mut self.rows[y], copy.row));
@@ -1818,11 +1952,13 @@ impl Screen {
             for (column, ((owner, source_id, style, link_id), grapheme)) in
                 sources.into_iter().zip(graphemes).enumerate()
             {
-                if let Some(len) = grapheme {
-                    self.rows[y].cells[column].grapheme = Some(
-                        self.acquire_grapheme(self.history.len() + y, len)
-                            .expect("copied grapheme must fit after page growth"),
-                    );
+                if let Some((len, text)) = grapheme {
+                    let allocation = self
+                        .acquire_grapheme(self.history.len() + y, len)
+                        .expect("copied grapheme must fit after page growth");
+                    let index = self.pages.page_index(self.history.len() + y);
+                    self.pages.pages[index].graphemes.set_text(allocation, text);
+                    self.rows[y].cells[column].grapheme = Some(allocation);
                 }
                 if owner != Some(serial)
                     && let Some(link) = Hyperlink::from_cell(&self.rows[y].cells[column])
@@ -1894,23 +2030,32 @@ impl Screen {
                 } else {
                     *self.pages.pages[source_index].styles.get(cell.style_id)
                 };
-                (cell, style)
+                let text = cell.grapheme.map(|allocation| {
+                    self.pages.pages[source_index]
+                        .graphemes
+                        .text_arc(allocation)
+                });
+                (cell, style, text)
             })
             .collect();
         self.edit_row(destination, |row| {
             row.cells[start..end].fill(Cell::default())
         });
-        for (offset, (mut cell, style)) in cells.into_iter().enumerate() {
+        for (offset, (mut cell, style, text)) in cells.into_iter().enumerate() {
             let source_id = cell.style_id;
             let source_link = std::mem::take(&mut cell.link_id);
             let grapheme = cell.grapheme.take();
             cell.style_id = 0;
             self.rows[destination].cells[start + offset] = cell;
             if let Some(grapheme) = grapheme {
-                self.rows[destination].cells[start + offset].grapheme = Some(
-                    self.acquire_grapheme(self.history.len() + destination, grapheme.len)
-                        .expect("copied grapheme must fit after page growth"),
-                );
+                let allocation = self
+                    .acquire_grapheme(self.history.len() + destination, grapheme.len)
+                    .expect("copied grapheme must fit after page growth");
+                let index = self.pages.page_index(self.history.len() + destination);
+                self.pages.pages[index]
+                    .graphemes
+                    .set_text(allocation, text.unwrap());
+                self.rows[destination].cells[start + offset].grapheme = Some(allocation);
             }
             if let Some(link) = Hyperlink::from_cell(&self.rows[destination].cells[start + offset])
             {
@@ -1983,7 +2128,15 @@ impl Screen {
                         } else {
                             source.map_or(cell.style, |page| *page.styles.get(id))
                         },
-                        cell.grapheme.take(),
+                        cell.grapheme.take().map(|allocation| {
+                            (
+                                allocation,
+                                source
+                                    .expect("grapheme has an owner")
+                                    .graphemes
+                                    .text_arc(allocation),
+                            )
+                        }),
                         std::mem::take(&mut cell.link_id),
                         Hyperlink::from_cell(cell),
                     )
@@ -1993,7 +2146,7 @@ impl Screen {
             for (col, (source_id, style, grapheme, source_link, link)) in
                 resources.into_iter().enumerate()
             {
-                if let Some(grapheme) = grapheme {
+                if let Some((grapheme, text)) = &grapheme {
                     let allocation = loop {
                         if let Ok(allocation) = pages.pages[index].graphemes.acquire(grapheme.len) {
                             break allocation;
@@ -2005,6 +2158,9 @@ impl Screen {
                         )
                         .expect("copied page resources must fit after growth");
                     };
+                    pages.pages[index]
+                        .graphemes
+                        .set_text(allocation, text.clone());
                     contents[absolute].cells[col].grapheme = Some(allocation);
                 }
                 if let Some(link) = link {
@@ -2043,7 +2199,7 @@ impl Screen {
                 {
                     page.styles.release(source_id);
                     page.links.release_cell(source_link);
-                    if let Some(grapheme) = grapheme {
+                    if let Some((grapheme, _)) = grapheme {
                         page.graphemes.release(grapheme);
                     }
                 }
@@ -2536,13 +2692,13 @@ impl Screen {
                     cell.link_id = 0;
                     cell.grapheme = None;
                     if cols == 1 && cell.width == 2 {
-                        cell.text.clear();
+                        cell.codepoint = None;
                     }
                     cell.width = width as u8;
                     line.cells[x] = cell;
                     let index = self.pages.page_index(output.len());
                     line.resource_page = Some(self.pages.pages[index].serial);
-                    if let Some(grapheme) = grapheme.filter(|_| !line.cells[x].text.is_empty()) {
+                    if let Some(grapheme) = grapheme.filter(|_| line.cells[x].codepoint.is_some()) {
                         let allocation = loop {
                             if let Ok(allocation) =
                                 self.pages.pages[index].graphemes.acquire(grapheme.len)
@@ -2556,6 +2712,9 @@ impl Screen {
                             )
                             .expect("reflow graphemes must fit after page growth");
                         };
+                        self.pages.pages[index]
+                            .graphemes
+                            .set_text(allocation, source_page.graphemes.text_arc(grapheme));
                         line.cells[x].grapheme = Some(allocation);
                     }
                     self.reflow_link(&mut output, &mut line, x, source_link);
@@ -2571,7 +2730,7 @@ impl Screen {
                         let index = self.pages.page_index(output.len());
                         self.pages.pages[index].styles.retain(cell.style_id);
                         let mut cell = cell.clone();
-                        cell.text.clear();
+                        cell.codepoint = None;
                         cell.grapheme = None;
                         cell.link_id = 0;
                         cell.width = 0;
@@ -2784,7 +2943,7 @@ impl Screen {
                         .0
                         .values()
                         .any(|p| p.is_some_and(|p| p.row == r.id))
-                    && r.cells.iter().all(|c| c.text.is_empty())
+                    && r.cells.iter().all(|c| c.codepoint.is_none())
             })
         {
             let row = contents.pop().unwrap();
@@ -2918,8 +3077,11 @@ mod resource_tests {
         }
         rows[1].cells[0].style = ordinary;
         rows[1].cells[0].style_id = ordinary_id;
-        rows[0].cells[0].text = "a\u{301}\u{302}\u{303}\u{304}\u{305}".into();
+        rows[0].cells[0].codepoint = Some('a');
         let grapheme = original.graphemes.acquire(5).unwrap();
+        original
+            .graphemes
+            .set_text(grapheme, Arc::from("a\u{301}\u{302}\u{303}\u{304}\u{305}"));
         rows[0].cells[0].grapheme = Some(grapheme);
         let ids: Vec<_> = rows
             .iter()
@@ -2979,8 +3141,11 @@ mod resource_tests {
         );
         assert_eq!(viewport.pages.pages[0].rows, source.pages.pages[0].rows);
         for (row, original) in viewport.rows.iter().zip(&source.rows) {
-            assert_eq!(row.cells, original.cells);
-            assert_eq!(row.resource_page, None);
+            assert_eq!(viewport.row_text(row), source.row_text(original));
+            assert_eq!(row.resource_page, original.resource_page);
+            for (cell, original) in row.cells.iter().zip(&original.cells) {
+                assert_eq!(cell.style, original.style);
+            }
             assert!(row.cells.iter().all(|cell| cell.style_id == 0));
         }
         let point = viewport.point(0, 1).unwrap();
@@ -3001,9 +3166,9 @@ mod resource_tests {
         let mut graphemes: HashMap<u64, Vec<GraphemeAllocation>> = HashMap::new();
         for (absolute, row) in screen.all_rows().enumerate() {
             let serial = screen.pages.page_at(absolute).0.serial;
-            for cell in &row.cells {
+            for (col, cell) in row.cells.iter().enumerate() {
                 assert_eq!(
-                    cell.text.chars().count().saturating_sub(1),
+                    screen.cell_text(row, col).chars().count().saturating_sub(1),
                     cell.grapheme
                         .map_or(0, |allocation| usize::from(allocation.len))
                 );
@@ -3172,11 +3337,18 @@ mod resource_tests {
                 restored.feed(format!("\x1b[H\x1b[2J{}", cluster.repeat(513)).as_bytes());
                 assert_references(restored.screen());
                 let viewport = restored.screen().snapshot_viewport();
-                assert_eq!(viewport.pages.pages[0].graphemes.used_bytes(), 0);
-                assert!(
+                let expected: Vec<_> = restored
+                    .screen()
+                    .viewport()
+                    .map(|row| restored.screen().row_text(row))
+                    .collect();
+                restored.feed(b"\x1b[H\x1b[2J");
+                assert_eq!(
                     viewport
                         .all_rows()
-                        .all(|row| row.cells.iter().all(|cell| cell.grapheme.is_none()))
+                        .map(|row| viewport.row_text(row))
+                        .collect::<Vec<_>>(),
+                    expected
                 );
                 assert_references(restored.screen());
             }

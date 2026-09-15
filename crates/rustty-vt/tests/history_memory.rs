@@ -51,10 +51,13 @@ fn owned_history_budget_counts_cells_and_link_payloads_and_invalidates_pins() {
             .all(|row| { row.cells.iter().all(|cell| cell.hyperlink.is_none()) })
     );
 
-    let active = terminal.screen().rows.clone();
+    let active = serde_json::to_value(terminal.screen()).unwrap()["rows"].clone();
     terminal.set_scrollback_memory_limit(Some(0));
     bounded(&terminal, 0);
-    assert_eq!(terminal.screen().rows, active);
+    assert_eq!(
+        serde_json::to_value(terminal.screen()).unwrap()["rows"],
+        active
+    );
     terminal.set_scrollback_memory_limit(None);
     terminal.feed(&b"\r\n1234567".repeat(20));
     assert!(terminal.screen().history_bytes() > limit);
@@ -96,7 +99,10 @@ fn pruning_a_wrapped_graphemes_source_preserves_active_text() {
         terminal.feed("\x1b[?2027hab☀\u{200d}😀".as_bytes());
         bounded(&terminal, limit);
         let cell = &terminal.screen().rows[0].cells[0];
-        assert_eq!(cell.text, "☀\u{200d}😀");
+        assert_eq!(
+            &*terminal.screen().cell_text(&terminal.screen().rows[0], 0),
+            "☀\u{200d}😀"
+        );
         assert_eq!(cell.width, 2);
     }
 }

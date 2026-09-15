@@ -7,13 +7,16 @@ fn narrowing_with_more_active_rows_counts_continuations_at_the_active_boundary()
     terminal.resize(2, 4);
 
     assert_eq!(terminal.screen().history.len(), 1);
-    assert_eq!(terminal.screen().history[0].text(), "AB");
+    assert_eq!(
+        terminal.screen().row_text(&terminal.screen().history[0]),
+        "AB"
+    );
     assert_eq!(
         terminal
             .screen()
             .rows
             .iter()
-            .map(|row| row.text())
+            .map(|row| terminal.screen().row_text(row))
             .collect::<Vec<_>>(),
         ["CD", "EF", "GH", "I"],
     );
@@ -36,12 +39,15 @@ fn reflow_copies_source_prompt_metadata_to_each_destination_segment() {
             .zip(["abcd", "efgh", "ij"])
         {
             assert_eq!(row.semantic, expected);
-            assert_eq!(row.text(), text);
+            assert_eq!(terminal.screen().row_text(row), text);
         }
         let bytes = snapshot::encode_to_vec(&terminal).unwrap();
         let mut terminal = snapshot::decode(bytes.as_slice(), Default::default()).unwrap();
         terminal.resize(12, 4);
         assert_eq!(terminal.screen().rows[0].semantic, expected);
-        assert_eq!(terminal.screen().rows[0].text(), "abcdefghij");
+        assert_eq!(
+            terminal.screen().row_text(&terminal.screen().rows[0]),
+            "abcdefghij"
+        );
     }
 }

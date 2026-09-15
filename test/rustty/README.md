@@ -1,5 +1,8 @@
 # Rustty terminal compatibility checks
 
+The [unit-level benchmarks](BENCHMARKS.md) use Criterion to compare terminal
+primitives across Rustty revisions and with Ghostty, without an app or renderer.
+
 The [CSI/OSC implementation inventory](SEQUENCES.md) traces recognized commands
 through the VT, PTY, renderer, and macOS app, including intentional no-ops and
 features that currently exist only in the library.

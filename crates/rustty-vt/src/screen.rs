@@ -412,24 +412,25 @@ impl Row {
     pub(crate) fn storage_bytes(&self) -> usize {
         // Shared payloads are charged once per row, conservatively again across
         // rows, so cached history charges remain additive as owners come and go.
-        let mut links = HashSet::new();
-        size_of::<Self>()
-            .saturating_add(self.cells.capacity().saturating_mul(size_of::<Cell>()))
-            .saturating_add(self.cells.iter().fold(0usize, |bytes, cell| {
-                bytes
-                    .saturating_add(cell.grapheme.map_or(0, |allocation| {
-                        // Conservative full UTF-8 payload plus Arc counters. Shared
-                        // clusters are charged per cell so row totals stay additive.
-                        2 * size_of::<usize>() + 4 * (usize::from(allocation.len) + 1)
-                    }))
-                    .saturating_add(cell.hyperlink.as_ref().map_or(0, |link| {
-                        if links.insert(Arc::as_ptr(link)) {
-                            link.storage_bytes()
-                        } else {
-                            0
-                        }
-                    }))
-            }))
+        let mut bytes = size_of::<Self>()
+            .saturating_add(self.cells.capacity().saturating_mul(size_of::<Cell>()));
+        let mut links = None::<HashSet<_>>;
+        for cell in &self.cells {
+            if let Some(allocation) = cell.grapheme {
+                // Conservative full UTF-8 payload plus Arc counters. Shared
+                // clusters are charged per cell so row totals stay additive.
+                bytes = bytes
+                    .saturating_add(2 * size_of::<usize>() + 4 * (usize::from(allocation.len) + 1));
+            }
+            if let Some(link) = &cell.hyperlink
+                && links
+                    .get_or_insert_with(HashSet::new)
+                    .insert(Arc::as_ptr(link))
+            {
+                bytes = bytes.saturating_add(link.storage_bytes());
+            }
+        }
+        bytes
     }
 
     pub(crate) fn used(&self) -> usize {

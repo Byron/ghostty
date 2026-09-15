@@ -1383,11 +1383,11 @@ impl Terminal {
     }
 
     fn index_scroll(&mut self) {
-        self.ensure_active_columns();
         let m = self.margins;
         let cols = usize::from(self.cols);
         let full = m.left == 0 && m.right == cols - 1;
         if full && self.rows == 1 && self.screen().limits.bytes == Some(0) {
+            self.ensure_active_columns();
             let screen = self.screen_mut();
             let background = screen.cursor.style.background;
             screen.edit_row(0, |row| {
@@ -1396,6 +1396,7 @@ impl Terminal {
             return;
         }
         if !full || (m.top == 0 && (self.screen().limits.bytes != Some(0) || m.bottom == 0)) {
+            // scroll_up widens the active rows before moving them.
             self.scroll_up(1, true);
             if full && self.screen().limits.bytes != Some(0) {
                 let screen = self.screen_mut();
@@ -1449,6 +1450,7 @@ impl Terminal {
 
         // Full-width IND rotates complete rows, unlike SU/DL which detach
         // wrapped lines and keep pins at their physical coordinates.
+        self.ensure_active_columns();
         let screen = self.screen_mut();
         let top = screen.history.len() + m.top;
         let bottom = screen.history.len() + m.bottom;

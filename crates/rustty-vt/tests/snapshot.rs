@@ -984,6 +984,31 @@ fn distinct_grapheme_payloads_survive_page_transfer_reflow_and_live_erase() {
 }
 
 #[test]
+fn maximum_four_byte_grapheme_preserves_snapshot_and_suffix_limit() {
+    let mut terminal = Terminal::new(4, 2, 0);
+    terminal.feed(b"\x1b[?2027h");
+    let prefix = format!("😀{}", "\u{e0100}".repeat(63));
+    terminal.feed(prefix.as_bytes());
+    let snapshot = terminal.screen().snapshot_viewport();
+
+    terminal.print('\u{e0100}');
+    let full = format!("{prefix}\u{e0100}");
+    assert_eq!(full.len(), 260);
+    terminal.print('\u{e0100}');
+    let screen = terminal.screen();
+    assert_eq!(&*screen.cell_text(&screen.rows[0], 0), full);
+    assert_eq!(&*snapshot.cell_text(&snapshot.rows[0], 0), prefix);
+    let restored = decode(
+        encode_to_vec(&terminal).unwrap().as_slice(),
+        DecodeOptions::default(),
+    )
+    .unwrap();
+    same_terminal(&terminal, &restored);
+    terminal.feed(b"\x1b[2J");
+    assert_eq!(&*snapshot.cell_text(&snapshot.rows[0], 0), prefix);
+}
+
+#[test]
 fn snapshot_rejects_empty_link_strings_before_resource_admission() {
     for (uri, id) in [
         ("", HyperlinkId::Implicit(1)),

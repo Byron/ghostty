@@ -571,6 +571,9 @@ pub struct Screen {
     pub(crate) charset: CharsetState,
     pub(crate) iso_protection: bool,
     pub(crate) limits: ScrollbackLimits,
+    /// Host memory policy, separate from native page accounting and snapshots.
+    #[serde(skip)]
+    pub(crate) memory_limit: Option<usize>,
     pub(crate) history_bytes: usize,
     pub(crate) pages: PageList,
     #[serde(skip)]
@@ -625,6 +628,7 @@ impl Screen {
             charset: CharsetState::default(),
             iso_protection: false,
             limits,
+            memory_limit: None,
             history_bytes: 0,
             pages: PageList::new(cols as u16, rows),
             cursor_style: None,
@@ -684,6 +688,7 @@ impl Screen {
             charset: self.charset.clone(),
             iso_protection: self.iso_protection,
             limits: ScrollbackLimits::NONE,
+            memory_limit: None,
             history_bytes: 0,
             pages: self.pages.clone_range(
                 self.history.len().saturating_sub(self.viewport_offset),
@@ -1234,28 +1239,30 @@ impl Screen {
 
     pub(crate) fn move_wrapped_grapheme(&mut self, source_col: usize, suffix: &str) {
         let absolute = self.history.len() + self.cursor.row;
-        let Some(source) = absolute.checked_sub(1) else {
-            return;
-        };
-        let Some(allocation) = self.physical_row_mut(source).cells[source_col]
-            .grapheme
-            .take()
-        else {
-            return;
-        };
-        let source_index = self.pages.page_index(source);
+        let source = absolute.checked_sub(1).and_then(|source| {
+            let allocation = self.physical_row_mut(source).cells[source_col]
+                .grapheme
+                .take()?;
+            Some((self.pages.page_index(source), allocation))
+        });
         let destination_index = self.pages.page_index(absolute);
-        if source_index == destination_index {
+        if let Some((source_index, allocation)) = source
+            && source_index == destination_index
+        {
             let cell = &mut self.rows[self.cursor.row].cells[self.cursor.col];
             cell.grapheme = Some(allocation);
             cell.text.push_str(suffix);
         } else {
+            // A host memory cap may evict the source row during wrapping.
+            // The saved suffix still belongs to the active destination cell.
             for cp in suffix.chars() {
                 if self.append_grapheme(self.cursor.col, cp).is_err() {
                     break;
                 }
             }
-            self.pages.pages[source_index].graphemes.release(allocation);
+            if let Some((source_index, allocation)) = source {
+                self.pages.pages[source_index].graphemes.release(allocation);
+            }
         }
     }
 
@@ -2014,6 +2021,7 @@ impl Screen {
             self.history_bytes = self.history.iter().map(Row::storage_bytes).sum();
         }
         self.sync_cursor_resources();
+        self.enforce_memory_limit();
     }
 
     pub(crate) fn cursor_reset_wrap(&mut self) {
@@ -2133,12 +2141,34 @@ impl Screen {
             .pages
             .grow(self.columns as u16, self.rows.len(), self.limits);
         self.discard_history_prefix(removed);
+        self.enforce_memory_limit();
     }
 
     /// Charged bytes in history rows; container spare capacity and graphics are
     /// excluded. Text and hyperlink allocations are charged at their capacity.
     pub fn history_bytes(&self) -> usize {
         self.history_bytes
+    }
+
+    pub(crate) fn enforce_memory_limit(&mut self) {
+        let Some(limit) = self.memory_limit else {
+            return;
+        };
+        let mut bytes = self.history_bytes;
+        let mut removed = 0;
+        for row in &self.history {
+            if bytes <= limit {
+                break;
+            }
+            bytes = bytes.saturating_sub(row.storage_bytes());
+            removed += 1;
+        }
+        if removed > 0 {
+            // Rust rows own their cell and string allocations independently;
+            // the native page-size floor must not exempt them from this cap.
+            self.pages.remove_prefix(removed);
+            self.discard_history_prefix(removed);
+        }
     }
 
     /// Logical native page allocation charge, including active and history pages.
@@ -2627,6 +2657,7 @@ impl Screen {
             );
             self.discard_history_prefix(removed);
         }
+        self.enforce_memory_limit();
         self.viewport_offset = self.viewport_offset.min(self.history.len());
         if viewport_pinned && let Some(point) = self.viewport_pin {
             let index = self.all_rows().position(|row| row.id == point.row);

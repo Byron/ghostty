@@ -1453,7 +1453,10 @@ impl<R: Read> Decoder<R> {
                         .is_none_or(|max| rows.len() + screen.history.len() <= max)
                         && limits.bytes.is_none_or(|max| {
                             allocation_bytes.saturating_add(screen.storage_bytes()) <= max
-                        });
+                        })
+                        && screen
+                            .memory_limit
+                            .is_none_or(|max| bytes.saturating_add(screen.history_bytes) <= max);
                     if allowed {
                         count = rows.len();
                         screen.pages.prepend(page.capacity, count as u16);

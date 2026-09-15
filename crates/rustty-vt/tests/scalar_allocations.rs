@@ -86,3 +86,16 @@ fn scalar_printing_does_not_allocate_per_cell() {
     }
     assert!(feed_allocations("a\u{301}", 64) > baseline);
 }
+
+#[test]
+fn grapheme_append_allocates_only_its_shared_payload() {
+    let mut terminal = Terminal::new(4, 2, 0);
+    terminal.feed("\x1b[?2027ha\u{301}".as_bytes());
+    let snapshot = terminal.screen().snapshot_viewport();
+    ALLOCATIONS.set(Some(0));
+    terminal.print('\u{302}');
+    assert_eq!(ALLOCATIONS.replace(None).unwrap(), 1);
+    let screen = terminal.screen();
+    assert_eq!(&*screen.cell_text(&screen.rows[0], 0), "a\u{301}\u{302}");
+    assert_eq!(&*snapshot.cell_text(&snapshot.rows[0], 0), "a\u{301}");
+}

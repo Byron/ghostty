@@ -1396,9 +1396,15 @@ impl Screen {
         let y = self.cursor.row;
         let absolute = self.history.len() + y;
         let mut index = self.pages.page_index(absolute);
-        let mut text = self.cell_text(&self.rows[y], col).to_string();
-        text.push(cp);
         let previous = self.rows[y].cells[col].grapheme;
+        assert!(previous.is_none_or(|allocation| allocation.len < 64));
+        // Save the text before page growth can move its owner. A base scalar
+        // plus 64 suffix scalars needs at most 260 UTF-8 bytes.
+        let mut bytes = [0; 4 * (64 + 1)];
+        let text = self.cell_text(&self.rows[y], col);
+        let len = text.len();
+        bytes[..len].copy_from_slice(text.as_bytes());
+        let len = len + cp.encode_utf8(&mut bytes[len..]).len();
         let allocation = match self.pages.pages[index].graphemes.append(previous) {
             Ok(allocation) => allocation,
             Err(_) => {
@@ -1416,9 +1422,10 @@ impl Screen {
         };
         self.rows[y].resource_page = Some(self.pages.pages[index].serial);
         self.rows[y].cells[col].grapheme = Some(allocation);
-        self.pages.pages[index]
-            .graphemes
-            .set_text(allocation, Arc::from(text));
+        self.pages.pages[index].graphemes.set_text(
+            allocation,
+            Arc::from(std::str::from_utf8(&bytes[..len]).unwrap()),
+        );
         self.rows[y].dirty = true;
         Ok(())
     }

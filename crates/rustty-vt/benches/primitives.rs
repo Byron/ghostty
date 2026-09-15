@@ -535,5 +535,101 @@ fn chunked_input(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, primitives, chunked_input);
+// Keep populated history below its limit at both widths, so each round trip
+// reflows the same records without accumulating evictions or new input.
+const REFLOW_BATCHES: usize = 8;
+
+fn check_history_reflow(terminal: &Terminal, name: &str, columns: usize) {
+    let screen = terminal.screen();
+    let records = REFLOW_BATCHES * STREAM_RECORDS;
+    let record_rows = 192_usize.div_ceil(columns);
+    assert_eq!(screen.rows.len(), usize::from(ROWS));
+    assert_eq!(
+        screen.history.len(),
+        records * record_rows + 1 - usize::from(ROWS)
+    );
+    assert!(screen.history.len() < HISTORY_LINES);
+    assert_eq!(screen.cursor.row, usize::from(ROWS) - 1);
+    assert_eq!(screen.cursor.col, 0);
+    assert!(!screen.cursor.pending_wrap);
+    let cells: &[&str] = match name {
+        "ascii" => &["a", "b", "c", "d", "e", "f", "g", "h"],
+        "chinese" => &[
+            "天", "", "地", "", "玄", "", "黄", "", "宇", "", "宙", "", "洪", "", "荒", "",
+        ],
+        "combining" => &["a\u{301}", "b\u{302}", "c\u{303}", "d\u{308}"],
+        "emoji" => &["👩\u{200d}💻", "", "👨\u{200d}🚀", ""],
+        _ => unreachable!(),
+    };
+    for (index, row) in screen.all_rows().enumerate() {
+        let record_row = index % record_rows;
+        let populated = index < records * record_rows;
+        let used = if populated {
+            (192 - record_row * columns).min(columns)
+        } else {
+            0
+        };
+        assert_eq!(row.cells.len(), columns);
+        assert_eq!(row.wrapped, populated && record_row + 1 < record_rows);
+        assert_eq!(row.wrap_continuation, populated && record_row > 0);
+        for (col, cell) in row.cells.iter().enumerate() {
+            let text = if col < used {
+                cells[col % cells.len()]
+            } else {
+                ""
+            };
+            assert_eq!(&*screen.cell_text(row, col), text);
+            assert_eq!(cell.style, Style::default());
+            assert_eq!(
+                cell.width,
+                if col >= used {
+                    1
+                } else if text.is_empty() {
+                    0
+                } else if matches!(name, "chinese" | "emoji") {
+                    2
+                } else {
+                    1
+                }
+            );
+        }
+    }
+}
+
+fn history_reflow(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rustty/reflow_history");
+    group.throughput(Throughput::Elements(1));
+    for (name, pattern) in PATTERNS {
+        let input = input("stream", name, pattern);
+        let mut terminal = Terminal::with_limits(
+            COLS,
+            ROWS,
+            ScrollbackLimits {
+                bytes: None,
+                lines: Some(HISTORY_LINES),
+            },
+        );
+        terminal.feed(b"\x1b[?2027h");
+        for _ in 0..REFLOW_BATCHES {
+            assert!(terminal.feed(input.as_bytes()).is_empty());
+        }
+        check_history_reflow(&terminal, name, usize::from(COLS));
+        // Prime a complete round trip and validate the expanded history too.
+        terminal.resize(COLS / 2, ROWS);
+        check_history_reflow(&terminal, name, usize::from(COLS / 2));
+        terminal.resize(COLS, ROWS);
+        check_history_reflow(&terminal, name, usize::from(COLS));
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let terminal = black_box(&mut terminal);
+                terminal.resize(COLS / 2, ROWS);
+                terminal.resize(COLS, ROWS);
+            })
+        });
+        check_history_reflow(&terminal, name, usize::from(COLS));
+    }
+    group.finish();
+}
+
+criterion_group!(benches, primitives, chunked_input, history_reflow);
 criterion_main!(benches);

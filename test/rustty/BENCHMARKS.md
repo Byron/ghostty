@@ -159,6 +159,23 @@ cargo bench --offline -p rustty-vt --bench primitives -- \
   chunked_ --save-baseline chunked-before
 ```
 
+### Supplemental history reflow
+
+The four Rust-only `rustty/reflow_history` cases use the same ASCII, Chinese,
+combining and emoji stream records. Setup writes 256 records of 192 display
+columns plus CRLF, retaining 481 history rows and 32 visible rows at 128
+columns. Each timed iteration resizes 128 → 64 → 128 columns. At 64 columns,
+737 history rows remain; the 1,024-line limit and absent byte limit allow all
+content to survive. Throughput counts complete resize round trips.
+
+One full resize round trip primes the terminal before timing. No input is
+added inside the measured loop, so history neither grows nor evicts records.
+Outside timing, exact cell text, widths, styles, wrap flags, cursor position
+and history/viewport row counts are checked at both widths before measurement
+and at 128 columns after measurement. Construction, parsing, priming and
+validation are excluded. These cases supplement the existing 42 Rust workloads
+and have no native counterpart.
+
 ## Optimization measurements, 2026-09-15
 
 The table compares Rustty at `3116bbb` with the four optimizations ending at

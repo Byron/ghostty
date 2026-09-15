@@ -569,15 +569,15 @@ fn screen_extra(out: &mut Vec<u8>, screen: &Screen, options: Options<'_>, extra:
         style_open(out, cursor.style, Format::Vt, None);
     }
     if extra.hyperlink
-        && let Some(uri) = &cursor.hyperlink
+        && let Some(link) = &cursor.hyperlink
     {
         out.extend_from_slice(b"\x1b]8;");
-        if let Some(crate::HyperlinkId::Explicit(id)) = &cursor.hyperlink_id {
+        if let Some(crate::HyperlinkId::Explicit(id)) = &link.id {
             out.extend_from_slice(b"id=");
             out.extend_from_slice(id);
         }
         out.push(b';');
-        out.extend_from_slice(cursor.hyperlink_raw.as_deref().unwrap_or(uri.as_bytes()));
+        out.extend_from_slice(link.uri_bytes());
         out.extend_from_slice(b"\x1b\\");
     }
     if extra.protection && cursor.protected {
@@ -764,12 +764,10 @@ fn format_page(
                 }
             }
             if options.emit == Format::Html {
-                let link = cell.hyperlink.as_ref().map(|uri| {
-                    (
-                        cell.hyperlink_id.as_ref(),
-                        cell.hyperlink_raw.as_deref().unwrap_or(uri.as_bytes()),
-                    )
-                });
+                let link = cell
+                    .hyperlink
+                    .as_ref()
+                    .map(|link| (link.id.as_ref(), link.uri_bytes()));
                 if link != hyperlink {
                     if hyperlink.is_some() {
                         out.bytes.extend_from_slice(b"</a>");

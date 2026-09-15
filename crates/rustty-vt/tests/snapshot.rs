@@ -144,7 +144,10 @@ fn repeated_nul_prints_empty_cells_with_the_current_pen() {
             assert!(cell.text.is_empty(), "restored={restored}");
             assert_eq!(cell.width, 1);
             assert_eq!(cell.style.foreground, Color::Indexed(1));
-            assert_eq!(cell.hyperlink.as_deref(), Some("https://example.org"));
+            assert_eq!(
+                cell.hyperlink.as_deref().map(|link| link.uri.as_str()),
+                Some("https://example.org")
+            );
         }
     }
 }
@@ -566,15 +569,18 @@ fn ghostty_sparse_page_preserves_styles_links_graphemes_and_wide_cells() {
     assert_eq!(first.width, 2);
     assert!(first.protected && first.style.bold);
     assert_eq!(first.semantic, SemanticContent::Prompt);
-    assert_eq!(first.hyperlink.as_deref(), Some("alpha"));
     assert_eq!(
-        first.hyperlink_id,
+        first.hyperlink.as_deref().map(|link| link.uri.as_str()),
+        Some("alpha")
+    );
+    assert_eq!(
+        first.hyperlink.as_ref().unwrap().id,
         Some(HyperlinkId::Explicit(b"a".to_vec()))
     );
     assert_eq!(rows[0].cells[1].width, 0);
     assert_eq!(rows[0].cells[1].style.background, Color::Indexed(42));
     assert_eq!(
-        rows[0].cells[1].hyperlink_id,
+        rows[0].cells[1].hyperlink.as_ref().unwrap().id,
         Some(HyperlinkId::Implicit(0x01020304))
     );
     assert_eq!(rows[0].cells[2].style.background, Color::Indexed(7));
@@ -637,7 +643,12 @@ fn invalid_utf8_metadata_and_links_survive_without_loss() {
         records(&encode_to_vec(&restored).unwrap())[0]
     );
     assert_eq!(
-        restored.screen().cursor.hyperlink_raw.as_deref(),
+        restored
+            .screen()
+            .cursor
+            .hyperlink
+            .as_deref()
+            .and_then(|link| link.raw.as_deref()),
         Some(b"https://x/\xfd".as_slice())
     );
 }
@@ -874,8 +885,10 @@ fn snapshot_rejects_empty_link_strings_before_resource_admission() {
     ] {
         let mut terminal = Terminal::new(2, 1, 10);
         let cell = &mut terminal.screen_mut().rows[0].cells[0];
-        cell.hyperlink = Some(uri.into());
-        cell.hyperlink_id = Some(id);
+        cell.hyperlink = Some(std::sync::Arc::new(rustty_vt::HyperlinkData::new(
+            uri.as_bytes(),
+            Some(id),
+        )));
         assert_eq!(
             encode_to_vec(&terminal).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData

@@ -476,9 +476,12 @@ impl Terminal {
     /// Bound owned history-row storage independently of native page limits.
     /// Counts Rust cell/vector capacities and text/hyperlink allocations, but
     /// excludes active rows, graphics, page tables and deque spare capacity.
+    /// Shared hyperlink payloads are charged once per row, again across rows.
     /// Retained through reset; hosts reapply it after decoding a snapshot.
     pub fn set_scrollback_memory_limit(&mut self, bytes: Option<usize>) {
         for screen in std::iter::once(&mut self.primary).chain(self.alternate.iter_mut()) {
+            // Hosts can replace public rows or restore independently allocated data.
+            screen.history_bytes = screen.history.iter().map(Row::storage_bytes).sum();
             screen.memory_limit = bytes;
             screen.enforce_memory_limit();
         }
@@ -1094,8 +1097,6 @@ impl Terminal {
             width,
             style: cursor.style,
             hyperlink: cursor.hyperlink,
-            hyperlink_id: cursor.hyperlink_id,
-            hyperlink_raw: cursor.hyperlink_raw,
             protected: cursor.protected,
             semantic: cursor.semantic,
             spacer_head,

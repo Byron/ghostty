@@ -1,6 +1,7 @@
 //! Owned screen storage. Rows retain identity when they enter scrollback.
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use crate::page_list::{Page, PageAllocationInfo, PageList};
 use crate::page_resources::{
@@ -49,6 +50,81 @@ impl ScrollbackLimits {
 pub enum HyperlinkId {
     Implicit(u32),
     Explicit(Vec<u8>),
+}
+
+/// Immutable OSC 8 metadata shared by the cursor, cells and viewport copies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HyperlinkData {
+    pub uri: String,
+    pub id: Option<HyperlinkId>,
+    /// Present only when the URI contains bytes that are not UTF-8.
+    pub raw: Option<Vec<u8>>,
+}
+
+impl HyperlinkData {
+    pub fn new(uri: &[u8], id: Option<HyperlinkId>) -> Self {
+        Self {
+            uri: String::from_utf8_lossy(uri).into_owned(),
+            id,
+            raw: std::str::from_utf8(uri).is_err().then(|| uri.to_vec()),
+        }
+    }
+
+    pub fn uri_bytes(&self) -> &[u8] {
+        self.raw.as_deref().unwrap_or(self.uri.as_bytes())
+    }
+
+    fn storage_bytes(&self) -> usize {
+        (size_of::<Self>() + 2 * size_of::<usize>())
+            .saturating_add(self.uri.capacity())
+            .saturating_add(self.raw.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(match &self.id {
+                Some(HyperlinkId::Explicit(id)) => id.capacity(),
+                _ => 0,
+            })
+    }
+}
+
+// Keep the existing flat Cell/Cursor JSON fields without cloning their payloads.
+mod hyperlink_serde {
+    use super::{Arc, HyperlinkData, HyperlinkId};
+    use serde::{Deserialize, Deserializer, Serializer, ser::SerializeMap};
+
+    pub fn serialize<S: Serializer>(
+        link: &Option<Arc<HyperlinkData>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("hyperlink", &link.as_ref().map(|link| &link.uri))?;
+        map.serialize_entry(
+            "hyperlink_id",
+            &link.as_ref().and_then(|link| link.id.as_ref()),
+        )?;
+        map.serialize_entry(
+            "hyperlink_raw",
+            &link.as_ref().and_then(|link| link.raw.as_ref()),
+        )?;
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<HyperlinkData>>, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            hyperlink: Option<String>,
+            hyperlink_id: Option<HyperlinkId>,
+            hyperlink_raw: Option<Vec<u8>>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Ok(fields.hyperlink.map(|uri| {
+            Arc::new(HyperlinkData {
+                uri,
+                id: fields.hyperlink_id,
+                raw: fields.hyperlink_raw,
+            })
+        }))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -186,10 +262,8 @@ pub struct Cell {
     /// Zero denotes the continuation of a two-cell glyph.
     pub width: u8,
     pub style: Style,
-    pub hyperlink: Option<String>,
-    pub hyperlink_id: Option<HyperlinkId>,
-    /// Present only when the OSC 8 URI contains bytes that are not UTF-8.
-    pub hyperlink_raw: Option<Vec<u8>>,
+    #[serde(flatten, with = "hyperlink_serde")]
+    pub hyperlink: Option<Arc<HyperlinkData>>,
     pub protected: bool,
     pub semantic: SemanticContent,
     /// Padding before a wide glyph that wrapped at the right edge.
@@ -202,8 +276,6 @@ impl PartialEq for Cell {
             && self.width == other.width
             && self.style == other.style
             && self.hyperlink == other.hyperlink
-            && self.hyperlink_id == other.hyperlink_id
-            && self.hyperlink_raw == other.hyperlink_raw
             && self.protected == other.protected
             && self.semantic == other.semantic
             && self.spacer_head == other.spacer_head
@@ -222,8 +294,6 @@ impl Default for Cell {
             width: 1,
             style: Style::default(),
             hyperlink: None,
-            hyperlink_id: None,
-            hyperlink_raw: None,
             protected: false,
             semantic: SemanticContent::Output,
             spacer_head: false,
@@ -235,8 +305,6 @@ impl Cell {
     pub(crate) fn clear_link(&mut self) {
         self.link_id = 0;
         self.hyperlink = None;
-        self.hyperlink_id = None;
-        self.hyperlink_raw = None;
     }
 
     pub(crate) fn blank(background: Color) -> Self {
@@ -303,17 +371,21 @@ impl Row {
     }
 
     pub(crate) fn storage_bytes(&self) -> usize {
+        // Shared payloads are charged once per row, conservatively again across
+        // rows, so cached history charges remain additive as owners come and go.
+        let mut links = HashSet::new();
         size_of::<Self>()
             .saturating_add(self.cells.capacity().saturating_mul(size_of::<Cell>()))
             .saturating_add(self.cells.iter().fold(0usize, |bytes, cell| {
-                bytes
-                    .saturating_add(cell.text.capacity())
-                    .saturating_add(cell.hyperlink.as_ref().map_or(0, String::capacity))
-                    .saturating_add(cell.hyperlink_raw.as_ref().map_or(0, Vec::capacity))
-                    .saturating_add(match &cell.hyperlink_id {
-                        Some(HyperlinkId::Explicit(id)) => id.capacity(),
-                        _ => 0,
-                    })
+                bytes.saturating_add(cell.text.capacity()).saturating_add(
+                    cell.hyperlink.as_ref().map_or(0, |link| {
+                        if links.insert(Arc::as_ptr(link)) {
+                            link.storage_bytes()
+                        } else {
+                            0
+                        }
+                    }),
+                )
             }))
     }
 
@@ -388,9 +460,8 @@ pub struct Cursor {
     pub pending_wrap: bool,
     pub style: Style,
     pub protected: bool,
-    pub hyperlink: Option<String>,
-    pub hyperlink_id: Option<HyperlinkId>,
-    pub hyperlink_raw: Option<Vec<u8>>,
+    #[serde(flatten, with = "hyperlink_serde")]
+    pub hyperlink: Option<Arc<HyperlinkData>>,
     pub semantic: SemanticContent,
 }
 
@@ -446,8 +517,6 @@ impl Default for Cursor {
             style: Style::default(),
             protected: false,
             hyperlink: None,
-            hyperlink_id: None,
-            hyperlink_raw: None,
             semantic: SemanticContent::Output,
         }
     }
@@ -545,6 +614,7 @@ pub(crate) struct SavedCursor {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Screen {
     #[serde(skip)]
     pub(crate) metadata: crate::snapshot::ScreenMetadata,
@@ -583,6 +653,22 @@ pub struct Screen {
     pub(crate) next_row: u64,
     #[serde(skip)]
     tracked: TrackedPoints,
+}
+
+// Derive the field handlers above, but rebuild allocation-dependent caches.
+impl Serialize for Screen {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Screen {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut screen = Self::deserialize(deserializer)?;
+        // JSON stores values, not shared allocation identities or capacities.
+        screen.history_bytes = screen.history.iter().map(Row::storage_bytes).sum();
+        Ok(screen)
+    }
 }
 
 impl Screen {
@@ -967,8 +1053,16 @@ impl Screen {
     pub(crate) fn end_hyperlink(&mut self) {
         self.release_cursor_link();
         self.cursor.hyperlink = None;
-        self.cursor.hyperlink_id = None;
-        self.cursor.hyperlink_raw = None;
+    }
+
+    fn renew_cursor_implicit_link(&mut self) {
+        if let Some(link) = &mut self.cursor.hyperlink
+            && matches!(link.id, Some(HyperlinkId::Implicit(_)))
+        {
+            let id = self.metadata.hyperlink_implicit_id;
+            Arc::make_mut(link).id = Some(HyperlinkId::Implicit(id));
+            self.metadata.hyperlink_implicit_id = id.wrapping_add(1);
+        }
     }
 
     fn acquire_cursor_link(&mut self, link: &Hyperlink) -> Option<(u64, u16)> {
@@ -999,9 +1093,7 @@ impl Screen {
         self.end_hyperlink();
         if let Some(reference) = self.acquire_cursor_link(&link) {
             self.cursor_link = Some(reference);
-            self.cursor.hyperlink = Some(String::from_utf8_lossy(uri).into_owned());
-            self.cursor.hyperlink_raw = std::str::from_utf8(uri).is_err().then(|| uri.to_vec());
-            self.cursor.hyperlink_id = Some(link.id);
+            self.cursor.hyperlink = Some(Arc::new(HyperlinkData::new(uri, Some(link.id))));
         } else if explicit.is_none() {
             self.metadata.hyperlink_implicit_id =
                 self.metadata.hyperlink_implicit_id.wrapping_sub(1);
@@ -1016,25 +1108,15 @@ impl Screen {
         let moved = self.cursor_link.is_some_and(|(owner, _)| owner != serial);
         if moved {
             self.release_cursor_link();
-            if matches!(self.cursor.hyperlink_id, Some(HyperlinkId::Implicit(_))) {
-                let id = self.metadata.hyperlink_implicit_id;
-                self.cursor.hyperlink_id = Some(HyperlinkId::Implicit(id));
-                self.metadata.hyperlink_implicit_id = id.wrapping_add(1);
-            }
+            self.renew_cursor_implicit_link();
         }
         self.sync_cursor_style();
         if let Some((owner, id)) = self.cursor_link {
             let page = self.pages.page_at(self.history.len() + self.cursor.row).0;
             if owner == page.serial {
                 let link = page.links.get(id);
-                if self.cursor.hyperlink.as_ref().is_some_and(|uri| {
-                    link.uri
-                        == self
-                            .cursor
-                            .hyperlink_raw
-                            .as_deref()
-                            .unwrap_or(uri.as_bytes())
-                        && Some(&link.id) == self.cursor.hyperlink_id.as_ref()
+                if self.cursor.hyperlink.as_ref().is_some_and(|cursor_link| {
+                    link.uri == cursor_link.uri_bytes() && Some(&link.id) == cursor_link.id.as_ref()
                 }) {
                     return;
                 }
@@ -1284,12 +1366,12 @@ impl Screen {
                         BitmapAllocator::<16>::bytes_required(usize::from(grapheme.len) * 4)
                             .unwrap();
                 }
-                if let Some(uri) = &cell.hyperlink {
+                if let Some(link) = &cell.hyperlink {
                     linked_cells += 1;
-                    let uri = cell.hyperlink_raw.as_deref().unwrap_or(uri.as_bytes());
-                    if links.insert((cell.hyperlink_id.as_ref(), uri)) {
+                    let uri = link.uri_bytes();
+                    if links.insert((link.id.as_ref(), uri)) {
                         string_bytes += BitmapAllocator::<32>::bytes_required(uri.len()).unwrap();
-                        if let Some(HyperlinkId::Explicit(id)) = &cell.hyperlink_id {
+                        if let Some(HyperlinkId::Explicit(id)) = &link.id {
                             string_bytes +=
                                 BitmapAllocator::<32>::bytes_required(id.len()).unwrap();
                         }
@@ -2678,11 +2760,7 @@ impl Screen {
         }
         // Native resize reattaches the cursor hyperlink to its new page,
         // assigning a new implicit identity while printed links keep theirs.
-        if matches!(self.cursor.hyperlink_id, Some(HyperlinkId::Implicit(_))) {
-            let id = self.metadata.hyperlink_implicit_id;
-            self.cursor.hyperlink_id = Some(HyperlinkId::Implicit(id));
-            self.metadata.hyperlink_implicit_id = id.wrapping_add(1);
-        }
+        self.renew_cursor_implicit_link();
     }
 
     fn resize_height(
@@ -2750,6 +2828,58 @@ mod resource_tests {
     use super::*;
     use crate::Terminal;
     use crate::page_layout::PageCapacity;
+
+    #[test]
+    fn shared_hyperlink_storage_is_charged_once_per_row_by_allocation() {
+        let mut row = Row::new(0, 80, Color::Default);
+        let empty = row.storage_bytes();
+        let link = Arc::new(HyperlinkData::new(
+            b"https://example.org/\xff",
+            Some(HyperlinkId::Explicit(b"shared".to_vec())),
+        ));
+        row.cells[0].hyperlink = Some(link.clone());
+        let one_link = row.storage_bytes();
+        assert!(one_link > empty + size_of::<HyperlinkData>());
+        for cell in &mut row.cells {
+            cell.hyperlink = Some(link.clone());
+        }
+        assert_eq!(row.storage_bytes(), one_link);
+        let snapshot = row.clone();
+        drop(link);
+        assert_eq!(row.storage_bytes(), one_link);
+        drop(snapshot);
+        assert_eq!(row.storage_bytes(), one_link);
+
+        // Equal values in independent allocations must both be charged.
+        row.cells[1].hyperlink = Some(Arc::new(HyperlinkData::new(
+            b"https://example.org/\xff",
+            Some(HyperlinkId::Explicit(b"shared".to_vec())),
+        )));
+        assert_eq!(row.storage_bytes() - one_link, one_link - empty);
+    }
+
+    #[test]
+    fn deserialized_history_recounts_payloads_that_no_longer_share_storage() {
+        let mut terminal = Terminal::new(80, 2, 1000);
+        terminal.feed(b"\x1b]8;id=shared;");
+        terminal.feed(&vec![b'x'; 1024]);
+        terminal.feed(b"\x07");
+        terminal.feed(&[b'a'; 79]);
+        terminal.feed(b"\x1b]8;;\x07\r\n\r\n");
+        let original = terminal.screen().history_bytes();
+        let mut json = serde_json::to_value(terminal.screen()).unwrap();
+        json["history_bytes"] = serde_json::json!(0);
+        let restored: Screen = serde_json::from_value(json).unwrap();
+        let actual: usize = restored.history.iter().map(Row::storage_bytes).sum();
+        assert!(actual > 5 * original);
+        assert_eq!(restored.history_bytes(), actual);
+        *terminal.screen_mut() = restored;
+        // Reapplying host policy also repairs externally replaced/stale rows.
+        terminal.screen_mut().history_bytes = 0;
+        terminal.set_scrollback_memory_limit(Some(original));
+        assert!(terminal.screen().history.is_empty());
+        assert_eq!(terminal.screen().history_bytes(), 0);
+    }
 
     #[test]
     fn failed_style_rebuild_preserves_original_ids_and_references() {

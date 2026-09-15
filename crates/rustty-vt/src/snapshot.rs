@@ -14,11 +14,12 @@ use crate::page_resources::{
 };
 use crate::screen::{Charset, CharsetState, KittyKeyboard, SavedCursor};
 use crate::{
-    Cell, Color, Cursor, CursorShape, HyperlinkId, Margins, Row, Screen, ScrollbackLimits,
+    Color, Cursor, CursorShape, HyperlinkData, HyperlinkId, Margins, Row, Screen, ScrollbackLimits,
     SemanticContent, Style, Terminal, Underline, default_palette,
 };
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
+use std::sync::Arc;
 
 const MAGIC: &[u8; 10] = b"GHOSTSNP\x01\x00";
 
@@ -815,13 +816,6 @@ fn decode_link(reader: &mut Slice<'_>, allow_none: bool) -> io::Result<Option<Li
     }
     Ok(Some(Link { id, uri }))
 }
-fn assign_link(cell: &mut Cell, link: &Link) {
-    cell.hyperlink = Some(String::from_utf8_lossy(&link.uri).into_owned());
-    cell.hyperlink_raw = std::str::from_utf8(&link.uri)
-        .is_err()
-        .then(|| link.uri.clone());
-    cell.hyperlink_id = Some(link.id.clone());
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryProgress {
@@ -1176,10 +1170,7 @@ impl<R: Read> Decoder<R> {
             });
         }
         if let Some(link) = decode_link(&mut r, true)? {
-            screen.cursor.hyperlink = Some(String::from_utf8_lossy(&link.uri).into_owned());
-            screen.cursor.hyperlink_raw =
-                std::str::from_utf8(&link.uri).is_err().then_some(link.uri);
-            screen.cursor.hyperlink_id = Some(link.id);
+            screen.cursor.hyperlink = Some(Arc::new(HyperlinkData::new(&link.uri, Some(link.id))));
         }
         r.finish()?;
         let mut contents = Vec::new();
@@ -1272,6 +1263,7 @@ impl<R: Read> Decoder<R> {
                 links.insert(id, value);
             }
         }
+        let mut link_data = HashMap::new();
         let mut result = Vec::with_capacity(rows);
         for y in 0..rows {
             let flags = r.u8()?;
@@ -1330,7 +1322,15 @@ impl<R: Read> Decoder<R> {
                     && id != 0
                     && link_admission.retain_cell(id).is_ok()
                 {
-                    assign_link(cell, link_admission.get(id));
+                    cell.hyperlink = Some(
+                        link_data
+                            .entry(id)
+                            .or_insert_with(|| {
+                                let link = link_admission.get(id);
+                                Arc::new(HyperlinkData::new(&link.uri, Some(link.id.clone())))
+                            })
+                            .clone(),
+                    );
                     cell.link_id = id;
                 }
             }

@@ -371,28 +371,16 @@ pub(crate) struct Hyperlink {
 
 impl Hyperlink {
     pub fn from_cell(cell: &Cell) -> Option<Self> {
-        cell.hyperlink.as_ref().map(|uri| Self {
-            id: cell
-                .hyperlink_id
-                .clone()
-                .unwrap_or(HyperlinkId::Implicit(0)),
-            uri: cell
-                .hyperlink_raw
-                .clone()
-                .unwrap_or_else(|| uri.as_bytes().to_vec()),
+        cell.hyperlink.as_ref().map(|link| Self {
+            id: link.id.clone().unwrap_or(HyperlinkId::Implicit(0)),
+            uri: link.uri_bytes().to_vec(),
         })
     }
 
     pub fn from_cursor(cursor: &Cursor) -> Option<Self> {
-        cursor.hyperlink.as_ref().map(|uri| Self {
-            id: cursor
-                .hyperlink_id
-                .clone()
-                .unwrap_or(HyperlinkId::Implicit(0)),
-            uri: cursor
-                .hyperlink_raw
-                .clone()
-                .unwrap_or_else(|| uri.as_bytes().to_vec()),
+        cursor.hyperlink.as_ref().map(|link| Self {
+            id: link.id.clone().unwrap_or(HyperlinkId::Implicit(0)),
+            uri: link.uri_bytes().to_vec(),
         })
     }
 }

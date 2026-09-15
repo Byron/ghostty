@@ -35,7 +35,7 @@ fn owned_history_budget_counts_cells_and_link_payloads_and_invalidates_pins() {
     assert_eq!(terminal.screen().resolve(pin), None);
     assert_eq!(terminal.screen().selection, None);
 
-    // Raw URI bytes and an explicit ID own separate allocations in each cell.
+    // Raw URI bytes and an explicit ID remain charged in the shared payload.
     let mut link = b"\r\n\x1b]8;id=".to_vec();
     link.extend_from_slice(&vec![b'i'; 256]);
     link.extend_from_slice(b";https://example.org/");

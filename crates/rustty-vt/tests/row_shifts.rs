@@ -194,7 +194,13 @@ fn margin_splits_clear_wide_text_and_preserve_surviving_attributes() {
                 assert!(cell.text.is_empty());
                 assert_eq!(cell.width, 1);
                 assert_eq!(cell.style, before[col].style);
-                assert_eq!(cell.hyperlink_id, before[col].hyperlink_id);
+                assert_eq!(
+                    cell.hyperlink.as_ref().and_then(|link| link.id.as_ref()),
+                    before[col]
+                        .hyperlink
+                        .as_ref()
+                        .and_then(|link| link.id.as_ref())
+                );
             }
         }
     }

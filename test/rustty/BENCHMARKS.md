@@ -3,7 +3,8 @@
 The Rustty benchmarks use Criterion and call the headless `rustty-vt` APIs
 directly. They do not construct a session, PTY, font system, renderer, GPU, or
 window. Criterion is a development dependency only. No application build is
-needed, and timing does not include terminal construction or corpus decoding.
+needed. Timing excludes terminal construction and input generation; the `feed`
+and `stream` workloads include UTF-8 decoding and VT parsing.
 
 ```sh
 cargo bench --offline -p rustty-vt --bench primitives
@@ -51,8 +52,9 @@ GHOSTTY_PRIMITIVES_BIN="$PWD/zig-out/bin/vt-primitives" \
 
 With that environment variable, Criterion registers matching `ghostty/*`
 groups. `iter_custom` returns the duration reported by the **native operation
-loop**; process startup, file reads, UTF-8 decoding, terminal setup, JSON, IPC,
-and final terminal destruction are excluded. Both engines use identical
+loop**; process startup, file reads, terminal setup, JSON, IPC, and final
+terminal destruction are excluded. Predecoding for the original primitives is
+also excluded; `feed` and `stream` decode inside their measured parser calls. Both engines use identical
 pre-generated UTF-8 corpora and validate content checksums. Ghostty's own unit
 check additionally inspects combining and ZWJ suffixes and cloned text.
 The native process primes a fresh terminal for each Criterion batch; Rust
@@ -68,8 +70,9 @@ operations, not of Rust versus Zig in isolation.
 
 ## Workloads and units
 
-All terminals have 128 columns and 32 rows, zero scrollback, and DEC 2027
-grapheme handling enabled. Each corpus repeats its fixed pattern 128 times:
+All terminals have 128 columns and 32 rows and DEC 2027 grapheme handling
+enabled. The six original primitives and `feed` disable scrollback. Their
+corpora repeat a fixed pattern 128 times:
 
 | Corpus | Pattern | Input scalars | Allocating text path |
 | --- | --- | ---: | --- |
@@ -86,12 +89,44 @@ grapheme handling enabled. Each corpus repeats its fixed pattern 128 times:
 | `read` | Sum every codepoint, including page-owned grapheme suffixes | Cell slot (4,096 per scan) |
 | `clone` | Copy the visible screen and destroy the copy | Cell slot (4,096 per copy) |
 | `reflow` | Resize 128 → 64 → 128 columns, preserving all text | Complete resize round trip |
+| `feed` | Parse CUP (home cursor) followed by the same UTF-8 text as `print` | Input byte |
+| `stream` | Parse 32 plain wrapped records, scrolling and evicting bounded history | Input byte |
+| `stream_styled` | Same records with alternating SGR foreground colors and bold | Input byte |
 
 `print` measures warmed overwrites, including replacement of previous text;
 it bypasses the UTF-8/VT parser. `scalar` isolates inline access, whereas `read`
 uses the public text iterator, decoding UTF-8 only for graphemes. Empty cells and
 wide-cell continuations are scanned too. `clone` includes destruction in both
 engines. Reflow fits within the active screen even for the Chinese corpus.
+
+`feed` exposes UTF-8 decoding, parser dispatch, and any printable-run batching in
+addition to cell replacement. It includes a three-byte CUP sequence. Stream
+iterations contain 32 records of 192 display columns followed by CRLF: 6,144
+printed columns and 64 physical rows. Record lengths are equal in display
+columns across corpora, using 24 ASCII, 12 Chinese, or 48 combining/emoji pattern
+repetitions. `stream_styled` cycles palette colors 1–4, alternates bold, and
+resets SGR before each CRLF.
+
+| Stream corpus | Printable scalars per iteration | Plain input bytes | Styled input bytes |
+| --- | ---: | ---: | ---: |
+| ASCII | 6,144 | 6,208 | 6,576 |
+| Chinese | 3,072 | 9,280 | 9,648 |
+| Combining | 12,288 | 18,496 | 18,864 |
+| Emoji | 9,216 | 33,856 | 34,224 |
+
+Both stream engines request a 1,024-line history limit with no byte limit and
+prime with 2,048 physical rows before measurement, so allocations and history
+eviction are already active. Native pages and resource admission can retain
+different exact row counts below the same requested limit. Rust keeps the
+terminal across Criterion batches; the native helper primes a fresh terminal
+for each batch. History eviction is page-granular, so longer measurements
+average over allocation/recycling phases better than single iterations.
+
+Outside the timers, the harness checks the analytically expected visible text,
+every populated cell's foreground/bold, final cursor, and bounded nonempty
+history. An order-sensitive checksum over active cell contents and styles must
+match the native helper. These checks are exercised by `--test` as well as
+ordinary Criterion runs. All input generation and priming stay outside timing.
 
 Allocator instrumentation is excluded from timing. The separate
 `scalar_allocations` test checks that ordinary scalar printing and reads make

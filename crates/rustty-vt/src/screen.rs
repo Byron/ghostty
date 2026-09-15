@@ -399,7 +399,9 @@ impl Row {
         Self {
             resource_page: None,
             id,
-            cells: vec![Cell::blank(background); cols],
+            cells: std::iter::repeat_with(|| Cell::blank(background))
+                .take(cols)
+                .collect(),
             wrapped: false,
             wrap_continuation: false,
             semantic: SemanticContent::Output,

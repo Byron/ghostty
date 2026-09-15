@@ -2610,13 +2610,24 @@ impl Screen {
                 .iter()
                 .filter(|r| r.wrap_continuation)
                 .count();
+            let mut graphics_points: Vec<_> = self
+                .graphics
+                .placements
+                .iter()
+                .filter(|p| !p.virtual_placement && p.parent.is_none())
+                .map(|p| (p.row, p.col))
+                .collect();
+            graphics_points.sort_unstable();
+            graphics_points.dedup();
             let mut map = HashMap::<GridPointKey, GridPoint>::new();
+            let mut wanted = Vec::new();
             let mut output = Vec::new();
             let mut line = self.blank_row(cols, Color::Default);
             let mut x: usize = 0;
             let mut pin_x: usize = 0;
             let mut written_rows = 0;
             for (old_index, old) in contents.iter().enumerate() {
+                wanted.clear();
                 let source_page = source_pages.page_at(old_index).0;
                 let capacity = source_page.adjusted_capacity(cols as u16, true);
                 let mut used = if old.wrapped {
@@ -2632,6 +2643,7 @@ impl Screen {
                             point.col = point.col.min(cols - 1 - pin_x);
                         }
                         used = used.max(point.col + 1);
+                        wanted.push(point.col);
                     }
                 };
                 if let Some(point) = &mut self.viewport_pin {
@@ -2649,6 +2661,7 @@ impl Screen {
                 }
                 if old.id == old_cursor.row {
                     used = used.max(old_cursor.col + 1);
+                    wanted.push(old_cursor.col);
                 }
                 if old.semantic != SemanticContent::Output {
                     used = used.max(1);
@@ -2658,6 +2671,27 @@ impl Screen {
                 if used == 0 && old.wrap_continuation {
                     continue;
                 }
+                // Graphics anchors need coordinates but do not retain blank
+                // cells. Index them once instead of scanning every placement
+                // for every source row.
+                let graphics_start = graphics_points.partition_point(|p| p.0 < old.id);
+                wanted.extend(
+                    graphics_points[graphics_start..]
+                        .iter()
+                        .take_while(|p| p.0 == old.id)
+                        .map(|p| p.1),
+                );
+                wanted.sort_unstable();
+                wanted.dedup();
+                let mut next_point = 0;
+                // Source columns are visited in order. Only actual consumers
+                // need a map entry; ordinary untracked cells never hash.
+                let mut record = |old_col, point| {
+                    if wanted.get(next_point) == Some(&old_col) {
+                        map.insert((old.id, old_col), point);
+                        next_point += 1;
+                    }
+                };
                 if used > 0 {
                     while self.pages.total_rows() <= output.len() {
                         self.pages.reflow_row(capacity);
@@ -2667,8 +2701,8 @@ impl Screen {
                 let mut wide_tail = None;
                 for (old_col, cell) in old.cells.iter().take(used).enumerate() {
                     if cell.width == 0 {
-                        map.insert(
-                            (old.id, old_col),
+                        record(
+                            old_col,
                             wide_tail.unwrap_or(GridPoint {
                                 row: line.id,
                                 col: x.saturating_sub(1),
@@ -2677,8 +2711,8 @@ impl Screen {
                         continue;
                     }
                     if cell.spacer_head {
-                        map.insert(
-                            (old.id, old_col),
+                        record(
+                            old_col,
                             GridPoint {
                                 row: line.id,
                                 col: x.min(cols - 1),
@@ -2706,8 +2740,8 @@ impl Screen {
                             self.pages.reflow_row(capacity);
                         }
                     }
-                    map.insert(
-                        (old.id, old_col),
+                    record(
+                        old_col,
                         spacer.unwrap_or(GridPoint {
                             row: line.id,
                             col: x,
@@ -2777,8 +2811,13 @@ impl Screen {
                     });
                     x += width;
                 }
-                // Empty rows and tracked blank columns still need a stable mapping.
-                for old_col in used..old.cells.len() {
+                // Map only requested trailing blanks, including graphics
+                // anchors that intentionally did not extend the copied text.
+                for old_col in wanted
+                    .iter()
+                    .copied()
+                    .filter(|&col| col >= used && col < old.cells.len())
+                {
                     map.insert(
                         (old.id, old_col),
                         GridPoint {

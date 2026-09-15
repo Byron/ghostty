@@ -1,6 +1,6 @@
 //! Unit-level Criterion benchmarks; no PTY, session, font, renderer, or app.
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use rustty_vt::{Cell, Row, Screen, ScrollbackLimits, Terminal, unicode};
+use rustty_vt::{Cell, Color, Row, Screen, ScrollbackLimits, Terminal, unicode};
 use serde::Deserialize;
 use std::{hint::black_box, path::Path, process::Command, time::Duration};
 
@@ -12,7 +12,134 @@ const PATTERNS: [(&str, &str); 4] = [
     ("combining", "a\u{301}b\u{302}c\u{303}d\u{308}"),
     ("emoji", "👩\u{200d}💻👨\u{200d}🚀"),
 ];
-const OPERATIONS: [&str; 6] = ["width", "print", "scalar", "read", "clone", "reflow"];
+const OPERATIONS: [&str; 9] = [
+    "width",
+    "print",
+    "scalar",
+    "read",
+    "clone",
+    "reflow",
+    "feed",
+    "stream",
+    "stream_styled",
+];
+const HISTORY_LINES: usize = 1_024;
+const PRIME_BATCHES: usize = 32;
+const STREAM_RECORDS: usize = 32;
+
+fn is_stream(operation: &str) -> bool {
+    matches!(operation, "stream" | "stream_styled")
+}
+
+fn input(operation: &str, name: &str, text: &str) -> String {
+    if operation == "feed" {
+        return format!("\x1b[H{text}");
+    }
+    if !is_stream(operation) {
+        return text.to_owned();
+    }
+    let pattern = PATTERNS.iter().find(|&&(n, _)| n == name).unwrap().1;
+    // 192 display columns: one full row and a half row before CRLF.
+    // Width is stated explicitly because ZWJ clusters are narrower than the
+    // sum of their scalar widths.
+    let repeats = match name {
+        "ascii" => 24,
+        "chinese" => 12,
+        _ => 48,
+    };
+    let record = pattern.repeat(repeats);
+    let mut result = String::new();
+    for line in 0..STREAM_RECORDS {
+        if operation == "stream_styled" {
+            result.push_str(&format!(
+                "\x1b[{};{}m",
+                if line % 2 == 0 { 1 } else { 22 },
+                31 + line % 4,
+            ));
+        }
+        result.push_str(&record);
+        if operation == "stream_styled" {
+            result.push_str("\x1b[0m");
+        }
+        result.push_str("\r\n");
+    }
+    result
+}
+
+fn stream_checksum(screen: &Screen) -> u64 {
+    let mut checksum = 0_u64;
+    for row in &screen.rows {
+        for (col, cell) in row.cells.iter().enumerate() {
+            checksum = checksum.wrapping_mul(16_777_619);
+            checksum = checksum.wrapping_add(cell_sum(screen, row, col));
+            if cell.codepoint.is_some() {
+                let color = match cell.style.foreground {
+                    Color::Default => 0,
+                    Color::Indexed(index) => u64::from(index) + 1,
+                    Color::Rgb(..) => panic!("unexpected benchmark style"),
+                };
+                checksum =
+                    checksum.wrapping_add((color + 257 * u64::from(cell.style.bold)) * 0x11_0000);
+            }
+        }
+    }
+    checksum
+}
+
+fn check_stream(terminal: &Terminal, name: &str, styled: bool) -> u64 {
+    let screen = terminal.screen();
+    assert!(!screen.history.is_empty());
+    assert!(screen.history.len() <= HISTORY_LINES);
+    assert_eq!(screen.cursor.row, usize::from(ROWS) - 1);
+    assert_eq!(screen.cursor.col, 0);
+    assert!(!screen.cursor.pending_wrap);
+    // The active screen ends with 15 complete records, the preceding record's
+    // final 64 columns, and one empty row. Check against the input scalars,
+    // independently of either engine's printing implementation.
+    let pattern = PATTERNS.iter().find(|&&(n, _)| n == name).unwrap().1;
+    let repeats = match name {
+        "ascii" => 24,
+        "chinese" => 12,
+        _ => 48,
+    };
+    assert_eq!(
+        text_sum(screen),
+        pattern.chars().map(u64::from).sum::<u64>() * (15 * repeats + repeats / 3),
+    );
+    for (row_index, row) in screen.rows.iter().enumerate() {
+        let record = 16 + row_index.div_ceil(2);
+        for cell in row.cells.iter().filter(|cell| cell.codepoint.is_some()) {
+            assert_eq!(
+                cell.style.foreground,
+                if styled {
+                    Color::Indexed(1 + (record % 4) as u8)
+                } else {
+                    Color::Default
+                },
+            );
+            assert_eq!(cell.style.bold, styled && record % 2 == 0);
+        }
+    }
+    stream_checksum(screen)
+}
+
+fn setup_stream(bytes: &[u8]) -> Terminal {
+    let mut terminal = Terminal::with_limits(
+        COLS,
+        ROWS,
+        ScrollbackLimits {
+            bytes: None,
+            lines: Some(HISTORY_LINES),
+        },
+    );
+    terminal.feed(b"\x1b[?2027h");
+    // Emit 2,048 physical rows: warm allocations and force history eviction
+    // before timing, rather than measuring unbounded initial growth.
+    for _ in 0..PRIME_BATCHES {
+        assert!(terminal.feed(bytes).is_empty());
+    }
+    terminal
+}
 
 // Only these two read adapters differ when copying this harness to the earlier
 // String-backed implementation. The timed workloads stay identical.
@@ -141,9 +268,6 @@ fn primitives(c: &mut Criterion) {
         let directory =
             std::env::temp_dir().join(format!("rustty-primitives-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        for (name, text, _) in &corpora {
-            std::fs::write(directory.join(format!("{name}.txt")), text).unwrap();
-        }
         directory
     });
     eprintln!("Rustty Cell: {} bytes", size_of::<Cell>());
@@ -153,10 +277,18 @@ fn primitives(c: &mut Criterion) {
         }
         for operation in OPERATIONS {
             let mut group = c.benchmark_group(format!("{engine}/{operation}"));
-            for (name, _, codepoints) in &corpora {
-                let mut terminal = setup(codepoints);
+            for (name, text, codepoints) in &corpora {
+                let input = input(operation, name, text);
+                let mut terminal = if is_stream(operation) {
+                    setup_stream(input.as_bytes())
+                } else {
+                    setup(codepoints)
+                };
                 let expected_text = text_sum(terminal.screen());
                 let checksum = match operation {
+                    "stream" | "stream_styled" => {
+                        check_stream(&terminal, name, operation == "stream_styled")
+                    }
                     "width" => width_sum(codepoints),
                     "scalar" => scalar_sum(terminal.screen()),
                     _ => expected_text,
@@ -164,12 +296,23 @@ fn primitives(c: &mut Criterion) {
                 let units = match operation {
                     "width" | "print" => codepoints.len() as u64,
                     "reflow" => 1,
+                    "feed" | "stream" | "stream_styled" => input.len() as u64,
                     _ => u64::from(COLS) * u64::from(ROWS),
                 };
-                group.throughput(Throughput::Elements(units));
+                group.throughput(
+                    if matches!(operation, "feed" | "stream" | "stream_styled") {
+                        Throughput::Bytes(units)
+                    } else {
+                        Throughput::Elements(units)
+                    },
+                );
                 if engine == "ghostty" {
                     let binary = ghostty.as_ref().unwrap();
-                    let data = data_dir.as_ref().unwrap().join(format!("{name}.txt"));
+                    let data = data_dir
+                        .as_ref()
+                        .unwrap()
+                        .join(format!("{operation}-{name}.txt"));
+                    std::fs::write(&data, &input).unwrap();
                     group.bench_function(*name, |b| {
                         b.iter_custom(|iterations| {
                             native(binary, operation, &data, iterations, units, checksum)
@@ -184,6 +327,9 @@ fn primitives(c: &mut Criterion) {
                         "print" => {
                             b.iter(|| overwrite(black_box(&mut terminal), black_box(codepoints)))
                         }
+                        "feed" | "stream" | "stream_styled" => b.iter(|| {
+                            black_box(black_box(&mut terminal).feed(black_box(input.as_bytes())))
+                        }),
                         "scalar" => b.iter(|| black_box(scalar_sum(black_box(terminal.screen())))),
                         "read" => b.iter(|| black_box(text_sum(black_box(terminal.screen())))),
                         "clone" => b.iter(|| {
@@ -199,6 +345,12 @@ fn primitives(c: &mut Criterion) {
                         }),
                         _ => unreachable!(),
                     });
+                }
+                if is_stream(operation) {
+                    assert_eq!(
+                        check_stream(&terminal, name, operation == "stream_styled"),
+                        checksum
+                    );
                 }
                 assert_eq!(
                     text_sum(terminal.screen()),

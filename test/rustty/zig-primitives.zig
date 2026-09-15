@@ -1,14 +1,57 @@
 //! Portable unit-level benchmarks. Only libghostty-vt and std are imported;
 //! there is no renderer, application runtime, PTY, or platform instrumentation.
-//! Input generation and UTF-8 decoding are deliberately outside the timer.
+//! Input generation is outside the timer; feed/stream include UTF-8/VT parsing.
 const std = @import("std");
 const vt = @import("ghostty-vt");
 
 pub const std_options: std.Options = .{ .log_level = .err };
 
-const Operation = enum { width, print, scalar, read, clone, reflow };
+const Operation = enum { width, print, scalar, read, clone, reflow, feed, stream, stream_styled };
 const cols = 128;
 const rows = 32;
+const history_lines = 1024;
+const prime_batches = 32;
+
+fn isStream(op: Operation) bool {
+    return op == .stream or op == .stream_styled;
+}
+
+fn parsed(op: Operation) bool {
+    return op == .feed or isStream(op);
+}
+
+fn streamChecksum(screen: *const vt.Screen) u64 {
+    var sum: u64 = 0;
+    var it = screen.pages.rowIterator(.right_down, .{ .active = .{} }, null);
+    while (it.next()) |pin| {
+        for (pin.cells(.all)) |*cell| {
+            sum *%= 16_777_619;
+            sum +%= cell.codepoint();
+            if (cell.hasGrapheme()) {
+                for (pin.grapheme(cell).?) |cp| sum +%= cp;
+            }
+            if (cell.codepoint() != 0) {
+                const style = pin.style(cell);
+                const color: u64 = switch (style.fg_color) {
+                    .none => 0,
+                    .palette => |index| @as(u64, index) + 1,
+                    .rgb => unreachable,
+                };
+                sum +%= (color + 257 * @as(u64, @intFromBool(style.flags.bold))) * 0x11_0000;
+            }
+        }
+    }
+    return sum;
+}
+
+fn checkStream(terminal: *const vt.Terminal) !u64 {
+    const screen = terminal.screens.active;
+    const history = screen.pages.total_rows - screen.pages.rows;
+    if (history == 0 or history > history_lines) return error.InvalidHistory;
+    if (screen.cursor.x != 0 or screen.cursor.y != rows - 1 or
+        screen.cursor.pending_wrap) return error.InvalidCursor;
+    return streamChecksum(screen);
+}
 
 fn decode(alloc: std.mem.Allocator, bytes: []const u8) ![]u21 {
     const view = try std.unicode.Utf8View.init(bytes);
@@ -43,9 +86,16 @@ fn read(screen: *const vt.Screen, comptime full_text: bool) u64 {
     return sum;
 }
 
-fn step(comptime op: Operation, terminal: *vt.Terminal, cps: []const u21) !u64 {
+fn step(
+    comptime op: Operation,
+    terminal: *vt.Terminal,
+    stream: *vt.TerminalStream,
+    cps: []const u21,
+    bytes: []const u8,
+) !u64 {
     std.mem.doNotOptimizeAway(terminal);
     std.mem.doNotOptimizeAway(cps);
+    std.mem.doNotOptimizeAway(bytes);
     switch (op) {
         .width => {
             var sum: u64 = 0;
@@ -53,6 +103,7 @@ fn step(comptime op: Operation, terminal: *vt.Terminal, cps: []const u21) !u64 {
             return sum;
         },
         .print => try fill(terminal, cps),
+        .feed, .stream, .stream_styled => stream.nextSlice(bytes),
         .scalar => return read(terminal.screens.active, false),
         .read => return read(terminal.screens.active, true),
         .clone => {
@@ -83,18 +134,28 @@ pub fn main(init: std.process.Init) !void {
     if (iterations == 0) return error.InvalidIterations;
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], alloc, .limited(16 * 1024 * 1024));
     defer alloc.free(bytes);
-    const cps = try decode(alloc, bytes);
+    const cps = if (parsed(op)) try alloc.alloc(u21, 0) else try decode(alloc, bytes);
     defer alloc.free(cps);
     var terminal = try vt.Terminal.init(init.io, alloc, .{
         .cols = cols,
         .rows = rows,
-        .max_scrollback_bytes = 0,
+        .max_scrollback_bytes = if (isStream(op)) null else 0,
+        .max_scrollback_lines = if (isStream(op)) history_lines else null,
         .default_modes = .{ .grapheme_cluster = true },
     });
     defer terminal.deinit(alloc);
-    try fill(&terminal, cps);
+    var stream = vt.TerminalStream.init(.{ .allocator = alloc, .handler = .init(&terminal) });
+    defer stream.deinit();
+    if (isStream(op)) {
+        for (0..prime_batches) |_| stream.nextSlice(bytes);
+    } else if (op == .feed) {
+        stream.nextSlice(bytes);
+    } else {
+        try fill(&terminal, cps);
+    }
     const expected = switch (op) {
-        .width => try step(.width, &terminal, cps),
+        .width => try step(.width, &terminal, &stream, cps, bytes),
+        .stream, .stream_styled => try checkStream(&terminal),
         .scalar => read(terminal.screens.active, false),
         else => read(terminal.screens.active, true),
     };
@@ -104,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         inline else => |operation| measured: {
             const start = std.Io.Timestamp.now(init.io, .awake);
             for (0..iterations) |_| {
-                const value = try step(operation, &terminal, cps);
+                const value = try step(operation, &terminal, &stream, cps, bytes);
                 std.mem.doNotOptimizeAway(value);
                 checksum = value;
             }
@@ -112,7 +173,8 @@ pub fn main(init: std.process.Init) !void {
         },
     };
     switch (op) {
-        .print, .clone, .reflow => checksum = read(terminal.screens.active, true),
+        .print, .clone, .reflow, .feed => checksum = read(terminal.screens.active, true),
+        .stream, .stream_styled => checksum = try checkStream(&terminal),
         else => {},
     }
     if (checksum != expected) return error.ChecksumMismatch;
@@ -128,6 +190,7 @@ pub fn main(init: std.process.Init) !void {
             .width, .print => cps.len,
             .scalar, .read, .clone => cols * rows,
             .reflow => 1,
+            .feed, .stream, .stream_styled => bytes.len,
         },
         .cell_bytes = @sizeOf(vt.Cell),
         .checksum = checksum,
@@ -147,6 +210,8 @@ test "primitive workloads retain scalar and grapheme contents" {
         .default_modes = .{ .grapheme_cluster = true },
     });
     defer terminal.deinit(alloc);
+    var stream = vt.TerminalStream.init(.{ .allocator = alloc, .handler = .init(&terminal) });
+    defer stream.deinit();
     try fill(&terminal, cps);
     var expected: u64 = 0;
     for (cps) |cp| expected += cp;
@@ -155,16 +220,16 @@ test "primitive workloads retain scalar and grapheme contents" {
     const cells = pin.cells(.all);
     try std.testing.expectEqualSlices(u21, &.{0x0301}, pin.grapheme(&cells[0]).?);
     try std.testing.expectEqualSlices(u21, &.{ 0x200d, 0x1f4bb }, pin.grapheme(&cells[5]).?);
-    try std.testing.expectEqual('a' + 0x5929 + 0x5730 + 0x1f469, try step(.scalar, &terminal, cps));
+    try std.testing.expectEqual('a' + 0x5929 + 0x5730 + 0x1f469, try step(.scalar, &terminal, &stream, cps, ""));
     var copy = try terminal.screens.active.clone(std.testing.io, alloc, .{ .viewport = .{} }, null);
     defer copy.deinit();
     try std.testing.expectEqual(expected, read(&copy, true));
     inline for ([_]Operation{ .print, .clone, .reflow }) |op| {
-        _ = try step(op, &terminal, cps);
+        _ = try step(op, &terminal, &stream, cps, "");
         try std.testing.expectEqual(expected, read(terminal.screens.active, true));
     }
-    try std.testing.expectEqual(expected, try step(.read, &terminal, cps));
-    try std.testing.expectEqual(9, try step(.width, &terminal, cps));
+    try std.testing.expectEqual(expected, try step(.read, &terminal, &stream, cps, ""));
+    try std.testing.expectEqual(9, try step(.width, &terminal, &stream, cps, ""));
     try std.testing.expectError(error.InvalidCorpus, decode(alloc, "\n"));
     try std.testing.expectError(error.InvalidCorpus, decode(alloc, ""));
     try std.testing.expectError(error.InvalidUtf8, decode(alloc, "\xff"));

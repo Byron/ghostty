@@ -675,3 +675,145 @@ output, and the mixed/chunked cases to check fallback and delivery overhead.
 Combining and ZWJ-heavy input still needs scalar grapheme work. The reflow
 workload remains limited to the active screen; history reflow needs separate
 workloads before choosing its next optimization.
+
+## Scrolling follow-up and history reflow, 2026-09-15
+
+This pass compares production code at `1c09810` with `00c1116`, using the same
+46-case Rust harness from `263f4c4` for both. The original 42 workloads are
+unchanged; four new history-reflow cases retain 256 records across each resize
+round trip. The native helper and Ghostty production code are unchanged.
+
+Both Rust binaries were built before the final consecutive before/after runs.
+Native measurements then used the retained ReleaseFast helper. All timings
+were serial, with builds, tests and profiles stopped, on the Apple M4 Max and
+toolchain/release settings documented above: 50 samples, 0.5 seconds of warmup
+and 2 seconds of measurement. Values are median microseconds per complete
+workload. Speedup is Rustty before/after; Rustty/Ghostty is Rustty after/native.
+Native timing changes from earlier tables are not production code gains.
+Against this reference, Rustty still takes about 8× as long for plain
+ASCII/Chinese streams.
+
+Plain ASCII streaming improves 1.30× and styled ASCII streaming 1.26×;
+Chinese improves 1.14× and 1.17× respectively. Combining and emoji stream
+medians improve only about 1–2%. Mixed streams improve 1.05–1.06×, and the
+active-screen reflow round trips improve 1.03–1.18×. History reflow is essentially
+unchanged: these new cases establish a baseline for subsequent scrollback work.
+
+| Operation | Corpus | Before µs | After µs | Speedup | Ghostty µs | Rustty/Ghostty |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| print | ascii | 11.201 | 11.512 | 0.97× | 6.191 | 1.86× |
+| print | chinese | 17.828 | 17.809 | 1.00× | 12.053 | 1.48× |
+| print | combining | 25.750 | 26.399 | 0.98× | 391.584 | 0.07× |
+| print | emoji | 27.474 | 28.004 | 0.98× | 14.924 | 1.88× |
+| reflow | ascii | 45.917 | 41.888 | 1.10× | 20.400 | 2.05× |
+| reflow | chinese | 54.456 | 52.932 | 1.03× | 21.520 | 2.46× |
+| reflow | combining | 42.731 | 37.305 | 1.15× | 47.417 | 0.79× |
+| reflow | emoji | 36.408 | 30.727 | 1.18× | 29.828 | 1.03× |
+| feed | ascii | 1.472 | 1.476 | 1.00× | 0.496 | 2.97× |
+| feed | chinese | 10.363 | 10.356 | 1.00× | 435.823 | 0.02× |
+| feed | combining | 28.566 | 29.474 | 0.97× | 397.441 | 0.07× |
+| feed | emoji | 30.761 | 30.578 | 1.01× | 17.305 | 1.77× |
+| stream | ascii | 56.259 | 43.135 | 1.30× | 5.265 | 8.19× |
+| stream | chinese | 79.397 | 69.606 | 1.14× | 8.638 | 8.06× |
+| stream | combining | 399.392 | 394.062 | 1.01× | 486.927 | 0.81× |
+| stream | emoji | 499.913 | 488.874 | 1.02× | 717.038 | 0.68× |
+| stream_styled | ascii | 66.294 | 52.754 | 1.26× | 7.742 | 6.81× |
+| stream_styled | chinese | 86.721 | 74.350 | 1.17× | 34.704 | 2.14× |
+| stream_styled | combining | 493.137 | 482.367 | 1.02× | 501.022 | 0.96× |
+| stream_styled | emoji | 656.609 | 644.300 | 1.02× | 748.537 | 0.86× |
+| scalar | ascii | 1.467 | 1.516 | 0.97× | 1.276 | 1.19× |
+| scalar | chinese | 1.449 | 1.493 | 0.97× | 1.277 | 1.17× |
+| scalar | combining | 1.495 | 1.537 | 0.97× | 1.262 | 1.22× |
+| scalar | emoji | 1.440 | 1.475 | 0.98× | 1.273 | 1.16× |
+| read | ascii | 1.964 | 1.957 | 1.00× | 1.908 | 1.03× |
+| read | chinese | 1.928 | 1.960 | 0.98× | 1.900 | 1.03× |
+| read | combining | 2.742 | 2.757 | 0.99× | 5.823 | 0.47× |
+| read | emoji | 2.754 | 2.801 | 0.98× | 2.405 | 1.17× |
+| clone | ascii | 10.585 | 10.821 | 0.98× | 5.310 | 2.04× |
+| clone | chinese | 11.357 | 11.581 | 0.98× | 5.302 | 2.18× |
+| clone | combining | 12.347 | 12.583 | 0.98× | 16.371 | 0.77× |
+| clone | emoji | 11.388 | 11.563 | 0.98× | 9.225 | 1.25× |
+| width | ascii | 0.476 | 0.476 | 1.00× | 0.343 | 1.39× |
+| width | chinese | 0.476 | 0.476 | 1.00× | 0.341 | 1.40× |
+| width | combining | 0.430 | 0.431 | 1.00× | 0.424 | 1.02× |
+| width | emoji | 0.323 | 0.325 | 0.99× | 0.318 | 1.02× |
+
+| Mixed workload | Delivery | Before µs | After µs | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| chunked_feed_mixed | whole | 61.832 | 61.324 | 1.01× |
+| chunked_feed_mixed | 7_bytes | 75.860 | 77.365 | 0.98× |
+| chunked_feed_mixed | 4_KiB | 61.084 | 60.723 | 1.01× |
+| chunked_stream_mixed | whole | 235.469 | 225.040 | 1.05× |
+| chunked_stream_mixed | 7_bytes | 295.193 | 281.826 | 1.05× |
+| chunked_stream_mixed | 4_KiB | 237.677 | 223.721 | 1.06× |
+
+| History reflow corpus | Before µs | After µs | Speedup |
+| --- | ---: | ---: | ---: |
+| ascii | 1557.017 | 1543.292 | 1.01× |
+| chinese | 1261.355 | 1265.312 | 1.00× |
+| combining | 2163.563 | 2154.903 | 1.00× |
+| emoji | 1564.801 | 1566.051 | 1.00× |
+
+The implementation changes are separate commits:
+
+- `0c88873` assigns the known fresh blank row's resource page directly after
+  growth/eviction. Existing rows retain ordinary resource transfer, including
+  externally supplied hyperlink payloads and page-boundary moves.
+- `6794e3e` delays minimum-limit/layout calculations while a row fits existing
+  page capacity and the raw line limit is not exceeded. Byte-floor work runs
+  only when a byte policy exists. Native floors and recycling order remain
+  unchanged, without cached policy state.
+- `00c1116` checks active physical row widths once on the ordinary index-scroll
+  path. Its two independent mutation paths retain their own widening checks.
+
+Intermediate 30-sample measurements supported each change. The initial
+column-scan measurement was slower; a repeated paired run with the same
+binaries improved plain ASCII/Chinese streams about 3%. The final table uses
+fresh consecutive measurements of the complete before and final binaries.
+
+The scan/read/clone/width and direct-print controls range from 0.4% faster to
+3.4% slower in this run. Those small regressions remain in the table; no
+control-path speedup is claimed.
+
+All 296 VT tests, strict all-target VT Clippy, formatting, the app check and
+all 82 Rust/native benchmark smoke cases passed. The new regression checks
+cover fresh-row resource ownership and native line/byte floors. Existing
+snapshot/row-shift tests verify narrow restored pages, margins and pins.
+Native page/layout and snapshot suites passed 6,582 of 6,585 comparisons.
+The three failures remain the whole/scalar/chunked variants of
+`pages/graphemes/wrap/3/1/1/alternate`: Rustty preserves the same extra ZWJ.
+
+Final eight-second, nominal 1 kHz profiles used an optimized build with debug
+information and frame pointers. Page layout/metadata symbols account for less
+than 0.1% of active samples. Remaining ASCII streaming costs include
+`scroll_up` at 21% (including inlined blank-row initialization),
+`Row::storage_bytes` at 21%, and `sync_resource_row` at 16%. Chinese streaming
+spends 37% in `print_utf8`, 13% in scrolling, 13% in storage accounting and 11%
+in row synchronization. These are independently normalized physical-symbol
+shares; inlined work belongs to its enclosing symbol. Row initialization,
+accounting and existing-row synchronization remain the main ASCII targets.
+
+The local artifacts are in `target/criterion-scrolling/`: `comparison.json`
+and `comparison.md` contain all 46 rows; `metadata.json` records revisions,
+toolchains, SHA-256 hashes and logs. Final Rust estimates use `matched-before`
+and `final`; native estimates use `final`. Intermediate `before`, `blank`,
+`layout`, `columns` and `column-control-*` runs remain available separately.
+The final profiles and summaries are in `profiles/`.
+
+To repeat the Rust comparison with the frozen binaries:
+
+```sh
+CRITERION_HOME="$PWD/target/criterion-scrolling-repeat" \
+  target/criterion-scrolling/primitives-before --bench '^rustty/' \
+  --save-baseline matched-before \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+CRITERION_HOME="$PWD/target/criterion-scrolling-repeat" \
+  target/criterion-scrolling/primitives-final --bench '^rustty/' \
+  --baseline matched-before \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+```
+
+Ghostty's combining overwrite and Chinese `feed` cliffs still limit those
+ratios as measures of general Unicode throughput. The new history-reflow
+workload provides a baseline for preserved scrollback, separately from the
+existing active-screen round trip. Cell size remains 56 bytes.

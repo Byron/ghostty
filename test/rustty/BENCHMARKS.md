@@ -183,7 +183,7 @@ The eight Rust-only `rustty/stream_memory_capped` and
 with a 50,000,000-byte owned-history cap, matching the app's default host-memory
 policy. They retain the original 1,024-line native limit and priming. The host
 cap is high enough to preserve this workload's history, but activates its
-incremental payload accounting. These cases exercise that accounting cost;
+page-capacity accounting (incremental row/payload accounting in older revisions). These cases exercise that accounting cost;
 they do not measure host-cap eviction or the complete app.
 
 Outside timing, the harness checks that enabling the cap and feeding another
@@ -1125,3 +1125,251 @@ The native column still includes the known Chinese-feed and combining-overwrite
 performance cliffs. Native timing differences from earlier tables are not
 code gains. Cell size remains 56 bytes; no property cache or cell-layout
 change was introduced.
+
+## Packed pages and SIMD, 2026-09-16
+
+This comparison starts at `c366e3768` (56-byte cells), measures packed pages
+with scalar run kernels at `dae3bda84`, and then explicit SIMD at `6c4096104`.
+The scalar version includes the complete storage migration, page recycling,
+page-owned resource access, and host accounting changes. The SIMD version adds
+`wide 1.7.0` kernels; UTF-8 decoding still uses the scalar standard-library iterator.
+Here “scalar” describes the source kernels; LLVM auto-vectorization and
+existing parser optimizations remain enabled in all builds. Ghostty production
+code and the frozen native executable are unchanged.
+
+The machine is an Apple M4 Max with 16 CPU cores and 64 GiB RAM, running macOS
+26.7. All Rust versions use Rust 1.95.0 / LLVM 22.1.2, the workspace release
+profile, thin LTO, and one codegen unit. This compiler differs from the older
+measurements above; compare revisions within this table. The native executable
+uses Zig 0.16.0 ReleaseFast. Harness changes only adapt row, cell, and resource
+access to the new Rust API; inputs, checks, units, and timer boundaries are unchanged.
+
+Every workload runs in the order before → scalar → SIMD → native, immediately
+followed by native → SIMD → scalar → before. The 18 Rust-only workloads omit
+native. Each run requests **50 samples**, 0.3 seconds of warmup, and a 1-second
+measurement target. All executables were built and frozen first; timing ran
+serially with builds, tests, allocation probes, and differential checks finished.
+Each table entry is the median of the 100 normalized samples pooled from the
+two directions, in microseconds per workload. Ratios use time: above 1 means
+slower, below 1 means faster. These primitive measurements do not measure app
+CPU usage, shaping, or rendering.
+
+| Workload | Before µs | Packed scalar µs | Packed SIMD µs | SIMD / before | SIMD / scalar | Native µs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.486 | 0.473 | 0.485 | 1.00× | 1.03× | 0.342 |
+| width/chinese | 0.487 | 0.478 | 0.487 | 1.00× | 1.02× | 0.348 |
+| width/combining | 0.441 | 0.438 | 0.443 | 1.00× | 1.01× | 0.428 |
+| width/emoji | 0.331 | 0.328 | 0.331 | 1.00× | 1.01× | 0.320 |
+| print/ascii | 11.524 | 26.286 | 26.312 | 2.28× | 1.00× | 6.246 |
+| print/chinese | 16.906 | 39.332 | 39.301 | 2.32× | 1.00× | 12.156 |
+| print/combining | 27.057 | 66.653 | 65.443 | 2.42× | 0.98× | 402.728 |
+| print/emoji | 28.900 | 70.776 | 73.218 | 2.53× | 1.03× | 15.053 |
+| scalar/ascii | 1.572 | 1.845 | 1.727 | 1.10× | 0.94× | 1.295 |
+| scalar/chinese | 1.499 | 1.852 | 1.880 | 1.25× | 1.02× | 1.279 |
+| scalar/combining | 1.555 | 2.050 | 1.495 | 0.96× | 0.73× | 1.286 |
+| scalar/emoji | 1.505 | 2.106 | 1.695 | 1.13× | 0.80× | 1.289 |
+| read/ascii | 2.196 | 10.013 | 9.884 | 4.50× | 0.99× | 1.957 |
+| read/chinese | 2.272 | 10.487 | 10.558 | 4.65× | 1.01× | 1.944 |
+| read/combining | 2.789 | 13.203 | 12.908 | 4.63× | 0.98× | 5.920 |
+| read/emoji | 2.964 | 11.942 | 11.629 | 3.92× | 0.97× | 2.439 |
+| clone/ascii | 11.056 | 4.942 | 4.917 | 0.44× | 0.99× | 5.880 |
+| clone/chinese | 11.776 | 4.932 | 4.896 | 0.42× | 0.99× | 5.932 |
+| clone/combining | 12.895 | 6.267 | 6.281 | 0.49× | 1.00× | 17.615 |
+| clone/emoji | 11.869 | 5.606 | 5.574 | 0.47× | 0.99× | 9.866 |
+| reflow/ascii | 44.015 | 46.530 | 46.787 | 1.06× | 1.01× | 24.818 |
+| reflow/chinese | 54.117 | 74.397 | 74.835 | 1.38× | 1.01× | 25.886 |
+| reflow/combining | 38.409 | 82.825 | 83.631 | 2.18× | 1.01× | 50.155 |
+| reflow/emoji | 31.592 | 66.423 | 66.330 | 2.10× | 1.00× | 32.989 |
+| feed/ascii | 1.500 | 1.220 | 1.157 | 0.77× | 0.95× | 0.517 |
+| feed/chinese | 9.449 | 6.028 | 5.431 | 0.57× | 0.90× | 442.728 |
+| feed/combining | 29.322 | 70.173 | 70.171 | 2.39× | 1.00× | 411.351 |
+| feed/emoji | 33.237 | 75.558 | 74.604 | 2.24× | 0.99× | 17.433 |
+| stream/ascii | 28.881 | 25.266 | 25.166 | 0.87× | 1.00× | 5.869 |
+| stream/chinese | 50.837 | 37.507 | 35.508 | 0.70× | 0.95× | 9.295 |
+| stream/combining | 389.177 | 937.647 | 941.962 | 2.42× | 1.00× | 494.106 |
+| stream/emoji | 495.956 | 1194.795 | 1218.535 | 2.46× | 1.02× | 758.144 |
+| stream_styled/ascii | 38.818 | 31.923 | 31.679 | 0.82× | 0.99× | 8.545 |
+| stream_styled/chinese | 58.253 | 44.539 | 42.681 | 0.73× | 0.96× | 36.096 |
+| stream_styled/combining | 495.797 | 1077.716 | 1096.183 | 2.21× | 1.02× | 504.267 |
+| stream_styled/emoji | 647.360 | 1390.991 | 1422.885 | 2.20× | 1.02× | 781.168 |
+| chunked_feed_mixed/whole | 63.373 | 122.088 | 121.791 | 1.92× | 1.00× | — |
+| chunked_feed_mixed/7_bytes | 79.406 | 148.847 | 147.511 | 1.86× | 0.99× | — |
+| chunked_feed_mixed/4_KiB | 62.885 | 120.717 | 120.892 | 1.92× | 1.00× | — |
+| chunked_stream_mixed/whole | 212.177 | 413.624 | 418.553 | 1.97× | 1.01× | — |
+| chunked_stream_mixed/7_bytes | 270.175 | 504.234 | 502.716 | 1.86× | 1.00× | — |
+| chunked_stream_mixed/4_KiB | 214.787 | 417.550 | 418.689 | 1.95× | 1.00× | — |
+| reflow_history/ascii | 1670.950 | 1663.057 | 1668.233 | 1.00× | 1.00× | — |
+| reflow_history/chinese | 1320.976 | 1649.821 | 1664.869 | 1.26× | 1.01× | — |
+| reflow_history/combining | 2261.843 | 7529.250 | 7590.778 | 3.36× | 1.01× | — |
+| reflow_history/emoji | 1646.609 | 5359.386 | 5340.542 | 3.24× | 1.00× | — |
+| stream_memory_capped/ascii | 40.716 | 25.489 | 25.754 | 0.63× | 1.01× | — |
+| stream_memory_capped/chinese | 59.752 | 37.751 | 36.509 | 0.61× | 0.97× | — |
+| stream_memory_capped/combining | 400.980 | 944.468 | 953.585 | 2.38× | 1.01× | — |
+| stream_memory_capped/emoji | 502.930 | 1174.023 | 1190.522 | 2.37× | 1.01× | — |
+| stream_styled_memory_capped/ascii | 47.437 | 31.621 | 31.651 | 0.67× | 1.00× | — |
+| stream_styled_memory_capped/chinese | 66.844 | 45.403 | 42.777 | 0.64× | 0.94× | — |
+| stream_styled_memory_capped/combining | 589.846 | 1239.577 | 1266.456 | 2.15× | 1.02× | — |
+| stream_styled_memory_capped/emoji | 769.141 | 1514.014 | 1596.455 | 2.08× | 1.05× | — |
+
+The final implementation reduces snapshot copy time by 51–58%, ASCII feed time
+by 23%, and Chinese feed time by 43%. ASCII/Chinese streams also improve,
+including the 50 MB host-cap workloads. SIMD reduces ASCII feed time by about
+5% and Chinese feed time by 10% relative to the packed scalar version, and
+reduces Chinese stream times by roughly 3–6%.
+ASCII streams show little additional SIMD benefit.
+
+There are substantial regressions: direct `print` takes 2.28–2.53× the baseline
+time, full-text `read` takes 3.92–4.65×, and mixed chunked input takes 1.86–1.97×.
+Combining/emoji feeds and streams take roughly 2.1–2.5×. Active-screen reflow
+regresses 6–118%; retained-history reflow is about unchanged for ASCII, 26%
+slower for Chinese, and 3.24–3.36× for combining/emoji. These costs remain in
+the delivered implementation. The packed layout and ordinary-run kernels do
+not establish an overall application speedup.
+
+The median Rust interquartile range divided by sample median is 1.43%, but some
+styled capped grapheme runs reach 31–46%, and some first-codepoint scans reach
+27%. Width controls, combining first-codepoint scans, and ASCII history reflow
+change direction between the two orders; their small pooled differences are
+not treated as gains. The large snapshot/feed gains and print/read/complex-text
+regressions retain their direction in both orders. Direct print, read, clone,
+and reflow use the same source paths in the scalar and SIMD revisions; their
+inter-revision changes include code generation and run variation. The native
+Chinese-feed and combining-overwrite cliffs remain visible in the fixed
+reference and were already present before this migration.
+
+### Allocations and memory pressure
+
+[allocations.rs](allocations.rs) wraps the system allocator in a separate
+executable. It records allocation calls (including reallocations), requested
+bytes, and peak live requested bytes; these are not RSS or allocator bookkeeping.
+Input construction, process-wide initialization, output formatting, and final
+terminal destruction are outside the counts. Construction and pressure rows
+include terminal creation. Write/exposure/recycling rows report changes from
+an already constructed or primed terminal, so their retained/peak columns are
+deltas and can be negative. Scalar and SIMD probes were compiled independently
+from their frozen revisions and produced identical results; “packed” covers both.
+
+Each pressure case feeds 4,096 records of 192 display columns plus CRLF at
+128×32, with no native history limit. The linked case combines SGR, an explicit
+OSC 8 link, `á`, and a wide ideograph. Uncapped cases retain all 8,161 history
+rows. The recycling case primes the 1,024-line native limit and then scrolls
+20,000 additional physical rows. The exposure case fills the unused capacity
+of a single 80-column page, exposing 589 rows without page growth.
+
+| Probe | Before allocations | Packed allocations | Before retained KiB | Packed retained KiB | Before peak KiB | Packed peak KiB | Before history rows | Packed history rows |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| construct/128x32 | 51 | 21 | 229.47 | 381.58 | 229.47 | 381.58 | 0 | 0 |
+| write/ascii | 0 | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 |
+| write/latin | 0 | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 |
+| write/wide | 0 | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 |
+| expose_rows | 598 | 0 | 2632.88 | 0.00 | 2632.88 | 0.00 | 589 | 589 |
+| recycle/20000_rows | 20,216 | 486 | -238.00 | 0.00 | 847.00 | 2.90 | 870 | 870 |
+| pressure/ascii/unlimited | 8,315 | 178 | 57823.94 | 8698.01 | 57823.94 | 8698.01 | 8,161 | 8,161 |
+| pressure/ascii/zero | 8,213 | 21 | 229.69 | 381.58 | 236.69 | 381.58 | 0 | 0 |
+| pressure/ascii/512_KiB | 8,218 | 215 | 740.47 | 1135.83 | 747.47 | 1138.73 | 72 | 741 |
+| pressure/ascii/2_MiB | 8,220 | 208 | 2287.47 | 2647.14 | 2294.47 | 2650.04 | 290 | 2,225 |
+| pressure/linked_graphemes/unlimited | 21,755,316 | 21,770,860 | 70108.17 | 31629.75 | 71531.20 | 32921.62 | 8,161 | 8,161 |
+| pressure/linked_graphemes/zero | 363,097 | 342,861 | 272.16 | 484.46 | 326.91 | 524.45 | 0 | 0 |
+| pressure/linked_graphemes/512_KiB | 402,380 | 21,770,899 | 827.19 | 1899.30 | 864.45 | 3191.40 | 64 | 370 |
+| pressure/linked_graphemes/2_MiB | 1,693,532 | 21,770,897 | 2562.20 | 3314.33 | 3596.78 | 4606.31 | 258 | 741 |
+
+The live cell is 8 bytes versus 56 bytes before. Measured uncapped ASCII heap
+retention falls from 59,211,711 to 8,906,767 bytes (85%); linked/grapheme retention
+falls from 71,790,767 to 32,388,863 bytes (55%). Ordinary writes remain allocation
+free. Exposing existing page capacity drops from 598 allocations to zero, and
+20,000-row recycling drops from 20,216 to 486 allocation calls (97.6%), with
+zero retained-heap growth and at most four live pages in the probe. Recycling
+still allocates small eviction/identity bookkeeping; it is bounded, not wholly
+allocation free.
+
+Preallocation increases empty 128×32 terminal retention from 234,975 to 390,735
+bytes (66%). Under a 512 KiB host cap, the packed ASCII case retains 741 history
+rows versus 72 before, and the linked case retains 370 versus 64. Whole-page
+pruning preserves every page containing active rows, including unused capacity
+and history on those pages. Thus total live memory can exceed the configured
+history cap: the packed 512 KiB ASCII case retains 1,163,087 bytes and the linked
+case 1,944,879 bytes. Their reclaimable `history_bytes()` charges are 386,896
+and zero respectively; active pages are the additional allowance. Resource
+growth/reflow can also require transient copies, reflected in the peak column.
+Explicit zero retains no history; `None` retains all input.
+
+The linked 512 KiB probe increases allocation calls from 402,380 to 21,770,899;
+at 2 MiB it increases from 1,693,532 to 21,770,897. Small caps formerly removed
+individual rows before pages accumulated this much resource state. The adopted
+policy permits full active-page resource growth, exposing the expensive native
+admission/rebuild path seen in the uncapped probe. This allocation regression,
+the higher minimum footprint, and the CPU regressions above remain performance
+work. Native logical page accounting and the separate graphics budget are
+unchanged; host charges cover page buffers, tables, and payload capacities.
+
+### Verification and reproduction
+
+All workspace library and integration tests pass, including VT, parser,
+renderer/shaping, sessions, and Metal rendering. The all-target workspace check
+and Rust formatting check pass. All 54 Rust and 36 native workload correctness
+checks pass. SIMD/reference tests exercise short lengths, offsets, every
+mismatch position, all packed fields, maximum style IDs, complete wide pairs,
+and output sentinels. The allocation probe's assertions pass for both packed
+versions, which produce identical results across all 14 probe cases.
+
+The full differential suite completed **61,587 comparisons, three failures,
+and zero coverage gaps**, matching the frozen baseline exactly. The failures
+remain `pages/graphemes/wrap/3/1/1/alternate`, including its scalar and chunked
+variants: native text length 2 versus Rust length 3. Full parity is therefore
+not established; this migration introduces no new differential failures.
+The independently validated scalar stage also completed 24,173 targeted
+comparisons with those same three failures. JSON, opaque hyperlink bytes,
+detached snapshot lifetime, GHOSTSNP v1, page/layout/resource admission, selection,
+search, graphics placeholders, and saved-cursor coverage are included in the
+Rust and differential checks.
+
+Rust 1.95 optimized assembly was inspected for both targets. aarch64 contains
+`cmeq.4s`, `shl.2d`, `orr.16b`, `zip2.2d`, and vector loads/stores. Baseline
+x86_64 contains `pcmpeqd`, `pand`, `psllq`, `punpcklqdq`/`punpckhqdq`, and
+`movdqu`; destination equality uses 32-bit halves rather than SSE4.1 `pcmpeqq`.
+The source uses value casts and scalar tails without vector-alignment assumptions.
+The x86_64 build was cross-compiled and inspected, not timed or executed on this
+ARM host. Unsupported targets retain scalar kernels. SIMD UTF-8 transcoding
+and a grapheme transition table remain separate follow-ups.
+
+```sh
+cargo +1.95.0 test --offline --workspace --lib --tests --no-fail-fast
+cargo +1.95.0 check --offline --workspace --all-targets
+cargo +1.95.0 fmt --all --check
+python3 test/rustty/parity.py --no-build \
+  --rust-bin target/packed-cells/simd/rust-oracle \
+  --zig-bin target/packed-cells/baseline/vt-oracle \
+  --artifacts target/packed-cells/parity-simd-full \
+  --snapshots --snapshot-wire --pages --page-layout --grid --protocols \
+  --parser --input --unicode --osc --corpus --generated 100 --max-failures 10000
+cargo +1.95.0 run --offline --release -p rustty-vt --example allocations
+
+# Build each revision before timing and copy its executable to the named path.
+# The runner validates all 54 names, saves raw samples, and resumes complete cases.
+python3 test/rustty/bench_compare.py \
+  --before target/packed-cells/baseline/rust-primitives \
+  --scalar target/packed-cells/scalar/rust-primitives \
+  --simd target/packed-cells/simd/rust-primitives \
+  --ghostty target/packed-cells/baseline/vt-primitives \
+  --output target/packed-cells/comparison
+
+cargo +1.95.0 rustc --offline -p rustty-vt --lib --release \
+  --target aarch64-apple-darwin --target-dir target/packed-cells/assembly \
+  -- --emit=asm
+RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2' \
+  cargo +1.95.0 rustc --offline -p rustty-vt --lib --release \
+  --target x86_64-unknown-linux-gnu --target-dir target/packed-cells/assembly \
+  -- --emit=asm
+```
+
+Local artifacts are under `target/packed-cells/`. The `baseline/`, `scalar/`,
+and `simd/` manifests record revisions, compiler details, and executable SHA-256
+hashes. `comparison/manifest.json` records the schedule and binaries;
+`comparison/results.json` records both directions and normalized samples.
+Criterion's estimates, confidence intervals, raw samples, and per-run logs are
+retained under `comparison/`. `allocations-{before,scalar,simd}.json` and
+`allocations-manifest.json` identify the independently compiled probes.
+Their source is [allocations.rs](allocations.rs); it uses APIs shared with the
+baseline and runs unchanged on all three revisions. Assembly extracts are in
+`assembly/verified/`; verification logs and native failure artifacts are retained
+beside them. [bench_compare.py](bench_compare.py) reproduces the timing schedule.

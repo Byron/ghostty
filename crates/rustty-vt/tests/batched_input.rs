@@ -281,6 +281,37 @@ fn printable_runs_preserve_effect_order_and_cursor_queries() {
 }
 
 #[test]
+fn long_utf8_groups_and_malformed_tails_match_byte_delivery() {
+    for pattern in ["éÿ", "水界", "😀😁", "é", "👩🏽‍💻", "界abcé"] {
+        let input = [
+            b"\x1b[?2027h\x1b[31m".as_slice(),
+            pattern.repeat(257).as_bytes(),
+            b"\xf0\x9f\x1b[0mTAIL\r\n\xc2\x85done",
+        ]
+        .concat();
+        for alternate in [false, true] {
+            let mut base = Terminal::new(73, 5, 128);
+            if alternate {
+                base.feed(b"\x1b[?1049h");
+            }
+            let mut expected = base.clone();
+            let effects = deliver(&mut expected, &input, 1, false);
+            for chunk in [8, 23, 255, 1024, usize::MAX] {
+                for handler in [false, true] {
+                    let mut actual = base.clone();
+                    assert_eq!(deliver(&mut actual, &input, chunk, handler), effects);
+                    same_state(
+                        &actual,
+                        &expected,
+                        &format!("{pattern:?}, alt={alternate}, chunk={chunk}, handler={handler}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn printable_runs_resume_from_snapshots_at_every_byte_boundary() {
     let input = "\x1b[?2027habcdefgh\x1b[31m界a\u{301}👩\u{200d}💻\r\n\x1b*0\x1bNqqqq\x1b[2b\x1b[6n\x1b]2;title\x07done".as_bytes();
     let mut expected = Terminal::new(8, 3, 12);

@@ -20,6 +20,31 @@ mod scalar {
     use super::*;
 
     #[inline]
+    pub(crate) fn decode_utf8(
+        input: &mut &str,
+        codepoints: &mut [char],
+        properties: &mut [u32],
+        previous: &mut (char, u32),
+    ) -> usize {
+        assert_eq!(codepoints.len(), properties.len());
+        let mut chars = (*input).chars();
+        let mut len = 0;
+        for (slot, property) in codepoints.iter_mut().zip(properties) {
+            let Some(cp) = chars.next() else { break };
+            *slot = cp;
+            *property = if cp == previous.0 {
+                previous.1
+            } else {
+                crate::unicode::print_properties(cp)
+            };
+            *previous = (cp, *property);
+            len += 1;
+        }
+        *input = chars.as_str();
+        len
+    }
+
+    #[inline]
     pub(crate) fn printable_prefix(properties: &[u32], width: u8, graphemes: bool) -> usize {
         let mask = if graphemes { 3 | (31 << 3) } else { 3 };
         properties
@@ -82,9 +107,123 @@ mod scalar {
 mod simd {
     use super::*;
     use bytemuck::cast;
+    use core::arch::aarch64::*;
     use wide::{u32x4, u64x2};
 
     const DESTINATION_MASK: u64x2 = u64x2::new([DEST_MASK; 2]);
+
+    #[inline]
+    pub(crate) fn decode_utf8(
+        input: &mut &str,
+        codepoints: &mut [char],
+        properties: &mut [u32],
+        previous: &mut (char, u32),
+    ) -> usize {
+        assert_eq!(codepoints.len(), properties.len());
+        let mut len = 0;
+        while let Some(group) = codepoints[len..].first_chunk_mut::<8>() {
+            let bytes = decode_group(input, group);
+            if bytes == 0 {
+                break;
+            }
+            for (&cp, property) in group.iter().zip(&mut properties[len..len + 8]) {
+                *property = if cp == previous.0 {
+                    previous.1
+                } else {
+                    crate::unicode::print_properties(cp)
+                };
+                *previous = (cp, *property);
+            }
+            *input = &input[bytes..];
+            len += 8;
+        }
+        // Mixed groups and the bounded tail retain the fused scalar decoder.
+        len + scalar::decode_utf8(
+            input,
+            &mut codepoints[len..],
+            &mut properties[len..],
+            previous,
+        )
+    }
+
+    #[inline]
+    fn decode_group(input: &str, output: &mut [char; 8]) -> usize {
+        let bytes = input.as_bytes();
+        let Some(&first) = bytes.first() else {
+            return 0;
+        };
+        // NEON is enabled for this module. Each load checks its byte extent,
+        // then checks all eight leading lanes for the same UTF-8 length.
+        // The borrowed str guarantees valid continuations and scalar values,
+        // so the decoded u32 lanes are valid char representations. Loads and
+        // stores accept the input's byte and output's ordinary char alignment.
+        unsafe {
+            let continuation = vdup_n_u8(0x3f);
+            let (low, high, consumed) = match first {
+                0xc2..=0xdf if bytes.len() >= 16 => {
+                    let group = vld2_u8(bytes.as_ptr());
+                    if vminv_u8(vceq_u8(vand_u8(group.0, vdup_n_u8(0xe0)), vdup_n_u8(0xc0)))
+                        != u8::MAX
+                    {
+                        return 0;
+                    }
+                    let values = vorrq_u16(
+                        vshlq_n_u16::<6>(vmovl_u8(vand_u8(group.0, vdup_n_u8(0x1f)))),
+                        vmovl_u8(vand_u8(group.1, continuation)),
+                    );
+                    (vmovl_u16(vget_low_u16(values)), vmovl_high_u16(values), 16)
+                }
+                0xe0..=0xef if bytes.len() >= 24 => {
+                    let group = vld3_u8(bytes.as_ptr());
+                    if vminv_u8(vceq_u8(vand_u8(group.0, vdup_n_u8(0xf0)), vdup_n_u8(0xe0)))
+                        != u8::MAX
+                    {
+                        return 0;
+                    }
+                    let values = vorrq_u16(
+                        vorrq_u16(
+                            vshlq_n_u16::<12>(vmovl_u8(vand_u8(group.0, vdup_n_u8(0x0f)))),
+                            vshlq_n_u16::<6>(vmovl_u8(vand_u8(group.1, continuation))),
+                        ),
+                        vmovl_u8(vand_u8(group.2, continuation)),
+                    );
+                    (vmovl_u16(vget_low_u16(values)), vmovl_high_u16(values), 24)
+                }
+                0xf0..=0xf4 if bytes.len() >= 32 => {
+                    let group = vld4_u8(bytes.as_ptr());
+                    if vminv_u8(vceq_u8(vand_u8(group.0, vdup_n_u8(0xf8)), vdup_n_u8(0xf0)))
+                        != u8::MAX
+                    {
+                        return 0;
+                    }
+                    let prefix = vorrq_u16(
+                        vorrq_u16(
+                            vshlq_n_u16::<12>(vmovl_u8(vand_u8(group.0, vdup_n_u8(7)))),
+                            vshlq_n_u16::<6>(vmovl_u8(vand_u8(group.1, continuation))),
+                        ),
+                        vmovl_u8(vand_u8(group.2, continuation)),
+                    );
+                    let tail = vmovl_u8(vand_u8(group.3, continuation));
+                    (
+                        vorrq_u32(
+                            vshlq_n_u32::<6>(vmovl_u16(vget_low_u16(prefix))),
+                            vmovl_u16(vget_low_u16(tail)),
+                        ),
+                        vorrq_u32(
+                            vshlq_n_u32::<6>(vmovl_high_u16(prefix)),
+                            vmovl_high_u16(tail),
+                        ),
+                        32,
+                    )
+                }
+                _ => return 0,
+            };
+            let output = output.as_mut_ptr().cast::<u32>();
+            vst1q_u32(output, low);
+            vst1q_u32(output.add(4), high);
+            consumed
+        }
+    }
 
     #[inline]
     pub(crate) fn printable_prefix(properties: &[u32], width: u8, graphemes: bool) -> usize {
@@ -174,6 +313,54 @@ mod simd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_decode_matches_scalar_values_boundaries_and_sentinels() {
+        let check = |text: &str, capacity: usize, offset: usize| {
+            let mut actual = ['\u{10ffff}'; 272];
+            let mut expected = actual;
+            let mut actual_properties = [u32::MAX; 272];
+            let mut expected_properties = actual_properties;
+            let (mut remaining, mut reference) = (text, text);
+            let (mut previous, mut expected_previous) = (('\0', 0), ('\0', 0));
+            loop {
+                let actual_len = decode_utf8(
+                    &mut remaining,
+                    &mut actual[offset..offset + capacity],
+                    &mut actual_properties[offset..offset + capacity],
+                    &mut previous,
+                );
+                let expected_len = scalar::decode_utf8(
+                    &mut reference,
+                    &mut expected[offset..offset + capacity],
+                    &mut expected_properties[offset..offset + capacity],
+                    &mut expected_previous,
+                );
+                assert_eq!(actual_len, expected_len);
+                assert_eq!(actual, expected);
+                assert_eq!(actual_properties, expected_properties);
+                assert_eq!(previous, expected_previous);
+                assert_eq!(remaining, reference);
+                if actual_len == 0 {
+                    break;
+                }
+            }
+        };
+        let all: String = (0..=0x10ffff).filter_map(char::from_u32).collect();
+        check(&all, 256, 0);
+        for pattern in ["éÿ", "水界", "😀\u{10ffff}", "é", "👩🏽‍💻", "界abcé", "abc"]
+        {
+            for len in (0..=65).chain([255, 256, 257, 513]) {
+                let text: String = pattern.chars().cycle().take(len).collect();
+                for offset in 0..8 {
+                    let unaligned = format!("{}{}", "a".repeat(offset), text);
+                    for capacity in [0, 1, 7, 8, 9, 255, 256] {
+                        check(&unaligned[offset..], capacity, offset);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn printable_scan_matches_scalar_at_every_boundary() {

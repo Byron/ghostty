@@ -978,26 +978,17 @@ impl Terminal {
         let graphemes = self.modes.dec(2027);
         // Borrowed parser events stay borrowed; decode bounded chunks without
         // a heap buffer, and reuse properties for neighboring equal scalars.
-        let mut input = text.chars();
+        let mut input = text;
         let mut codepoints = ['\0'; 256];
         let mut properties = [0u32; 256];
         let mut previous = ('\0', 0);
         loop {
-            let mut len = 0;
-            for slot in &mut codepoints {
-                let Some(cp) = input.next() else {
-                    break;
-                };
-                *slot = cp;
-                let property = if cp == previous.0 {
-                    previous.1
-                } else {
-                    unicode::print_properties(cp)
-                };
-                properties[len] = property;
-                previous = (cp, property);
-                len += 1;
-            }
+            let len = crate::printing::decode_utf8(
+                &mut input,
+                &mut codepoints,
+                &mut properties,
+                &mut previous,
+            );
             if len == 0 {
                 break;
             }

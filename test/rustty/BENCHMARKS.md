@@ -1731,3 +1731,47 @@ wrap-fix binary, “default” keeps NEON, and “reference” enables `scalar-k
 
 Raw controls and frozen binaries are in `kernel-comparison/`, `kernel-default/`
 and `kernel-scalar/` under `target/packed-recovery/`.
+
+
+#### NEON decoding of validated UTF-8 groups
+
+The candidate deinterleaves eight homogeneous two-, three- or four-byte UTF-8
+scalars into the existing bounded 256-character stack buffer. Full byte extents
+and all eight leading lanes are checked before decoding. Mixed groups and short
+tails use the fused standard-library scalar decoder/property loop. Borrowed
+parser events and invalid/partial input handling are unchanged; no owned text
+or additional terminal storage representation is introduced.
+
+Every Unicode scalar, source/output alignment, buffer capacities and sentinels
+match the scalar reference. Long mixed input and malformed tails match bytewise
+delivery on both screens and both feed APIs. The candidate passes 308 VT tests,
+the scalar-feature tests, all 12 parser tests, and 2,512 selected parser/Unicode
+parity comparisons with zero failures or coverage gaps.
+
+After 12 focused feed/stream comparisons, all 54 workloads were measured
+separately with 50 samples in each order. The complete-run medians and ratios
+below compare the default kernel control with the UTF-8 candidate.
+
+| Workload | Before µs | NEON decode µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| feed/ascii | 1.065 | 1.067 | 1.003× | 1.002× |
+| feed/chinese | 5.557 | 4.803 | 0.864× | 0.861× |
+| feed/combining | 53.231 | 52.489 | 0.979× | 0.988× |
+| feed/emoji | 51.886 | 51.193 | 0.988× | 0.989× |
+| stream/chinese | 34.020 | 31.761 | 0.938× | 0.932× |
+| stream_styled/chinese | 38.822 | 36.794 | 0.945× | 0.949× |
+| stream/combining | 688.975 | 655.525 | 0.949× | 0.954× |
+| stream/emoji | 797.048 | 748.825 | 0.953× | 0.932× |
+
+The candidate clears the 5% complete-workload gate in both orders: Chinese
+feed improves about 14%, plain Chinese stream 6–7%, and styled Chinese stream
+just over 5%. No workload has a confirmed regression above 3%. The initially
+flagged ASCII scalar scan varies from 1.492× forward to 0.856× reverse; its
+repeat pools to 0.987× (1.010× forward, 0.870× reverse), so that result does not
+confirm a regression. The decoder is retained.
+
+Sources, binaries, selected parity, focused/all-54 results and the flagged-case
+repeat are in `target/packed-recovery/utf8-candidate/`. All current ARM builds
+inherit `-C target-cpu=native` from `/Users/byron/dev/.cargo/config.toml`, including
+both clean application snapshots and both sides of these kernel comparisons.
+The x86 check overrides it with `-C target-cpu=x86-64`.

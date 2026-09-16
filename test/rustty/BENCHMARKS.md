@@ -987,3 +987,141 @@ GHOSTTY_PRIMITIVES_BIN="$PWD/target/criterion-row-bookkeeping/vt-primitives" \
   --save-baseline final \
   --sample-size 50 --warm-up-time 0.5 --measurement-time 2
 ```
+
+## Ordinary grapheme boundary fast exit, 2026-09-16
+
+`4b7a41d` returns immediately for two ordinary grapheme classes after the
+existing state normalization. CJK ideographs take this path; active joining
+states still reset normally, and every nonordinary pair retains the original
+rules. The change adds four production lines and one regression test.
+
+This table compares `8cba1ec` with `4b7a41d`, using the unchanged 54-case Rust
+harness from `75dc73e` and the same 36 native workloads. Ghostty production
+code and its ReleaseFast helper are unchanged. Machine, toolchains and release
+flags remain those documented above: Apple M4 Max, macOS 26.7, Rust 1.98.1,
+Zig 0.16.0, thin LTO/one codegen unit for Rust, and Criterion 0.8.2.
+
+The initial consecutive Rust runs had severe timing variation: several
+baseline interquartile ranges exceeded their medians, and plain combining
+streaming measured 1,039 µs instead of the repeated roughly 375–390 µs. All
+initial data are retained but excluded from the table. Every Rust case was
+rerun as an adjacent before/after pair, with the first version alternating
+between table rows. This alternates order across workloads, not within each
+workload. Each run has 50 samples, 0.5 seconds of warmup and a 2-second target
+measurement. The native column retains this pass's earlier serial native run.
+Builds and tests were stopped throughout timing. Medians are microseconds per
+complete workload; speedup is before/after and Rustty/Ghostty is after/native.
+
+Chinese streaming improves 1.10× plain and 1.08× styled. With the app-default
+host-memory cap enabled, those gains are 1.12× and 1.07×. Chinese feed improves
+1.16× and direct print 1.04×. The remaining plain Chinese-stream gap is 5.40×
+against the native reference. Combining streams are essentially unchanged;
+reflow gains are negligible and retained-history reflow is up to about 1.5%
+slower. Non-Chinese workloads range from 4.6% faster to 2.9% slower; no broad
+speedup outside Chinese workloads is claimed.
+
+| Operation | Corpus | Before µs | After µs | Speedup | Ghostty µs | Rustty/Ghostty |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| print | ascii | 11.670 | 11.129 | 1.05× | 6.224 | 1.79× |
+| print | chinese | 17.588 | 16.856 | 1.04× | 12.063 | 1.40× |
+| print | combining | 26.425 | 26.353 | 1.00× | 405.483 | 0.06× |
+| print | emoji | 28.161 | 28.014 | 1.01× | 15.048 | 1.86× |
+| reflow | ascii | 42.283 | 42.088 | 1.00× | 24.087 | 1.75× |
+| reflow | chinese | 53.490 | 53.192 | 1.01× | 26.863 | 1.98× |
+| reflow | combining | 37.536 | 37.533 | 1.00× | 51.446 | 0.73× |
+| reflow | emoji | 31.537 | 31.037 | 1.02× | 32.648 | 0.95× |
+| feed | ascii | 1.491 | 1.486 | 1.00× | 0.499 | 2.98× |
+| feed | chinese | 10.366 | 8.958 | 1.16× | 437.762 | 0.02× |
+| feed | combining | 28.726 | 28.252 | 1.02× | 411.084 | 0.07× |
+| feed | emoji | 30.778 | 30.746 | 1.00× | 17.171 | 1.79× |
+| stream | ascii | 28.459 | 28.839 | 0.99× | 5.558 | 5.19× |
+| stream | chinese | 53.544 | 48.661 | 1.10× | 9.007 | 5.40× |
+| stream | combining | 376.423 | 377.295 | 1.00× | 502.206 | 0.75× |
+| stream | emoji | 485.012 | 480.382 | 1.01× | 755.548 | 0.64× |
+| stream_styled | ascii | 38.617 | 38.362 | 1.01× | 7.960 | 4.82× |
+| stream_styled | chinese | 59.638 | 55.459 | 1.08× | 35.888 | 1.55× |
+| stream_styled | combining | 473.214 | 473.976 | 1.00× | 517.477 | 0.92× |
+| stream_styled | emoji | 634.184 | 636.170 | 1.00× | 774.701 | 0.82× |
+| scalar | ascii | 1.564 | 1.562 | 1.00× | 1.312 | 1.19× |
+| scalar | chinese | 1.502 | 1.499 | 1.00× | 1.305 | 1.15× |
+| scalar | combining | 1.578 | 1.568 | 1.01× | 1.298 | 1.21× |
+| scalar | emoji | 1.495 | 1.488 | 1.00× | 1.304 | 1.14× |
+| read | ascii | 2.310 | 2.314 | 1.00× | 1.942 | 1.19× |
+| read | chinese | 2.667 | 2.702 | 0.99× | 1.948 | 1.39× |
+| read | combining | 2.957 | 2.957 | 1.00× | 5.946 | 0.50× |
+| read | emoji | 3.112 | 3.203 | 0.97× | 2.442 | 1.31× |
+| clone | ascii | 11.162 | 10.779 | 1.04× | 6.074 | 1.77× |
+| clone | chinese | 11.796 | 11.670 | 1.01× | 5.913 | 1.97× |
+| clone | combining | 12.996 | 12.582 | 1.03× | 17.472 | 0.72× |
+| clone | emoji | 11.862 | 11.704 | 1.01× | 9.932 | 1.18× |
+| width | ascii | 0.474 | 0.479 | 0.99× | 0.347 | 1.38× |
+| width | chinese | 0.478 | 0.477 | 1.00× | 0.344 | 1.39× |
+| width | combining | 0.436 | 0.437 | 1.00× | 0.430 | 1.02× |
+| width | emoji | 0.325 | 0.327 | 0.99× | 0.322 | 1.02× |
+
+| Mixed workload | Delivery | Before µs | After µs | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| chunked_feed_mixed | whole | 61.416 | 60.337 | 1.02× |
+| chunked_feed_mixed | 7_bytes | 76.682 | 76.483 | 1.00× |
+| chunked_feed_mixed | 4_KiB | 61.589 | 60.398 | 1.02× |
+| chunked_stream_mixed | whole | 210.707 | 208.985 | 1.01× |
+| chunked_stream_mixed | 7_bytes | 270.588 | 272.591 | 0.99× |
+| chunked_stream_mixed | 4_KiB | 215.510 | 216.774 | 0.99× |
+
+| History reflow corpus | Before µs | After µs | Speedup |
+| --- | ---: | ---: | ---: |
+| ascii | 1586.294 | 1599.956 | 0.99× |
+| chinese | 1296.504 | 1315.405 | 0.99× |
+| combining | 2185.228 | 2198.592 | 0.99× |
+| emoji | 1570.318 | 1575.818 | 1.00× |
+
+| Capped workload | Corpus | Before µs | After µs | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| stream_memory_capped | ascii | 38.047 | 37.814 | 1.01× |
+| stream_memory_capped | chinese | 63.852 | 56.869 | 1.12× |
+| stream_memory_capped | combining | 383.564 | 381.691 | 1.00× |
+| stream_memory_capped | emoji | 493.341 | 485.746 | 1.02× |
+| stream_styled_memory_capped | ascii | 48.739 | 47.431 | 1.03× |
+| stream_styled_memory_capped | chinese | 68.541 | 63.889 | 1.07× |
+| stream_styled_memory_capped | combining | 488.524 | 488.111 | 1.00× |
+| stream_styled_memory_capped | emoji | 662.031 | 671.134 | 0.99× |
+
+Across selected Rust runs, the median ratio of interquartile range to
+sample median is 1.34%. Plain/styled Chinese streams are around 0.7–1.5%; capped
+Chinese's baseline is noisier at 6.75%, so its 1.12× estimate is less precise.
+Native reflow dispersion reaches 13.30%. Small control and reflow movements
+remain observations rather than attributed optimization gains.
+
+The first candidate checked ordinary classes only while the joining state was
+idle, before normalization. A balanced ABBA repeat supported its Chinese gain
+but showed a small combining slowdown. Moving the ordinary-pair check after
+normalization preserved the gain with less fallback overhead in subsequent
+measurements. Both variants remain as frozen executables and separately
+labelled estimates; the table selects only the retained implementation.
+
+All 299 VT tests, strict all-target VT Clippy, formatting, the app check and
+90 Rust/native benchmark smoke cases pass. The new persistent regression
+covers every state byte on ordinary pairs, plus prepend and combining
+fallbacks. An independent executable compares the previous and retained
+functions for all 17 generated grapheme classes paired with all 17 classes
+and all 256 state bytes: all 73,984 results and outgoing states match. Since
+the function's only character-derived inputs are those classes and the
+property tables are unchanged, this exhaustively checks its behavior.
+
+Artifacts are in `target/criterion-grapheme-fast-exit/`. `comparison.md` and
+`comparison.json` contain the selected 54-row comparison. Rust estimates
+come from `paired/`, native estimates from the root, with `matched-before`
+and `final` labels. `initial-comparison.*` and the original root Rust
+estimates retain the noisy consecutive run. `metadata.json` identifies all
+binaries, revisions, settings, selected logs and trial variants. The exact
+Rust measurement schedule is in `paired-run.py`, and `report.py` selects the
+final estimates. Frozen binaries include `primitives-before`,
+`primitives-fast-exit` (the first variant), `primitives-normalized`,
+`primitives-final` (identical to normalized), and `vt-primitives`. The
+independent checker and reference source are retained as `equivalence.rs`
+and `unicode-reference.rs`.
+
+The native column still includes the known Chinese-feed and combining-overwrite
+performance cliffs. Native timing differences from earlier tables are not
+code gains. Cell size remains 56 bytes; no property cache or cell-layout
+change was introduced.

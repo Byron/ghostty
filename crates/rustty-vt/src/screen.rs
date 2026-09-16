@@ -690,6 +690,8 @@ pub struct Screen {
     /// Host memory policy, separate from native page accounting and snapshots.
     #[serde(skip)]
     pub(crate) memory_limit: Option<usize>,
+    /// Authoritative only while the host memory cap is enabled.
+    #[serde(skip)]
     pub(crate) history_bytes: usize,
     pub(crate) pages: PageList,
     #[serde(skip)]
@@ -2653,7 +2655,9 @@ impl Screen {
 
     // ED22 grows native page storage even when ordinary scrollback is disabled.
     pub(crate) fn retain_history(&mut self, row: Row) {
-        self.history_bytes = self.history_bytes.saturating_add(row.storage_bytes());
+        if self.memory_limit.is_some() {
+            self.history_bytes = self.history_bytes.saturating_add(row.storage_bytes());
+        }
         self.history.push_back(row);
         if self.viewport_offset > 0 {
             self.viewport_offset += 1;
@@ -2667,8 +2671,13 @@ impl Screen {
 
     /// Charged bytes in history rows; container spare capacity and graphics are
     /// excluded. Text and hyperlink allocations are charged at their capacity.
+    /// Without a host memory cap, this scans the current rows on demand.
     pub fn history_bytes(&self) -> usize {
-        self.history_bytes
+        if self.memory_limit.is_some() {
+            self.history_bytes
+        } else {
+            self.history.iter().map(Row::storage_bytes).sum()
+        }
     }
 
     pub(crate) fn enforce_memory_limit(&mut self) {
@@ -2733,7 +2742,9 @@ impl Screen {
         for _ in 0..count {
             let row = self.history.pop_front().unwrap();
             self.release_row_resources(&row);
-            self.history_bytes = self.history_bytes.saturating_sub(row.storage_bytes());
+            if self.memory_limit.is_some() {
+                self.history_bytes = self.history_bytes.saturating_sub(row.storage_bytes());
+            }
             self.discard_row(row.id);
         }
         self.viewport_offset = self.viewport_offset.min(self.history.len());
@@ -3377,6 +3388,35 @@ mod resource_tests {
             Some(HyperlinkId::Explicit(b"shared".to_vec())),
         )));
         assert_eq!(row.storage_bytes() - one_link, one_link - empty);
+    }
+
+    #[test]
+    fn uncapped_history_accounting_survives_eviction_and_policy_changes() {
+        let mut terminal = Terminal::new(80, 2, 100);
+        terminal.feed(b"\x1b[?2027h");
+        let input = "\x1b]8;id=shared;https://example.org\x1b\\a\u{301}👩‍💻\x1b]8;;\x1b\\\r\n";
+        for limit in [None, Some(16_384), None, Some(8_192)] {
+            terminal.set_scrollback_memory_limit(limit);
+            terminal.feed(input.repeat(300).as_bytes());
+            let screen = terminal.screen();
+            let actual: usize = screen.history.iter().map(Row::storage_bytes).sum();
+            assert!(actual > 0);
+            assert_eq!(screen.history_bytes(), actual);
+            assert!(limit.is_none_or(|limit| actual <= limit));
+            let json = serde_json::to_value(screen).unwrap();
+            assert_eq!(json["history_bytes"], actual);
+            let restored: Screen = serde_json::from_value(json).unwrap();
+            assert_eq!(restored.history.len(), screen.history.len());
+            assert_eq!(
+                restored.history_bytes(),
+                restored
+                    .history
+                    .iter()
+                    .map(Row::storage_bytes)
+                    .sum::<usize>()
+            );
+            assert_references(screen);
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@ struct ScreenRef<'a> {
     screen: &'a Screen,
     rows: RowsRef<'a>,
     history: RowsRef<'a>,
+    history_bytes: usize,
 }
 
 struct RowsRef<'a> {
@@ -80,6 +81,7 @@ impl Serialize for Screen {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         ScreenRef {
             screen: self,
+            history_bytes: self.history_bytes(),
             rows: RowsRef {
                 screen: self,
                 start: self.history.len(),

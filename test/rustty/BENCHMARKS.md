@@ -2568,3 +2568,13 @@ measurements are retained in `target/packed-simplify/step8/`.
 | stream_memory_capped/chinese | 19.787 | 16.927 | 0.845× | 0.857× |
 | chunked_feed_mixed/7_bytes | 93.478 | 94.510 | 1.014× | 1.009× |
 | chunked_stream_mixed/7_bytes | 300.578 | 305.414 | 1.020× | 1.011× |
+
+### Step 9: reject limiting property scans to the current row
+
+Capping the property slice before its printable-prefix scan gives the same
+result as capping the scan result. The batched-input and kernel-equivalence
+tests and all 57 benchmark checks pass, but the eight feed/stream measurements
+do not meet the gain threshold. Chinese feed changes from 3.616 to 3.462 µs
+(0.947×/0.960×), and Chinese scrolling stays at 0.999×/1.002×. No other case
+improves by 5% in both orders. The candidate is reverted; its patch, binaries
+and all 50 samples per direction are preserved in `target/packed-simplify/step9/`.

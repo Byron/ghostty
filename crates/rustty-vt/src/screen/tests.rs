@@ -168,6 +168,32 @@ fn scrolling_widens_all_active_pages_after_restore() {
 }
 
 #[test]
+fn plain_copies_release_payload_charges() {
+    for whole_row in [false, true] {
+        let mut terminal = Terminal::new(8, 2, 0);
+        terminal.feed("\x1b]8;id=link;https://example.org\x07a\u{301}\x1b]8;;\x07\r\np".as_bytes());
+        let screen = terminal.screen_mut();
+        let before = screen.pages.pages[0].storage_bytes();
+        if whole_row {
+            let mut copy = RowCopy::from_view(screen.row(1));
+            copy.id = screen.row(0).id;
+            screen.install_row(0, copy, usize::MAX);
+        } else {
+            let copy = screen.row(1).copy_cell(0);
+            screen.install_cell(0, 0, copy, false).unwrap();
+        }
+        assert_eq!(&*screen.row(0).text(0), "p");
+        assert!(screen.row(0).hyperlink(0).is_none());
+        let page = &mut screen.pages.pages[0];
+        let charged = page.storage_bytes();
+        assert!(charged < before);
+        page.refresh_charge();
+        assert_eq!(charged, page.storage_bytes(), "whole row: {whole_row}");
+        assert_references(screen);
+    }
+}
+
+#[test]
 fn detached_resources_outlive_source_mutation_and_destruction() {
     let (detached, json) = {
         let mut terminal = Terminal::new(8, 2, 1000);

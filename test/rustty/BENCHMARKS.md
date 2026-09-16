@@ -6,6 +6,10 @@ window. Criterion is a development dependency only. No application build is
 needed. Timing excludes terminal construction and input generation; the `feed`
 and `stream` workloads include UTF-8 decoding and VT parsing.
 
+The latest [complete Ghostty comparison](#final-bookkeeping-comparison-with-ghostty)
+includes all four page-bookkeeping simplifications. Per-step measurements and
+validation precede that table; the remaining profile costs follow it.
+
 ```sh
 cargo bench --offline -p rustty-vt --bench primitives
 # Filter a single primitive and corpus:
@@ -2212,3 +2216,224 @@ ratios become 1.000×/1.007×, and memory-capped emoji scrolling becomes
 direction; emoji changes from 1.106×/1.109× to 0.895×/0.893×. The process-to-process
 scan variation documented in step 1 remains a measurement limitation. No
 regression above 3% is confirmed, and all repeats are retained.
+
+### Step 4: skip unchanged charges during cell copies
+
+`install_cell` now refreshes the page's memory charge only when the old cell or
+incoming copy has grapheme or hyperlink payloads. Style admission and page
+rebuilding retain their own charge refreshes. Row installation refreshes once
+after releasing an existing resource-bearing prefix, since plain incoming cells
+no longer refresh that charge implicitly. Allocation and eviction rules are
+unchanged.
+
+The regression test copies plain cells and rows over linked graphemes, checking
+that released payloads reduce the cached charge and that it matches a fresh
+calculation on the same page. All 310 VT tests, 57 benchmark correctness checks
+and 2,209 page-lifecycle differential comparisons pass. All 14 allocation and
+memory observations exactly match step 3.
+
+Final correctness validation passes 474 workspace tests (two ignored tests),
+310 VT tests with `scalar-kernels`, workspace all-target checking, and the
+x86_64 Linux VT all-target check. The default ARM tests include scalar/SIMD
+equivalence. All 61,587 configured differential comparisons pass with zero
+failures or coverage gaps; the separate `--thorough` completeness gate is not
+claimed. The instrumented probe matches all 14 normal allocation/memory
+observations. Ordinary writes and row exposure remain allocation-free.
+
+The first complete timing sweep is excluded in `step4/comparison-unstable/`.
+Timings shifted substantially across unchanged executables and both engines:
+Chinese reflow in the preceding-stage binary measured 111.592/191.924 µs in
+opposite orders, while Ghostty measured 58.292/36.066 µs. Compiler/profile guards
+did not detect overlapping builds or profiling. A process snapshot observed
+macOS photo processing, but does not establish the cause of the drift.
+
+With unchanged settings, a subsequent identical-binary control measured
+0.997×/0.991× for Chinese reflow and 0.996×/1.001× for ASCII scrolling. The same
+step-3 executable ran under both labels, with 50 samples in each direction.
+These controls are retained in `step4/identical-control/`; the complete
+comparison was then repeated.
+
+The repeated 54-workload comparison and three large-page checks pass the target
+gate. Plain ASCII/Chinese reflow improves 10–11% against step 3, and retained
+ASCII/Chinese history reflow improves about 12%. The following ratios divide
+step 4 by step 3, using 50 normalized samples in each direction.
+
+| Workload | Step 3 µs | Step 4 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| reflow/ascii | 35.863 | 32.091 | 0.883× | 0.891× |
+| reflow/chinese | 57.790 | 52.050 | 0.900× | 0.903× |
+| reflow/combining | 48.605 | 48.710 | 1.001× | 1.004× |
+| reflow/emoji | 38.673 | 37.164 | 0.972× | 0.959× |
+| reflow_history/ascii | 1286.740 | 1129.118 | 0.880× | 0.875× |
+| reflow_history/chinese | 1254.646 | 1108.250 | 0.879× | 0.886× |
+| reflow_history/combining | 4454.383 | 4510.379 | 1.017× | 1.009× |
+| reflow_history/emoji | 2992.887 | 2849.448 | 0.952× | 0.953× |
+| page_spans/print | 42.349 | 42.514 | 1.014× | 1.003× |
+| page_spans/stream | 10.952 | 10.958 | 1.003× | 0.999× |
+| page_spans/styled | 11.639 | 11.614 | 0.998× | 0.998× |
+
+Two workloads initially crossed 3% in one order. Memory-capped emoji scrolling
+does not reproduce its flag: the repeat is 1.001×/1.006×. Emoji printing measures
+1.025×/1.059× in the complete run and 1.016×/1.066× in the first repeat. A control
+using the same step-3 executable under both labels then measures 1.089×/0.973×;
+the next actual comparison changes direction to 0.960×/0.990×. No regression
+above 3% is confirmed, but these process-to-process variations prevent claiming
+3% equivalence for emoji printing or the short scans discussed earlier. All
+samples remain in `confirmation/`, `emoji-identical-control/`, and
+`emoji-confirmation/` under `step4/`; the complete table below retains the
+original repeated-sweep values, including its flags.
+
+### Final bookkeeping comparison with Ghostty
+
+This fresh serial comparison measures the settled `f3897ef8b` baseline, step 3,
+and the final step-4 runtime alongside the preserved Ghostty executable. It uses
+Rust 1.95.0, `-C target-cpu=native`, the unchanged release profile and the same
+Apple M4 Max. The final VT binaries were built before the independent
+`aad2a07a9` low-latency app commit; that commit changes no VT sources.
+
+The runner labels are `before` = settled baseline, `scalar` = step 3, `simd` =
+step 4, and `ghostty` = native. These labels do not select the scalar-kernels
+feature. Each workload runs the versions adjacently and then in reverse order,
+with 50 normalized samples per version per direction: 19,800 samples across
+54 Rust workloads and 36 native counterparts. Compiler/profile guards remained
+enabled. All build, test and profiling work from this session finished before
+timing or started afterward.
+
+Times are pooled medians in microseconds per complete workload. Ratios divide
+final time by the named reference; below 1 is faster. A dash means there is no
+native counterpart. The table uses the complete repeated sweep in
+`target/packed-simplify/step4/comparison/`, preserving its original values rather
+than replacing flagged rows with their confirmations.
+
+| Workload | Settled baseline µs | Final µs | Ghostty µs | Final / baseline | Final / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.484 | 0.481 | 0.347 | 1.00× | 1.39× |
+| width/chinese | 0.484 | 0.480 | 0.347 | 0.99× | 1.38× |
+| width/combining | 0.440 | 0.436 | 0.431 | 0.99× | 1.01× |
+| width/emoji | 0.335 | 0.330 | 0.319 | 0.98× | 1.03× |
+| print/ascii | 18.815 | 13.527 | 6.237 | 0.72× | 2.17× |
+| print/chinese | 33.779 | 26.890 | 12.079 | 0.80× | 2.23× |
+| print/combining | 47.065 | 41.699 | 406.379 | 0.89× | 0.10× |
+| print/emoji | 48.565 | 44.200 | 15.046 | 0.91× | 2.94× |
+| scalar/ascii | 1.776 | 1.794 | 1.294 | 1.01× | 1.39× |
+| scalar/chinese | 1.888 | 1.822 | 1.295 | 0.97× | 1.41× |
+| scalar/combining | 1.701 | 1.689 | 1.288 | 0.99× | 1.31× |
+| scalar/emoji | 1.681 | 1.670 | 1.286 | 0.99× | 1.30× |
+| read/ascii | 2.737 | 2.739 | 1.923 | 1.00× | 1.42× |
+| read/chinese | 2.778 | 2.766 | 1.926 | 1.00× | 1.44× |
+| read/combining | 3.301 | 3.348 | 5.838 | 1.01× | 0.57× |
+| read/emoji | 3.220 | 3.197 | 2.414 | 0.99× | 1.32× |
+| clone/ascii | 4.871 | 4.857 | 5.545 | 1.00× | 0.88× |
+| clone/chinese | 4.859 | 4.877 | 5.397 | 1.00× | 0.90× |
+| clone/combining | 6.153 | 6.183 | 16.851 | 1.00× | 0.37× |
+| clone/emoji | 5.522 | 5.523 | 9.410 | 1.00× | 0.59× |
+| reflow/ascii | 38.450 | 32.091 | 22.266 | 0.83× | 1.44× |
+| reflow/chinese | 58.456 | 52.050 | 24.435 | 0.89× | 2.13× |
+| reflow/combining | 52.152 | 48.710 | 48.392 | 0.93× | 1.01× |
+| reflow/emoji | 41.997 | 37.164 | 30.895 | 0.88× | 1.20× |
+| feed/ascii | 1.069 | 0.922 | 0.496 | 0.86× | 1.86× |
+| feed/chinese | 4.821 | 4.547 | 437.197 | 0.94× | 0.01× |
+| feed/combining | 52.973 | 46.220 | 398.067 | 0.87× | 0.12× |
+| feed/emoji | 51.562 | 45.671 | 17.341 | 0.89× | 2.63× |
+| stream/ascii | 22.952 | 10.122 | 5.359 | 0.44× | 1.89× |
+| stream/chinese | 31.971 | 19.046 | 8.961 | 0.60× | 2.13× |
+| stream/combining | 656.710 | 545.411 | 474.459 | 0.83× | 1.15× |
+| stream/emoji | 771.871 | 627.718 | 731.963 | 0.81× | 0.86× |
+| stream_styled/ascii | 27.438 | 14.076 | 7.755 | 0.51× | 1.82× |
+| stream_styled/chinese | 36.610 | 23.528 | 34.570 | 0.64× | 0.68× |
+| stream_styled/combining | 736.422 | 635.034 | 484.318 | 0.86× | 1.31× |
+| stream_styled/emoji | 867.213 | 762.512 | 761.003 | 0.88× | 1.00× |
+| chunked_feed_mixed/whole | 86.166 | 78.096 | — | 0.91× | — |
+| chunked_feed_mixed/7_bytes | 110.295 | 97.771 | — | 0.89× | — |
+| chunked_feed_mixed/4_KiB | 85.995 | 78.169 | — | 0.91× | — |
+| chunked_stream_mixed/whole | 291.797 | 242.540 | — | 0.83× | — |
+| chunked_stream_mixed/7_bytes | 376.706 | 312.009 | — | 0.83× | — |
+| chunked_stream_mixed/4_KiB | 289.801 | 243.418 | — | 0.84× | — |
+| reflow_history/ascii | 1283.483 | 1129.118 | — | 0.88× | — |
+| reflow_history/chinese | 1252.153 | 1108.250 | — | 0.89× | — |
+| reflow_history/combining | 4446.208 | 4510.379 | — | 1.01× | — |
+| reflow_history/emoji | 2996.128 | 2849.448 | — | 0.95× | — |
+| stream_memory_capped/ascii | 23.332 | 10.658 | — | 0.46× | — |
+| stream_memory_capped/chinese | 32.211 | 19.744 | — | 0.61× | — |
+| stream_memory_capped/combining | 654.703 | 542.653 | — | 0.83× | — |
+| stream_memory_capped/emoji | 754.422 | 646.672 | — | 0.86× | — |
+| stream_styled_memory_capped/ascii | 27.599 | 14.400 | — | 0.52× | — |
+| stream_styled_memory_capped/chinese | 36.916 | 23.845 | — | 0.65× | — |
+| stream_styled_memory_capped/combining | 731.298 | 634.844 | — | 0.87× | — |
+| stream_styled_memory_capped/emoji | 867.660 | 756.375 | — | 0.87× | — |
+
+Across the four accepted changes, plain ASCII/Chinese scrolling takes 56%/40%
+less time and styled ASCII scrolling takes 49% less. ASCII/Chinese scalar
+printing improves 28%/20%. Plain reflow improves 17%/11%, and retained
+ASCII/Chinese history reflow improves about 12%. These gains come from the
+final paired baseline comparison; ratios from separate stage runs are not
+multiplied.
+
+Ghostty remains faster for ordinary printing and scrolling: final ASCII and
+Chinese printing take 2.17×/2.23× as long, and their streams take 1.89×/2.13×.
+Combining and emoji streams take 1.15×/0.86× as long. The native Chinese-feed
+and combining-overwrite cliffs described earlier still apply; their extreme
+ratios should not be generalized to Unicode throughput. Emoji printing and
+first-codepoint scans retain the measurement limits documented above.
+
+### Final profiles and remaining gaps
+
+After all timed comparisons finished, both engines were sampled for six seconds
+at a nominal 1 ms interval in each of the same six workloads used for the
+baseline profiles. All twelve captures completed with compiler/profile guards
+enabled. Raw captures, binary hashes, commands and the physical-symbol summary
+are in `target/packed-simplify/step4/profiles/`.
+
+| Workload | Final Rustty physical-symbol shares | Matching Ghostty physical-symbol shares |
+| --- | --- | --- |
+| print/ascii | Resource synchronization 20.4%; cursor clamping 17.2%; cell printing 29.8% | Printing 72.3%; page-width check 22.2% |
+| stream/ascii | ASCII printing 24.9%; feed 18.9%; resource synchronization 9.2%; clamping 7.5% | Batched printing 28.8%; `madvise` 29.4%; UTF-8 decoding 7.2% |
+| stream/chinese | UTF-8 printing 19.0%; feed 18.9%; `Utf8Chunks::next` 17.1% | Batched printing 44.7%; `madvise` 19.2%; UTF-8 conversion 13.0% |
+| stream/combining | Sparse-map rehash/insert 17.0%; screen grapheme append 7.7% | Grapheme append 39.1%; partial-row copying 37.1% |
+| reflow/ascii | Cell installation 27.9%; cell copying 11.6%; clearing 6.2% | `madvise` 70.9%; column resize 16.0% |
+| reflow/combining | Sparse-map rehash/insert 20.6%; installation 13.0%; charge refresh 6.7% | Column resize 48.2%; `madvise` 38.5% |
+
+These shares normalize independently for each process. Inlining can move work
+into its caller; the disappearance of a symbol does not prove that all its work
+vanished. The runtime comparisons above establish the gains. ASCII-stream
+layout/metadata work falls from 10.3% of baseline samples to 0.3%, and ASCII
+reflow charge refresh falls from 12.1% to below the reporting threshold. Resource
+charges still run for combining reflow, as required, which explains why this
+step leaves that workload essentially unchanged.
+
+The next small experiments should target repeated cursor validation and
+resource synchronization within an already validated printing run, then the
+`Utf8Chunks` validation pass before Unicode decoding. Plain reflow still builds
+and installs individual cell copies; a span copy could remove that work when
+both rows have no resources. Grapheme map insertion and rehashing remain a
+separate Unicode cost. Each proposal needs its own semantic checks and the same
+5% improvement/3% regression gate; these profiles do not establish gains for
+unimplemented changes.
+
+### Allocation invariants and low-latency presentation
+
+All 14 allocation/memory observations are identical across the four accepted
+steps. The instrumented probe matches these observations and records admission
+and rebuild counters separately. Ordinary ASCII, Latin-1 and wide writes, plus
+row exposure within capacity, allocate zero times.
+Recycling 20,000 rows still performs 486 allocations with zero net live-byte
+growth. The fresh 128×32 terminal uses 390,543 requested live heap bytes;
+unlimited ASCII and linked-grapheme probes retain 8,161 history rows and use
+8,905,231 and 32,385,119 bytes respectively. These are allocator observations,
+not RSS. Resource limits, conservative charges and whole-page eviction remain
+unchanged; the speedups do not discard extra history.
+
+The independent `aad2a07a9` app commit sets
+`gpu_config.surface = egui_wgpu::SurfaceConfig::LOW_LATENCY`. A Rust 1.95 release
+build, native surface smoke test, screenshot inspection, and native resize/reflow
+replay pass. The replay completes 50 warmup and 50 measured frames at 1200×850.
+Its artifacts and source archive are in `target/packed-simplify/low-latency/`.
+This verifies rendering and resizing with the requested presentation policy;
+input-to-presentation latency and memory savings were not measured. The policy
+stays low latency for scrolling as well; dynamic switching was not added.
+
+The earlier renderer/application timing tables describe their stated clean
+storage-recovery snapshots. They are not measurements of the final bookkeeping
+changes or of the low-latency policy. All follow-up source archives, manifests,
+validation logs, timings and rejected/control measurements are retained under
+`target/packed-simplify/`.

@@ -987,6 +987,10 @@ impl Screen {
         let (index, row) = location;
         let page = &mut self.pages.pages[index];
         let slot = page.slot(row, col);
+        let payload_changed = page.cells[slot].has_grapheme()
+            || page.cells[slot].has_hyperlink()
+            || copy.text.is_some()
+            || copy.link.is_some();
         page.clear_cell(slot, Color::Default);
         let mut result = Ok(());
         let mut cell = copy.cell;
@@ -1064,7 +1068,9 @@ impl Screen {
                 result = Err(SetFull::OutOfMemory);
             }
         }
-        self.pages.pages[location.0].refresh_charge();
+        if payload_changed {
+            self.pages.pages[location.0].refresh_charge();
+        }
         result
     }
 
@@ -1415,8 +1421,12 @@ impl Screen {
         let (index, row) = self.locate(absolute);
         let page = &mut self.pages.pages[index];
         let offset = page.slot(row, 0);
+        let released_payload = page.headers[row].has(RowHeader::GRAPHEME | RowHeader::HYPERLINK);
         for slot in offset..offset + count {
             page.clear_cell(slot, Color::Default);
+        }
+        if released_payload {
+            page.refresh_charge();
         }
         for (col, mut cell) in copy.cells.into_iter().take(count).enumerate() {
             if col + 1 == source_width && width > source_width {

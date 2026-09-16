@@ -176,6 +176,23 @@ and at 128 columns after measurement. Construction, parsing, priming and
 validation are excluded. These cases supplement the existing 42 Rust workloads
 and have no native counterpart.
 
+### Supplemental host-memory policy
+
+The eight Rust-only `rustty/stream_memory_capped` and
+`rustty/stream_styled_memory_capped` cases repeat the original stream inputs
+with a 50,000,000-byte owned-history cap, matching the app's default host-memory
+policy. They retain the original 1,024-line native limit and priming. The host
+cap is high enough to preserve this workload's history, but activates its
+incremental payload accounting. These cases exercise that accounting cost;
+they do not measure host-cap eviction or the complete app.
+
+Outside timing, the harness checks that enabling the cap and feeding another
+batch preserve the uncapped reference's history length and expected visible
+contents, styles and cursor. The same content and history bounds, plus the
+owned-byte cap, are checked after timing. The existing 46 Rust workloads and
+36 native comparisons are unchanged; the new eight cases have no native
+counterpart because this cap charges Rust-owned storage.
+
 ## Optimization measurements, 2026-09-15
 
 The table compares Rustty at `3116bbb` with the four optimizations ending at
@@ -817,3 +834,156 @@ Ghostty's combining overwrite and Chinese `feed` cliffs still limit those
 ratios as measures of general Unicode throughput. The new history-reflow
 workload provides a baseline for preserved scrollback, separately from the
 existing active-screen round trip. Cell size remains 56 bytes.
+
+## Row bookkeeping follow-up, 2026-09-16
+
+This pass compares production at `dfcfb9f` with `8e1ae0c`, using the same
+54-case harness from `75dc73e`. The original 46 Rust workloads are unchanged;
+eight new cases enable the app-default 50 MB owned-history cap. Ghostty
+production code and its retained ReleaseFast helper are unchanged.
+
+All builds, tests and profiles finished before the consecutive Rust before,
+Rust after and native measurements. The machine and toolchains remain the
+Apple M4 Max, macOS 26.7, Rust 1.98.1 and Zig 0.16.0, using the release settings
+above. Each case uses 50 samples, 0.5 seconds of warmup and 2 seconds of
+measurement. Values below are median microseconds per complete workload;
+speedup is Rustty before/after, and Rustty/Ghostty is Rustty after/native.
+Changes in native timings from earlier tables are measurement variation,
+not Ghostty code gains; Rustty's paired before/after is the optimization measure.
+
+Plain ASCII streaming improves 1.55× and styled ASCII 1.41×; Chinese improves
+1.27× and 1.24×. With the host cap enabled, ASCII improves 1.20× and 1.16×,
+and Chinese 1.10× and 1.08×. The larger uncapped gains do not apply to the
+app's default memory policy. Mixed streams improve 1.08–1.13×. Both reflow
+families are essentially unchanged. Plain ASCII/Chinese streams still take
+5.06×/5.98× Ghostty's time against this fresh reference.
+
+| Operation | Corpus | Before µs | After µs | Speedup | Ghostty µs | Rustty/Ghostty |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| print | ascii | 11.301 | 11.032 | 1.02× | 6.209 | 1.78× |
+| print | chinese | 17.525 | 18.050 | 0.97× | 12.200 | 1.48× |
+| print | combining | 26.420 | 26.139 | 1.01× | 394.942 | 0.07× |
+| print | emoji | 27.508 | 27.792 | 0.99× | 14.867 | 1.87× |
+| reflow | ascii | 42.265 | 42.247 | 1.00× | 27.588 | 1.53× |
+| reflow | chinese | 53.377 | 53.064 | 1.01× | 29.441 | 1.80× |
+| reflow | combining | 37.640 | 37.414 | 1.01× | 54.735 | 0.68× |
+| reflow | emoji | 31.143 | 31.135 | 1.00× | 32.954 | 0.94× |
+| feed | ascii | 1.483 | 1.482 | 1.00× | 0.522 | 2.84× |
+| feed | chinese | 10.362 | 10.584 | 0.98× | 440.006 | 0.02× |
+| feed | combining | 28.638 | 29.171 | 0.98× | 406.875 | 0.07× |
+| feed | emoji | 30.237 | 30.164 | 1.00× | 17.510 | 1.72× |
+| stream | ascii | 44.160 | 28.493 | 1.55× | 5.631 | 5.06× |
+| stream | chinese | 68.251 | 53.534 | 1.27× | 8.947 | 5.98× |
+| stream | combining | 385.624 | 370.951 | 1.04× | 491.737 | 0.75× |
+| stream | emoji | 491.643 | 474.636 | 1.04× | 729.671 | 0.65× |
+| stream_styled | ascii | 53.467 | 37.983 | 1.41× | 8.011 | 4.74× |
+| stream_styled | chinese | 74.901 | 60.260 | 1.24× | 34.622 | 1.74× |
+| stream_styled | combining | 483.362 | 466.102 | 1.04× | 508.918 | 0.92× |
+| stream_styled | emoji | 642.866 | 632.449 | 1.02× | 759.897 | 0.83× |
+| scalar | ascii | 1.543 | 1.558 | 0.99× | 1.285 | 1.21× |
+| scalar | chinese | 1.489 | 1.504 | 0.99× | 1.290 | 1.17× |
+| scalar | combining | 1.558 | 1.572 | 0.99× | 1.276 | 1.23× |
+| scalar | emoji | 1.479 | 1.491 | 0.99× | 1.281 | 1.16× |
+| read | ascii | 2.301 | 2.305 | 1.00× | 1.897 | 1.21× |
+| read | chinese | 2.659 | 2.676 | 0.99× | 1.910 | 1.40× |
+| read | combining | 2.965 | 2.952 | 1.00× | 5.830 | 0.51× |
+| read | emoji | 3.116 | 3.085 | 1.01× | 2.430 | 1.27× |
+| clone | ascii | 11.008 | 10.958 | 1.00× | 6.035 | 1.82× |
+| clone | chinese | 11.635 | 11.720 | 0.99× | 5.836 | 2.01× |
+| clone | combining | 12.783 | 12.732 | 1.00× | 17.847 | 0.71× |
+| clone | emoji | 11.713 | 12.155 | 0.96× | 9.952 | 1.22× |
+| width | ascii | 0.478 | 0.480 | 1.00× | 0.344 | 1.40× |
+| width | chinese | 0.477 | 0.476 | 1.00× | 0.342 | 1.39× |
+| width | combining | 0.432 | 0.432 | 1.00× | 0.427 | 1.01× |
+| width | emoji | 0.326 | 0.326 | 1.00× | 0.318 | 1.03× |
+
+| Mixed workload | Delivery | Before µs | After µs | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| chunked_feed_mixed | whole | 61.775 | 60.705 | 1.02× |
+| chunked_feed_mixed | 7_bytes | 75.956 | 76.638 | 0.99× |
+| chunked_feed_mixed | 4_KiB | 60.681 | 60.622 | 1.00× |
+| chunked_stream_mixed | whole | 230.916 | 204.667 | 1.13× |
+| chunked_stream_mixed | 7_bytes | 286.973 | 265.795 | 1.08× |
+| chunked_stream_mixed | 4_KiB | 223.823 | 204.679 | 1.09× |
+
+| History reflow corpus | Before µs | After µs | Speedup |
+| --- | ---: | ---: | ---: |
+| ascii | 1561.573 | 1543.514 | 1.01× |
+| chinese | 1272.017 | 1263.198 | 1.01× |
+| combining | 2164.458 | 2157.904 | 1.00× |
+| emoji | 1568.128 | 1564.365 | 1.00× |
+
+| Capped workload | Corpus | Before µs | After µs | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| stream_memory_capped | ascii | 44.246 | 36.844 | 1.20× |
+| stream_memory_capped | chinese | 68.561 | 62.132 | 1.10× |
+| stream_memory_capped | combining | 388.913 | 383.839 | 1.01× |
+| stream_memory_capped | emoji | 487.891 | 480.249 | 1.02× |
+| stream_styled_memory_capped | ascii | 53.632 | 46.322 | 1.16× |
+| stream_styled_memory_capped | chinese | 75.107 | 69.487 | 1.08× |
+| stream_styled_memory_capped | combining | 485.286 | 477.042 | 1.02× |
+| stream_styled_memory_capped | emoji | 647.402 | 637.311 | 1.02× |
+
+The implementation changes are separate commits:
+
+- `48f8103` checks resource ownership across active page ranges before running
+  per-row synchronization. Ordinary history insertion preserves those owners;
+  changed or unowned rows retain the existing directional transfer path.
+  Cursor synchronization still runs, including resource-induced page splits.
+- `8e1ae0c` stops scanning incoming and evicted payloads when no host-memory cap
+  consumes the total. Uncapped `history_bytes()` and its JSON field now compute
+  the total on demand, taking time proportional to retained cells. Capped
+  screens keep incremental charges. Enabling a cap already recounts current
+  rows, including externally replaced rows. No per-row cache was introduced.
+
+The original feed, print, read, scalar, clone and width controls range from
+2.4% faster to 3.8% slower in this paired run. These differences remain in the
+table; no broad control-path speedup is claimed. Initial 30-sample measurements
+supported both changes. One capped-ASCII sample after the accounting change
+was slower; a 50-sample ABBA repeat was effectively unchanged at 36.1–36.8 µs.
+The final table uses fresh consecutive measurements of the full pass.
+
+All 298 VT tests, strict all-target VT Clippy, formatting, the app check and
+90 Rust/native benchmark smoke cases passed. New regressions cover unowned
+public hyperlinks during scrolling, page growth, payload accounting across
+cap transitions, eviction and JSON restoration. Native page/layout and both
+snapshot suites passed 6,582 of 6,585 comparisons, with no selected-suite
+coverage gaps. The same three failures remain the whole/scalar/chunked
+variants of `pages/graphemes/wrap/3/1/1/alternate`: Rustty retains an extra ZWJ.
+
+Final eight-second, nominal 1 kHz profiles use optimized code with debug
+information and frame pointers. Uncapped ASCII and Chinese streaming recorded
+no active samples in `Row::storage_bytes` or `sync_resource_row`. Capped ASCII
+still spends 27% in payload accounting. Remaining uncapped ASCII samples
+include scrolling/blank-row initialization at 32%, printing at 22%, and
+history-prefix disposal at 10%. Chinese spends 49% in `print_utf8` and 16% in
+scrolling. These are independently normalized physical-symbol shares;
+inlined work belongs to the enclosing symbol. Cell size remains 56 bytes.
+
+The local artifacts are in `target/criterion-row-bookkeeping/`:
+`comparison.md` and `comparison.json` contain all 54 Rust rows and 36 native
+references; `metadata.json` records revisions, hashes, toolchains and logs.
+Final labels are `matched-before` and `final`; intermediate labels and the
+balanced capped repeat are retained separately. Frozen executables are
+`primitives-before`, `primitives-sync`, `primitives-accounting`,
+`primitives-final` and `vt-primitives`; final profiles and summaries are under
+`profiles/`. Ghostty's Chinese-feed and combining-overwrite cliffs remain,
+so those ratios are not general Unicode-throughput comparisons.
+
+To repeat the complete comparison with the frozen binaries:
+
+```sh
+CRITERION_HOME="$PWD/target/criterion-row-bookkeeping-repeat" \
+  target/criterion-row-bookkeeping/primitives-before --bench '^rustty/' \
+  --save-baseline matched-before \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+CRITERION_HOME="$PWD/target/criterion-row-bookkeeping-repeat" \
+  target/criterion-row-bookkeeping/primitives-final --bench '^rustty/' \
+  --save-baseline final \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+GHOSTTY_PRIMITIVES_BIN="$PWD/target/criterion-row-bookkeeping/vt-primitives" \
+  CRITERION_HOME="$PWD/target/criterion-row-bookkeeping-repeat" \
+  target/criterion-row-bookkeeping/primitives-final --bench '^ghostty/' \
+  --save-baseline final \
+  --sample-size 50 --warm-up-time 0.5 --measurement-time 2
+```

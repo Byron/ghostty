@@ -184,13 +184,23 @@ impl PageList {
         id: u64,
         background: Color,
     ) -> Vec<u64> {
-        let effective = Self::effective_limits(columns, active_rows, limits);
-        let mut removed = Vec::new();
-        if self
+        let has_room = self
             .pages
             .back()
-            .is_some_and(|page| page.rows < page.capacity.rows)
+            .is_some_and(|page| page.rows < page.capacity.rows);
+        // Byte limits matter at allocation; the line floor only matters after
+        // crossing the requested limit. Otherwise no page layout is needed.
+        let effective = if !has_room
+            || limits
+                .lines
+                .is_some_and(|limit| (self.total_rows() + 1).saturating_sub(active_rows) > limit)
         {
+            Self::effective_limits(columns, active_rows, limits)
+        } else {
+            limits
+        };
+        let mut removed = Vec::new();
+        if has_room {
             self.pages.back_mut().unwrap().expose(id, background);
         } else {
             let capacity = PageCapacity::initial(columns).expect("validated screen dimensions");

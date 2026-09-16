@@ -2174,3 +2174,41 @@ The accepted guard passes 309 VT tests, 57 benchmark correctness checks and
 96 focused native comparisons of physical page widening. The 14 allocation and
 memory observations exactly match step 1. The restored-page regression test,
 formatting and diff checks pass.
+
+### Step 3: defer layout calculations during row exposure
+
+`PageList::grow` now calculates effective native limits only when allocating a
+page or when the requested line limit has been crossed. While a row fits and
+the history count is below that requested limit, raising it to the native floor
+cannot affect pruning. Byte limits already apply at page allocation. Memory
+pruning still runs after every exposed row, and the existing path handles native
+floors and recycling when they can affect the result. No cached limits are added.
+
+The three page-list tests cover native line/byte floors, page reuse, and row
+lookup after layout changes. All 309 VT tests, 57 benchmark correctness checks
+and 2,061 page-lifecycle differential comparisons pass. All 14 allocation and
+memory observations exactly match the accepted step 2 baseline.
+
+The complete 54-workload comparison is in `step3/comparison/`, with a separate
+three-case large-page comparison in `step3/supplemental/`. Deferring layout work
+reduces ASCII scrolling by 26% and Chinese scrolling by 15% against step 2.
+
+| Workload | Step 2 µs | Step 3 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| stream/ascii | 13.910 | 10.293 | 0.741× | 0.739× |
+| stream/chinese | 23.124 | 19.630 | 0.852× | 0.847× |
+| stream_styled/ascii | 17.922 | 14.357 | 0.785× | 0.813× |
+| stream_styled/chinese | 27.674 | 23.818 | 0.859× | 0.863× |
+| stream_memory_capped/ascii | 14.102 | 10.856 | 0.772× | 0.769× |
+| reflow/ascii | 39.592 | 36.473 | 0.921× | 0.921× |
+| reflow/emoji | 43.396 | 38.989 | 0.898× | 0.902× |
+| page_spans/print | 45.956 | 43.345 | 0.943× | 0.944× |
+| page_spans/stream | 12.331 | 11.509 | 0.941× | 0.930× |
+| page_spans/styled | 12.934 | 12.131 | 0.944× | 0.933× |
+
+All six >3% flags were repeated in `step3/confirmation/`. Combining-width scan
+ratios become 1.000×/1.007×, and memory-capped emoji scrolling becomes
+0.970×/0.990×. None of the four first-codepoint scans remains above 3% in either
+direction; emoji changes from 1.106×/1.109× to 0.895×/0.893×. The process-to-process
+scan variation documented in step 1 remains a measurement limitation. No
+regression above 3% is confirmed, and all repeats are retained.

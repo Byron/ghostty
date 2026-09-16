@@ -25,6 +25,10 @@ thread_local! {
 fn record(allocated: usize, freed: usize, allocation: bool) {
     let _ = COUNTS.try_with(|counter| {
         if let Some(mut value) = counter.get() {
+            #[cfg(feature = "allocation-probe")]
+            if allocation {
+                rustty_vt::allocation_probe::allocation(allocated);
+            }
             value.allocations += usize::from(allocation);
             value.deallocations += usize::from(freed != 0);
             value.requested_bytes += allocated;
@@ -83,20 +87,30 @@ fn history_len(terminal: &Terminal) -> usize {
 }
 
 fn measure(name: &str, run: impl FnOnce() -> Terminal) -> Value {
+    #[cfg(feature = "allocation-probe")]
+    rustty_vt::allocation_probe::reset();
     COUNTS.set(Some(Counts::default()));
     let terminal = run();
     let counts = COUNTS.replace(None).unwrap();
     if size_of::<TerminalCell>() == 8 && (name.starts_with("write/") || name == "expose_rows") {
         assert_eq!(counts.allocations, 0, "{name} must not allocate");
     }
-    json!({
+    let result = json!({
         "case": name,
         "counts": counts,
         "history_rows": history_len(&terminal),
         "history_charge": terminal.screen().history_bytes(),
         "pages": terminal.screen().page_allocations().count(),
         "native_charge": terminal.screen().storage_bytes(),
-    })
+    });
+    #[cfg(feature = "allocation-probe")]
+    let result = {
+        let mut result = result;
+        result["storage_events"] =
+            serde_json::to_value(rustty_vt::allocation_probe::counts()).unwrap();
+        result
+    };
+    result
 }
 
 fn main() {

@@ -12,7 +12,7 @@ mod serde_impl;
 mod tests;
 
 use crate::page_list::{Page, PageAllocationInfo, PageList};
-use crate::page_resources::{GraphemeAllocation, Hyperlink, SetFull, StyleAdmission};
+use crate::page_resources::{GraphemeAllocation, HyperlinkKey, SetFull, StyleAdmission};
 
 pub use crate::packed::Cell;
 use crate::packed::RowHeader;
@@ -988,7 +988,8 @@ impl Screen {
                 page.refresh_charge();
                 return;
             }
-            while let Some(link) = Hyperlink::from_cursor(&self.cursor) {
+            while let Some(data) = self.cursor.hyperlink.clone() {
+                let link = HyperlinkKey::from_data(&data);
                 if self.pages.pages[index].links.reserve_uri(link.uri.len()) {
                     break;
                 }
@@ -1043,13 +1044,13 @@ impl Screen {
             }
         }
         if let Some(data) = copy.link {
-            let link = Hyperlink::from_data(&data);
+            let link = HyperlinkKey::from_data(&data);
             let id = if reflow {
                 loop {
                     let index = self.pages.page_index(absolute);
                     match self.pages.pages[index]
                         .links
-                        .reflow_cell(&link, copy.link_id)
+                        .reflow_cell(link, copy.link_id)
                     {
                         Ok(id) => break id,
                         Err(error) => {
@@ -1063,7 +1064,7 @@ impl Screen {
                     }
                 }
             } else {
-                self.acquire_link_cell(absolute, &link, copy.link_id)
+                self.acquire_link_cell(absolute, link, copy.link_id)
                     .unwrap_or(0)
             };
             if id != 0 {
@@ -1993,7 +1994,7 @@ impl Screen {
         }
     }
 
-    fn acquire_cursor_link(&mut self, link: &Hyperlink) -> Option<(u64, u16)> {
+    fn acquire_cursor_link(&mut self, link: HyperlinkKey<'_>) -> Option<(u64, u16)> {
         loop {
             let index = self.cursor_page_index();
             match self.pages.pages[index].links.insert(link) {
@@ -2009,24 +2010,18 @@ impl Screen {
     }
 
     pub(crate) fn start_hyperlink(&mut self, uri: &[u8], explicit: Option<&[u8]>) {
-        let id = if let Some(id) = explicit {
-            HyperlinkId::Explicit(id.to_vec())
-        } else {
-            let id = self.metadata.hyperlink_implicit_id;
-            self.metadata.hyperlink_implicit_id = id.wrapping_add(1);
-            HyperlinkId::Implicit(id)
-        };
-        let link = Hyperlink {
-            id,
-            uri: uri.to_vec(),
-        };
+        let implicit = self.metadata.hyperlink_implicit_id;
+        if explicit.is_none() {
+            self.metadata.hyperlink_implicit_id = implicit.wrapping_add(1);
+        }
+        let link = HyperlinkKey::new(uri, explicit, implicit);
         self.end_hyperlink();
-        if let Some(reference) = self.acquire_cursor_link(&link) {
+        if let Some(reference) = self.acquire_cursor_link(link) {
             self.cursor_link = Some(reference);
-            self.cursor.hyperlink = Some(Arc::new(HyperlinkData::new(uri, Some(link.id))));
+            let index = self.cursor_page_index();
+            self.cursor.hyperlink = Some(self.pages.pages[index].links.data(reference.1).clone());
         } else if explicit.is_none() {
-            self.metadata.hyperlink_implicit_id =
-                self.metadata.hyperlink_implicit_id.wrapping_sub(1);
+            self.metadata.hyperlink_implicit_id = implicit;
         }
     }
 
@@ -2072,8 +2067,9 @@ impl Screen {
             }
             self.release_cursor_link();
         }
-        if let Some(link) = Hyperlink::from_cursor(&self.cursor) {
-            self.cursor_link = self.acquire_cursor_link(&link);
+        if let Some(data) = self.cursor.hyperlink.clone() {
+            let link = HyperlinkKey::from_data(&data);
+            self.cursor_link = self.acquire_cursor_link(link);
             if self.cursor_link.is_none() {
                 self.end_hyperlink();
             }
@@ -2083,7 +2079,7 @@ impl Screen {
     fn acquire_link_cell(
         &mut self,
         absolute: usize,
-        link: &Hyperlink,
+        link: HyperlinkKey<'_>,
         preferred: u16,
     ) -> Result<u16, SetFull> {
         loop {
@@ -2219,8 +2215,9 @@ impl Screen {
         }
         if self.cursor_link.is_some_and(|(owner, _)| owner == serial) {
             self.cursor_link = None;
-            if let Some(link) = Hyperlink::from_cursor(&self.cursor) {
-                match self.pages.pages[index].links.insert(&link) {
+            if let Some(data) = self.cursor.hyperlink.clone() {
+                let link = HyperlinkKey::from_data(&data);
+                match self.pages.pages[index].links.insert(link) {
                     Ok(id) => self.cursor_link = Some((serial, id)),
                     Err(_) => self.end_hyperlink(),
                 }

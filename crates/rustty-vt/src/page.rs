@@ -1,6 +1,8 @@
 //! Typed page storage. Row rotations move headers, leaving physical cell keys stable.
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
+#[cfg(feature = "allocation-probe")]
+use crate::allocation_probe::{Kind, Scope};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -109,11 +111,23 @@ impl Page {
                 layout.string_alloc_layout,
                 layout.hyperlink_map_layout.capacity as usize * 80 / 100,
             ),
-            cells: vec![Cell::default(); usize::from(capacity.cols) * usize::from(capacity.rows)],
-            headers: (0..capacity.rows)
-                .map(|row| RowHeader::new(u32::from(row) * u32::from(capacity.cols)))
-                .collect(),
-            row_ids: vec![0; usize::from(capacity.rows)],
+            cells: {
+                #[cfg(feature = "allocation-probe")]
+                let _scope = Scope::enter(Kind::PageBuffer);
+                vec![Cell::default(); usize::from(capacity.cols) * usize::from(capacity.rows)]
+            },
+            headers: {
+                #[cfg(feature = "allocation-probe")]
+                let _scope = Scope::enter(Kind::PageBuffer);
+                (0..capacity.rows)
+                    .map(|row| RowHeader::new(u32::from(row) * u32::from(capacity.cols)))
+                    .collect()
+            },
+            row_ids: {
+                #[cfg(feature = "allocation-probe")]
+                let _scope = Scope::enter(Kind::PageBuffer);
+                vec![0; usize::from(capacity.rows)]
+            },
             grapheme_map: HashMap::new(),
             link_map: HashMap::new(),
             link_overrides: HashMap::new(),
@@ -381,6 +395,8 @@ impl Page {
     pub fn recycle(&mut self, capacity: PageCapacity, serial: u64) {
         // An exhausted reflow page can change width within the same allocation.
         // Vec retains its cell allocation whenever the new capacity fits.
+        #[cfg(feature = "allocation-probe")]
+        let _scope = Scope::enter(Kind::PageBuffer);
         self.cells.fill(Cell::default());
         self.cells.resize(
             usize::from(capacity.cols) * usize::from(capacity.rows),
@@ -393,6 +409,8 @@ impl Page {
         for (row, header) in self.headers.iter_mut().enumerate() {
             *header = RowHeader::new((row * usize::from(capacity.cols)) as u32);
         }
+        #[cfg(feature = "allocation-probe")]
+        drop(_scope);
         self.styles.reset();
         self.graphemes.reset();
         self.links.reset();
@@ -534,6 +552,8 @@ impl Page {
 
     /// Rebuild admission transactionally: failures leave live words and maps intact.
     pub fn rebuild(&mut self, grow: Option<PageResource>) -> Result<(), SetFull> {
+        #[cfg(feature = "allocation-probe")]
+        let _scope = Scope::rebuild(grow.is_some());
         let mut capacity = self.capacity;
         if let Some(resource) = grow {
             let (old, default, maximum, used) = match resource {
@@ -601,8 +621,10 @@ impl Page {
             layout.string_alloc_layout,
             layout.hyperlink_map_layout.capacity as usize * 80 / 100,
         );
-        let mut grapheme_map = HashMap::new();
-        let mut link_map = HashMap::new();
+        styles.reserve_entries(self.styles.count());
+        links.reserve_entries(&self.links);
+        let mut grapheme_map = HashMap::with_capacity(self.grapheme_map.len());
+        let mut link_map = HashMap::with_capacity(self.link_map.len());
         let mut pending = Vec::new();
         for row in 0..usize::from(self.rows) {
             if !self.headers[row].has(RowHeader::MANAGED) {
@@ -619,7 +641,7 @@ impl Page {
                 if cell.has_hyperlink() {
                     let id = self.link_id(slot);
                     let next = links
-                        .copy_cell(self.links.get(id), id)
+                        .copy_from(&self.links, id)
                         .map_err(|_| SetFull::OutOfMemory)?;
                     link_map.insert(slot as u32, next);
                 }

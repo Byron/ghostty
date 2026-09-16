@@ -1,5 +1,9 @@
 //! Headless terminal state and protocol handling.
 
+/// Optional storage instrumentation for the standalone allocation probe.
+#[cfg(feature = "allocation-probe")]
+pub mod allocation_probe;
+
 pub mod clipboard;
 pub mod color;
 pub mod dnd;

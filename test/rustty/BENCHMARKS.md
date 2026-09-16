@@ -1427,3 +1427,61 @@ VT library/integration tests pass (302 tests including the new check). The
 three existing one-row alternate-screen grapheme-wrap failures, with zero
 coverage gaps. Stage 1 artifacts are in `target/packed-recovery/stage1/`;
 `comparison/results.json` retains both measurement orders.
+
+### Stage 2: resource admission and rebuilding
+
+Hyperlink lookup now borrows URI/ID bytes and hashes the native byte sequence
+without concatenating a temporary key. Native string reservation, dead-entry
+cleanup, ID preference and failure order still run before an owned payload is
+created. Rebuilds share immutable link payloads and reserve sparse maps from
+surviving entries. The opt-in `allocation-probe` feature counts admission,
+reservation, rebuild and growth attempts, and separates temporary hyperlink
+payloads, owned hyperlink payloads and page cell/header/identity buffers from
+other allocations (including graphemes).
+
+All 14 probes retain identical native admission/reservation/growth counts,
+logical charges, page counts and retained rows. Classified allocation counts
+and requested bytes sum to the global allocator's observations. Ordinary writes
+and row exposure still allocate zero times. The instrumentation-only baseline
+also reproduces every original allocation/memory observation.
+
+| Unlimited linked-grapheme pressure | Stage 1 | Stage 2 |
+| --- | ---: | ---: |
+| Allocation calls | 21,770,860 | 283,116 |
+| Allocations during rebuilds | 21,019,263 | 11,505 |
+| Retained requested bytes | 32,388,863 | 32,386,655 |
+| Peak requested bytes | 33,711,743 | 33,709,199 |
+
+The allocation reduction is 98.7%, with essentially unchanged retained heap.
+A preliminary dense text-slot reservation increased retained heap by about
+2.2 MiB; it was removed before the following final measurements. Its evidence
+is retained separately in `stage2-dense-reserve/`.
+
+The same serial protocol compares stage 1 and stage 2, with both measurement
+orders and 50 samples per direction. Normal builds, without instrumentation,
+produce these pooled medians:
+
+| Workload | Stage 1 µs | Stage 2 µs | Stage 2 / stage 1 |
+| --- | ---: | ---: | ---: |
+| read/ascii | 2.850 | 2.877 | 1.01× |
+| reflow/ascii | 42.355 | 42.864 | 1.01× |
+| reflow/chinese | 68.381 | 67.175 | 0.98× |
+| reflow/combining | 81.820 | 81.287 | 0.99× |
+| reflow/emoji | 65.335 | 65.365 | 1.00× |
+| feed/ascii | 1.107 | 1.089 | 0.98× |
+| stream_styled/ascii | 28.048 | 27.993 | 1.00× |
+| stream_styled/chinese | 39.025 | 38.591 | 0.99× |
+| stream_styled/combining | 1086.903 | 966.088 | 0.89× |
+| stream_styled/emoji | 1377.203 | 1226.391 | 0.89× |
+| reflow_history/ascii | 1475.254 | 1462.086 | 0.99× |
+| reflow_history/chinese | 1447.533 | 1458.829 | 1.01× |
+| reflow_history/combining | 7372.528 | 7269.604 | 0.99× |
+| reflow_history/emoji | 5176.578 | 5163.609 | 1.00× |
+
+Styled combining improves 10–12% and styled emoji 11% in both orders; the other
+focused workloads remain close to unchanged. VT library/integration tests pass
+(304 tests). The final 6,585 page, layout and snapshot differential comparisons
+have only the three known alternate-screen grapheme-wrap failures and zero
+coverage gaps. Formatting and diff checks pass. Artifacts are in
+`target/packed-recovery/stage2/`; the instrumented stage-1 baseline is in
+`stage2-probe-before/`.

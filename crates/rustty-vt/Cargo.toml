@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 description = "Headless terminal state and protocol handling."
 
+[features]
+allocation-probe = []
+
 [dependencies]
 rustty-parser.workspace = true
 serde.workspace = true

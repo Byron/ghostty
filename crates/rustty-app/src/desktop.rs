@@ -2518,11 +2518,7 @@ impl App {
                 ),
             };
             let event = input::terminal_key(key, host.modifiers, host.composing, options)?;
-            if event.action != vt::KeyAction::Release {
-                terminal.screen_mut().viewport_offset = 0;
-                terminal.screen_mut().selection = None;
-            }
-            Some(terminal.encode_key_with_options(&event, options))
+            Some(input::encode_terminal_key(&mut terminal, &event, options))
         });
         if let Some(bytes) = bytes {
             if key.state == ElementState::Pressed && !bytes.is_empty() {

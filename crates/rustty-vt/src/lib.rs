@@ -14,6 +14,7 @@ mod page_layout;
 mod page_list;
 mod page_resources;
 pub mod paste;
+mod printing;
 pub mod query;
 pub mod screen;
 pub mod search;

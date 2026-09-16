@@ -953,7 +953,7 @@ impl Terminal {
         }
     }
 
-    fn print_utf8(&mut self, mut text: &str) {
+    fn print_utf8(&mut self, text: &str) {
         if self.status_display {
             return;
         }
@@ -976,28 +976,68 @@ impl Terminal {
         }
         let right = usize::from(self.cols) - 1;
         let graphemes = self.modes.dec(2027);
-        while let Some(cp) = text.chars().next() {
-            // Anchor each span with the full scalar path, including wrapping,
-            // page growth and grapheme joins across input chunk boundaries.
-            self.print(cp);
-            text = &text[cp.len_utf8()..];
-            if text.is_empty() || self.screen().cursor.pending_wrap {
-                continue;
+        // Borrowed parser events stay borrowed; decode bounded chunks without
+        // a heap buffer, and reuse properties for neighboring equal scalars.
+        let mut input = text.chars();
+        let mut codepoints = ['\0'; 256];
+        let mut properties = [0u32; 256];
+        let mut previous = ('\0', 0);
+        loop {
+            let mut len = 0;
+            for slot in &mut codepoints {
+                let Some(cp) = input.next() else {
+                    break;
+                };
+                *slot = cp;
+                let property = if cp == previous.0 {
+                    previous.1
+                } else {
+                    unicode::print_properties(cp)
+                };
+                properties[len] = property;
+                previous = (cp, property);
+                len += 1;
             }
-            let mut state = self.grapheme_state;
-            let (bytes, scalars) = self
-                .screen_mut()
-                .write_cursor_utf8(text, right, graphemes, &mut state);
-            if bytes != 0 {
-                self.grapheme_state = state;
-                self.previous_char = text[..bytes].chars().next_back();
-                self.generation = self.generation.wrapping_add(scalars as u64);
-                text = &text[bytes..];
+            if len == 0 {
+                break;
+            }
+            let mut offset = 0;
+            while offset < len {
+                // The scalar anchor resolves wrapping, joins and resource growth.
+                self.print_with_properties(
+                    codepoints[offset],
+                    unicode::Properties::from_bits(properties[offset]),
+                );
+                offset += 1;
+                if offset == len || self.screen().cursor.pending_wrap {
+                    continue;
+                }
+                let mut state = self.grapheme_state;
+                let count = self.screen_mut().write_cursor_codepoints(
+                    &codepoints[offset..len],
+                    &properties[offset..len],
+                    right,
+                    graphemes,
+                    &mut state,
+                );
+                if count != 0 {
+                    self.grapheme_state = state;
+                    self.previous_char = Some(codepoints[offset + count - 1]);
+                    self.generation = self.generation.wrapping_add(count as u64);
+                    offset += count;
+                }
             }
         }
     }
 
     pub fn print(&mut self, cp: char) {
+        self.print_with_properties(
+            cp,
+            unicode::Properties::from_bits(unicode::print_properties(cp)),
+        );
+    }
+
+    fn print_with_properties(&mut self, cp: char, prop: unicode::Properties) {
         if self.status_display {
             return;
         }
@@ -1048,15 +1088,20 @@ impl Terminal {
             };
             if let Some(last) = last {
                 let old_state = self.grapheme_state;
-                if !unicode::grapheme_break(last, cp, &mut self.grapheme_state) {
+                let last_prop = properties(last);
+                if !unicode::grapheme_break_properties(
+                    last_prop.grapheme,
+                    prop.grapheme,
+                    &mut self.grapheme_state,
+                ) {
                     let mut width = previous_width;
                     if matches!(cp, '\u{fe0f}' | '\u{fe0e}') {
-                        if !properties(last).emoji_vs_base {
+                        if !last_prop.emoji_vs_base {
                             self.grapheme_state = old_state;
                             return;
                         }
                         width = if cp == '\u{fe0f}' { 2 } else { 1 };
-                    } else if !properties(cp).zero_in_grapheme {
+                    } else if !prop.zero_in_grapheme {
                         width = 2;
                     }
                     self.append_grapheme(col, cp, width, right);
@@ -1064,11 +1109,7 @@ impl Terminal {
                 }
             }
         }
-        let width = if cp as u32 <= 255 {
-            1
-        } else {
-            unicode::codepoint_width(cp)
-        };
+        let width = if cp as u32 <= 255 { 1 } else { prop.width };
         if width == 0 {
             if self.modes.dec(2027) {
                 return;

@@ -1233,123 +1233,139 @@ impl Screen {
     }
 
     pub(crate) fn write_cursor_ascii(&mut self, bytes: &[u8]) -> usize {
+        use crate::printing;
         self.sync_cursor_resources();
         let template = self.cursor_template(None, 1, false);
         let (index, row) = self.cursor_location();
         let page = &mut self.pages.pages[index];
         let offset = page.slot(row, self.cursor.col);
-        let mut written = 0;
         let len = bytes.len().min(usize::from(page.columns) - self.cursor.col);
-        for (i, &byte) in bytes[..len].iter().enumerate() {
-            let old = page.cells[offset + i];
-            if old.width() != 1 || old.has_grapheme() || old.has_hyperlink() {
-                break;
-            }
-            if old.style_id() != template.style_id() {
-                page.styles.release(old.style_id());
-                page.styles.retain(template.style_id());
-            }
-            let mut cell = template;
-            cell.set_codepoint(Some(char::from(byte)));
-            page.cells[offset + i] = cell;
-            written += 1;
+        let old = page.cells[offset];
+        if old.width() != 1 || old.has_grapheme() || old.has_hyperlink() {
+            return 0;
         }
-        if written > 0 {
+        let count = printing::destination_narrow(
+            &page.cells[offset..offset + len],
+            old.bits() & printing::DEST_MASK,
+        );
+        page.replace_simple_styles(old.style_id(), template.style_id(), count);
+        printing::store_ascii(
+            &mut page.cells[offset..offset + count],
+            &bytes[..count],
+            template,
+        );
+        if count != 0 {
             page.mark_cell(row, template);
         }
-        written
+        count
     }
 
-    pub(crate) fn write_cursor_utf8(
+    pub(crate) fn write_cursor_codepoints(
         &mut self,
-        text: &str,
+        codepoints: &[char],
+        properties: &[u32],
         right: usize,
         graphemes: bool,
         state: &mut u8,
-    ) -> (usize, usize) {
-        if self.row(self.cursor.row).cells[self.cursor.col].has_grapheme()
-            || text
-                .chars()
-                .next()
-                .is_none_or(|cp| cp as u32 > 255 && crate::unicode::codepoint_width(cp) == 0)
-        {
-            return (0, 0);
+    ) -> usize {
+        use crate::{printing, unicode};
+        let Some(&first) = codepoints.first() else {
+            return 0;
+        };
+        let width = (properties[0] & 3) as u8;
+        if width == 0 {
+            return 0;
+        }
+        let len = printing::printable_prefix(properties, width, graphemes)
+            .min((right + 1 - self.cursor.col) / usize::from(width));
+        if len == 0 {
+            return 0;
         }
         let (index, row) = self.cursor_location();
         let page = &self.pages.pages[index];
         if self.cursor_link.is_some() {
-            return (0, 0);
+            return 0;
         }
         match self.cursor_style {
             Some((owner, id))
                 if owner == page.serial && *page.styles.get(id) == self.cursor.style => {}
             None if self.cursor.style == Style::default() => {}
-            _ => return (0, 0),
+            _ => return 0,
         }
-        let template = self.cursor_template(None, 1, false);
-        let page = &mut self.pages.pages[index];
-        let offset = page.slot(row, 0);
-        let mut col = self.cursor.col;
-        let (mut bytes, mut scalars) = (0, 0);
-        for cp in text.chars() {
-            let width = if cp as u32 <= 255 {
-                1
-            } else {
-                crate::unicode::codepoint_width(cp)
-            };
-            let end = col + usize::from(width);
-            if width == 0 || end > right + 1 {
-                break;
+        let offset = page.slot(row, self.cursor.col);
+        let mut next_state = *state;
+        if graphemes && first as u32 > 255 && self.cursor.col > 0 {
+            let mut previous = offset - 1;
+            if self.cursor.col > 1 && page.cells[previous].width() == 0 {
+                previous -= 1;
             }
-            let mut next_state = *state;
-            if cp as u32 > 255 && graphemes && col > 0 {
-                let mut previous = col - 1;
-                if page.cells[offset + previous].width() == 0 {
-                    previous = previous.saturating_sub(1);
-                }
-                let previous = page.cells[offset + previous];
-                if previous.has_grapheme()
-                    || previous.codepoint().is_some_and(|last| {
-                        !crate::unicode::grapheme_break(last, cp, &mut next_state)
-                    })
-                {
-                    break;
-                }
+            let cell = page.cells[previous];
+            if cell.has_grapheme() {
+                return 0;
             }
-            let cells = &page.cells[offset + col..offset + end];
-            let same_width = cells[0].width() == width && (width == 1 || cells[1].width() == 0);
-            if (!same_width && !cells.iter().all(|cell| cell.width() == 1))
-                || cells
-                    .iter()
-                    .any(|cell| cell.has_grapheme() || cell.has_hyperlink())
+            if let Some(cp) = cell.codepoint()
+                && !unicode::grapheme_break_properties(
+                    unicode::properties(cp).grapheme,
+                    0,
+                    &mut next_state,
+                )
             {
-                break;
-            }
-            for x in col..end {
-                let old = page.cells[offset + x];
-                if old.style_id() != template.style_id() {
-                    page.styles.release(old.style_id());
-                    page.styles.retain(template.style_id());
-                }
-                let mut cell = template;
-                cell.set_codepoint((x == col).then_some(cp));
-                cell.set_width(if x == col { width } else { 0 });
-                page.cells[offset + x] = cell;
-                page.mark_cell(row, cell);
-            }
-            *state = next_state;
-            col = end;
-            bytes += cp.len_utf8();
-            scalars += 1;
-            if col > right {
-                break;
+                return 0;
             }
         }
-        if bytes != 0 {
-            self.cursor.col = col.min(right);
-            self.cursor.pending_wrap = col > right;
+        let cells = &page.cells[offset..offset + len * usize::from(width)];
+        let old = cells[0];
+        if old.has_grapheme() || old.has_hyperlink() {
+            return 0;
         }
-        (bytes, scalars)
+        let count = if old.width() == 1 {
+            printing::destination_narrow(cells, old.bits() & printing::DEST_MASK)
+                / usize::from(width)
+        } else if width == 2
+            && old.width() == 2
+            && cells[1].width() == 0
+            && cells[1].style_id() == old.style_id()
+            && !cells[1].has_grapheme()
+            && !cells[1].has_hyperlink()
+        {
+            printing::destination_wide(
+                cells,
+                [
+                    old.bits() & printing::DEST_MASK,
+                    cells[1].bits() & printing::DEST_MASK,
+                ],
+            ) / 2
+        } else {
+            0
+        };
+        if count == 0 {
+            return 0;
+        }
+        // Once the leading boundary is checked, neighboring input characters
+        // in this run have ordinary grapheme classes. Latin-1 skips segmentation.
+        if graphemes
+            && (1..=4).contains(&next_state)
+            && codepoints[1..count].iter().any(|&cp| cp as u32 > 255)
+        {
+            next_state = 0;
+        }
+        let head = self.cursor_template(None, width, false);
+        let tail = self.cursor_template(None, 0, false);
+        let page = &mut self.pages.pages[index];
+        let slots = count * usize::from(width);
+        page.replace_simple_styles(old.style_id(), head.style_id(), slots);
+        let cells = &mut page.cells[offset..offset + slots];
+        if width == 1 {
+            printing::store_narrow(cells, &codepoints[..count], head);
+        } else {
+            printing::store_wide(cells, &codepoints[..count], head, tail);
+        }
+        page.mark_cell(row, head);
+        *state = next_state;
+        let col = self.cursor.col + slots;
+        self.cursor.col = col.min(right);
+        self.cursor.pending_wrap = col > right;
+        count
     }
 
     pub(crate) fn next_row_id(&mut self) -> u64 {

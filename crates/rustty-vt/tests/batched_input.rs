@@ -232,6 +232,34 @@ fn ignored_scalars_preserve_public_cursor_edits_before_batched_printing() {
 }
 
 #[test]
+fn packed_runs_cross_scratch_and_destination_boundaries() {
+    for columns in [7, 17, 80] {
+        let mut base = Terminal::new(columns, 4, 1000);
+        base.feed(b"\x1b[?2027h");
+        for col in 0..columns * 4 {
+            base.feed(format!("\x1b[{}mX", 31 + col % 4).as_bytes());
+        }
+        base.feed("\x1b[H界a\u{301}👩\u{200d}💻\x1b[1;2H\x1b[1;34;44m".as_bytes());
+        for pattern in ["a", "é", "界", "é界a\u{301}👩\u{200d}💻"] {
+            for count in [1, 15, 16, 31, 32, 255, 256, 257, 513] {
+                let text = pattern.repeat(count);
+                let mut expected = base.clone();
+                for cp in text.chars() {
+                    expected.print(cp);
+                }
+                let mut actual = base.clone();
+                actual.feed(text.as_bytes());
+                same_state(
+                    &actual,
+                    &expected,
+                    &format!("columns={columns}, pattern={pattern:?}, count={count}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn printable_runs_preserve_effect_order_and_cursor_queries() {
     let input = b"abc\x07\x1b[6nDEF\x1b]2;title\x07ghi\x1b[6njkl\x07";
     let effects = vec![

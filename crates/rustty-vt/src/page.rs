@@ -279,6 +279,14 @@ impl Page {
         }
     }
 
+    pub fn replace_simple_styles(&mut self, old: u16, new: u16, count: usize) {
+        if old != new && count != 0 {
+            let count = u16::try_from(count).expect("run fits a physical row");
+            self.styles.release_many(old, count);
+            self.styles.retain_many(new, count);
+        }
+    }
+
     pub fn clear_cell(&mut self, slot: usize, background: Color) {
         let cell = self.cells[slot];
         self.styles.release(cell.style_id());

@@ -2098,3 +2098,79 @@ short scans therefore do not establish 3% equivalence; no regression was
 confirmed. All original samples and controls remain in `step1/scan-confirmation/`,
 `step1/scans-repeat/` and `step1/scan-control/`. No other workload exceeded 3%
 in either direction in the complete run.
+
+### Step 2: check physical widths once per active page
+
+The first candidate visited each active page instead of resolving its width for
+every row, skipping the rows covered by each widening operation. Ghostty's
+`ensureActiveColumns` uses the same page-level invariant. No cursor pointers or
+additional caches were added. This candidate was rejected because the supplemental
+printing check below exposed a regression; these are retained experiment results.
+
+The focused six-case comparison passes the 5% gate. The subsequent complete
+54-workload comparison against step 1 is in `step2/comparison/`. Independent
+compiler jobs interrupted the first attempt; that excluded run remains in
+`step2/comparison-contaminated/`. Later measurements use the existing serial
+runner with process checks before and after every timed invocation. An overlap
+causes the entire incomplete workload to be repeated after compilers finish;
+completed workloads retain both adjacent measurement orders.
+
+| Workload | Step 1 µs | Step 2 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| stream/ascii | 17.871 | 14.039 | 0.786× | 0.788× |
+| stream/chinese | 27.131 | 23.373 | 0.859× | 0.855× |
+| stream_styled/ascii | 22.126 | 17.957 | 0.819× | 0.804× |
+| stream_styled/chinese | 31.964 | 28.110 | 0.891× | 0.868× |
+| stream_memory_capped/ascii | 17.946 | 13.958 | 0.782× | 0.775× |
+| stream_styled_memory_capped/ascii | 21.963 | 18.008 | 0.819× | 0.820× |
+
+The only >3% flags were the short first-codepoint scans. ASCII changes direction
+between the complete comparison (1.021×/1.216×) and repeat (1.150×/0.899×).
+Emoji's flag does not repeat (1.001×/1.027×). The same-binary variability described
+in step 1 still limits these scans; no regression is confirmed. The repeats are
+in `step2/scan-confirmation/`.
+
+All 309 VT tests, 57 benchmark correctness checks and 2,265 targeted differential
+comparisons pass. The added regression test restores narrow pages crossing the
+history/active boundary, scrolls, and verifies that every active page widens
+while the wholly historical page stays narrow. All 14 allocation/memory
+observations remain identical to step 1. Formatting and diff checks pass.
+
+The supplemental stream improves 22%, but `page_spans/print` rises from 45.313
+to 47.620 µs (1.060×/1.051×). A repeat is 45.920 → 47.667 µs
+(1.058×/1.026×). That printing cost prevents accepting this candidate. Both
+runs remain in `step2/supplement/` and `step2/supplement-repeat/`. A simpler
+candidate checks whether all active pages are wide enough before entering the
+original row-widening loop, retaining the existing uncommon repair path.
+
+The accepted version uses a single `all()` check over the active pages. When
+every page is wide enough, the row loop is unnecessary; otherwise the original
+widening code runs unchanged. Its full comparison and validation are in
+`step2b/`. This simpler guard keeps the scrolling gains and avoids the first
+candidate's supplemental printing cost.
+
+| Workload | Step 1 µs | Accepted step 2 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| stream/ascii | 18.053 | 13.973 | 0.770× | 0.777× |
+| stream/chinese | 27.182 | 23.441 | 0.857× | 0.868× |
+| stream_styled/ascii | 22.175 | 17.975 | 0.799× | 0.820× |
+| stream_styled/chinese | 32.147 | 27.848 | 0.865× | 0.867× |
+| stream_memory_capped/ascii | 18.251 | 14.082 | 0.761× | 0.780× |
+| stream_styled_memory_capped/ascii | 22.126 | 17.901 | 0.810× | 0.809× |
+| page_spans/print | 46.047 | 45.444 | 0.985× | 0.989× |
+| page_spans/stream | 15.823 | 12.363 | 0.786× | 0.778× |
+| page_spans/styled | 16.464 | 13.025 | 0.797× | 0.789× |
+
+All 54 workloads and all three supplemental cases were measured in both orders.
+The reflow/ASCII and combining-feed outliers disappear on repeat
+(1.003×/0.998× and 1.000×/0.994×). Emoji feed is near the threshold in the first
+repeat (1.020×/1.034×), then 1.018×/1.008× in a further confirmation. The scan
+flags again change direction; their earlier same-binary limitation still
+applies. No regression above 3% is confirmed. All measurements, including the
+outliers, are retained in `comparison/`, `confirmation/` and
+`emoji-confirmation/` under `step2b/`.
+
+The accepted guard passes 309 VT tests, 57 benchmark correctness checks and
+96 focused native comparisons of physical page widening. The 14 allocation and
+memory observations exactly match step 1. The restored-page regression test,
+formatting and diff checks pass.

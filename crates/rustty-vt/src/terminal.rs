@@ -472,6 +472,16 @@ impl Terminal {
 
     fn ensure_active_columns(&mut self) {
         let columns = usize::from(self.cols);
+        let screen = self.screen();
+        let first = screen.pages.locate_from_end(screen.height - 1).0;
+        if screen
+            .pages
+            .pages
+            .range(first..)
+            .all(|page| usize::from(page.columns) >= columns)
+        {
+            return;
+        }
         for row in 0..usize::from(self.rows) {
             self.ensure_row_cells(row, columns);
         }

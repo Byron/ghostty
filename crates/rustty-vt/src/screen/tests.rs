@@ -124,6 +124,50 @@ fn resource_ownership_survives_edits_reflow_snapshots_and_eviction() {
 }
 
 #[test]
+fn scrolling_widens_all_active_pages_after_restore() {
+    let mut terminal = Terminal::new(128, 64, 1000);
+    let screen = terminal.screen_mut();
+    screen.pages = PageList::default();
+    for rows in [1, 32, 33] {
+        screen.pages.append(
+            PageCapacity {
+                cols: 4,
+                rows,
+                ..PageCapacity::STANDARD
+            },
+            rows,
+        );
+    }
+    let mut id = 0;
+    for page in &mut screen.pages.pages {
+        for row in 0..usize::from(page.rows) {
+            page.row_ids[row] = id;
+            let slot = page.slot(row, 0);
+            page.cells[slot].set_codepoint(char::from_u32('A' as u32 + id as u32));
+            page.mark_cell(row, page.cells[slot]);
+            id += 1;
+        }
+    }
+    screen.next_row = id;
+    let wire = snapshot::encode_to_vec(&terminal).unwrap();
+    let mut terminal = snapshot::decode(wire.as_slice(), Default::default()).unwrap();
+    terminal.feed(b"\x1b[T");
+
+    let screen = terminal.screen();
+    assert_eq!(screen.history_len(), 2);
+    assert_eq!(screen.physical_row(0).cells.len(), 4);
+    assert!(screen.rows().all(|row| row.cells.len() == 128));
+    assert_eq!(screen.row(0).cells[0].codepoint(), None);
+    for row in 1..64 {
+        assert_eq!(
+            screen.row(row).cells[0].codepoint(),
+            char::from_u32('A' as u32 + row as u32 + 1)
+        );
+    }
+    assert_references(screen);
+}
+
+#[test]
 fn detached_resources_outlive_source_mutation_and_destruction() {
     let (detached, json) = {
         let mut terminal = Terminal::new(8, 2, 1000);

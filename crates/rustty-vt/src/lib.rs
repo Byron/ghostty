@@ -8,6 +8,8 @@ pub mod glyph;
 pub mod graphics;
 pub mod input;
 pub mod modes;
+#[allow(dead_code)] // Activated by the page storage migration.
+mod packed;
 mod page_layout;
 mod page_list;
 mod page_resources;

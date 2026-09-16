@@ -2534,3 +2534,37 @@ feed/stream cases improves by 5% in both orders. Chinese feed changes from
 0.995×/0.995×. The extra validation attempt is removed. All 50 samples per
 direction, the frozen candidate and its patch remain in
 `target/packed-simplify/step8-std/`.
+
+### Step 8b: reuse the existing ARM UTF-8 validator
+
+The parser uses the already-installed `simdutf8::compat` validator on aarch64
+with NEON. Valid runs remain borrowed. Errors retain the existing `utf8_chunks`
+prefix recovery; the compatibility validator stops early on errors, avoiding
+repeated scans of entire malformed suffixes. Other targets and `scalar-kernels`
+retain the reference path. The VT feature now propagates into the parser.
+
+The new block-edge/error equivalence test and all 13 parser tests pass with
+both implementations. All 311 VT tests pass both normally and with scalar
+kernels, as do 57 benchmark checks, the workspace all-target check, the x86
+Linux parser check and 16,100 parser/corpus/snapshot comparisons. All 14
+allocation observations match step 7. No new unsafe Rust is added.
+
+All 26 feed/stream workloads pass the measurement gate against step 7, with
+50 samples per order and no slowdown above 3% in either direction. Chinese
+feed improves about 18%, scrolling 15% and styled scrolling 11–12%. Mixed
+seven-byte chunks are 1–2% slower; that case does not benefit from SIMD.
+Medians are microseconds; all binaries, source patches, validation and complete
+measurements are retained in `target/packed-simplify/step8/`.
+
+| Workload | Step 7 µs | Step 8 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| feed/ascii | 0.864 | 0.865 | 1.004× | 1.000× |
+| feed/chinese | 4.410 | 3.605 | 0.821× | 0.816× |
+| feed/combining | 42.732 | 42.331 | 0.991× | 0.990× |
+| feed/emoji | 41.619 | 41.350 | 0.997× | 0.992× |
+| stream/ascii | 9.588 | 9.603 | 1.003× | 1.003× |
+| stream/chinese | 18.644 | 15.906 | 0.853× | 0.854× |
+| stream_styled/chinese | 22.757 | 20.181 | 0.890× | 0.882× |
+| stream_memory_capped/chinese | 19.787 | 16.927 | 0.845× | 0.857× |
+| chunked_feed_mixed/7_bytes | 93.478 | 94.510 | 1.014× | 1.009× |
+| chunked_stream_mixed/7_bytes | 300.578 | 305.414 | 1.020× | 1.011× |

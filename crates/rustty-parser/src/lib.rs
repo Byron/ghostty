@@ -13,6 +13,22 @@ pub const MAX_PARAMS: usize = 24;
 pub const MAX_INTERMEDIATES: usize = 4;
 pub const MAX_OSC_BYTES: usize = 8 * 1024 * 1024;
 
+#[inline]
+fn valid_utf8_prefix(bytes: &[u8]) -> &str {
+    // The compat validator stops at the first error, so malformed streams do
+    // not repeatedly scan their entire remaining suffix. Keep the existing
+    // prefix recovery for errors and the scalar reference implementation.
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    ))]
+    if let Ok(text) = simdutf8::compat::from_utf8(bytes) {
+        return text;
+    }
+    bytes.utf8_chunks().next().map_or("", |chunk| chunk.valid())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContinuationError {
     LimitExceeded,
@@ -306,7 +322,7 @@ impl Parser {
                 remaining = &remaining[len..];
             } else {
                 if (0xc2..=0xf4).contains(&byte) && self.is_ground() {
-                    let text = remaining.utf8_chunks().next().unwrap().valid();
+                    let text = valid_utf8_prefix(remaining);
                     if !text.is_empty() {
                         self.advance_valid_utf8(text, &mut handler);
                         remaining = &remaining[text.len()..];
@@ -626,6 +642,33 @@ mod tests {
                 }
                 assert!(unicode_runs > 0);
             }
+        }
+    }
+
+    #[test]
+    fn utf8_prefix_matches_scalar_across_block_edges_and_errors() {
+        let mut bytes = "aé界👩\u{200d}💻\u{9b}\x1b[0m".repeat(24).into_bytes();
+        for start in 0..=65 {
+            for end in start..=bytes.len() {
+                let input = &bytes[start..end];
+                assert_eq!(
+                    valid_utf8_prefix(input),
+                    input.utf8_chunks().next().map_or("", |chunk| chunk.valid()),
+                    "start={start}, end={end}"
+                );
+            }
+        }
+        for offset in 0..bytes.len() {
+            let original = bytes[offset];
+            for byte in [0x80, 0xc0, 0xc1, 0xe0, 0xed, 0xf4, 0xf5, 0xff] {
+                bytes[offset] = byte;
+                assert_eq!(
+                    valid_utf8_prefix(&bytes),
+                    bytes.utf8_chunks().next().unwrap().valid(),
+                    "offset={offset}, byte={byte}"
+                );
+            }
+            bytes[offset] = original;
         }
     }
 

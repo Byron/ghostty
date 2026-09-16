@@ -1809,3 +1809,201 @@ No all-54 acceptance run was needed after the gain gate failed.
 The rejected source patch, binary, tests and raw timings remain in
 `target/packed-recovery/grapheme-table-candidate/`. The shipped runtime contains
 no transition table or fallback machinery from this experiment.
+
+
+### Final serial comparison
+
+The final accepted runtime is the NEON decoder at `19d43ec65`; the later table
+rejection/report commit does not change it. The final benchmark, oracle and
+allocation executables are byte-identical to the accepted decoder's frozen
+binaries. This comparison measures all 54 Rust workloads and the 36 available
+native counterparts with Rust 1.95 on the same Apple M4 Max.
+
+The runner's labels are **before** = pre-migration 56-byte cells (`c366e3768`),
+**scalar** = initial packed baseline (`3759451f3`, with its then-default SIMD),
+**simd** = final packed runtime, and **ghostty** = the preserved native reference.
+Here `scalar` is a legacy comparison label, not the `scalar-kernels` feature.
+The full forward/reverse schedule yields 19,800 normalized samples: 50 per
+version per direction. All builds, tests, parity and profiling were stopped
+before timing; the process check found no competing compiler or profiler.
+
+Times below are pooled medians in microseconds per complete workload, using
+the units and inputs defined above. All ratios divide final time by the named
+reference; below 1 is faster. A dash means no native counterpart exists.
+
+| Workload | 56-byte µs | Initial packed µs | Final µs | Ghostty µs | Final / 56-byte | Final / packed | Final / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.482 | 0.476 | 0.474 | 0.336 | 0.98× | 0.99× | 1.41× |
+| width/chinese | 0.481 | 0.481 | 0.481 | 0.336 | 1.00× | 1.00× | 1.43× |
+| width/combining | 0.433 | 0.434 | 0.434 | 0.420 | 1.00× | 1.00× | 1.03× |
+| width/emoji | 0.325 | 0.326 | 0.325 | 0.312 | 1.00× | 1.00× | 1.04× |
+| print/ascii | 11.395 | 26.086 | 18.747 | 6.155 | 1.65× | 0.72× | 3.05× |
+| print/chinese | 16.856 | 39.059 | 33.458 | 11.969 | 1.98× | 0.86× | 2.80× |
+| print/combining | 27.029 | 65.151 | 46.897 | 391.188 | 1.74× | 0.72× | 0.12× |
+| print/emoji | 28.812 | 69.480 | 48.307 | 14.853 | 1.68× | 0.70× | 3.25× |
+| scalar/ascii | 1.500 | 1.743 | 1.857 | 1.265 | 1.24× | 1.07× | 1.47× |
+| scalar/chinese | 1.495 | 1.802 | 1.840 | 1.265 | 1.23× | 1.02× | 1.45× |
+| scalar/combining | 1.503 | 1.468 | 1.934 | 1.257 | 1.29× | 1.32× | 1.54× |
+| scalar/emoji | 1.469 | 1.481 | 1.889 | 1.261 | 1.29× | 1.28× | 1.50× |
+| read/ascii | 2.134 | 9.643 | 2.683 | 1.870 | 1.26× | 0.28× | 1.43× |
+| read/chinese | 2.203 | 10.412 | 2.740 | 1.894 | 1.24× | 0.26× | 1.45× |
+| read/combining | 2.812 | 12.798 | 3.278 | 5.823 | 1.17× | 0.26× | 0.56× |
+| read/emoji | 2.987 | 11.542 | 3.183 | 2.381 | 1.07× | 0.28× | 1.34× |
+| clone/ascii | 10.817 | 4.828 | 4.836 | 6.018 | 0.45× | 1.00× | 0.80× |
+| clone/chinese | 11.483 | 4.847 | 4.825 | 6.007 | 0.42× | 1.00× | 0.80× |
+| clone/combining | 12.657 | 6.126 | 6.139 | 17.217 | 0.48× | 1.00× | 0.36× |
+| clone/emoji | 11.629 | 5.515 | 5.512 | 9.920 | 0.47× | 1.00× | 0.56× |
+| reflow/ascii | 43.525 | 46.007 | 38.361 | 27.472 | 0.88× | 0.83× | 1.40× |
+| reflow/chinese | 53.812 | 74.191 | 60.318 | 28.589 | 1.12× | 0.81× | 2.11× |
+| reflow/combining | 37.936 | 82.613 | 51.730 | 53.931 | 1.36× | 0.63× | 0.96× |
+| reflow/emoji | 31.360 | 66.402 | 41.984 | 36.962 | 1.34× | 0.63× | 1.14× |
+| feed/ascii | 1.480 | 1.126 | 1.069 | 0.495 | 0.72× | 0.95× | 2.16× |
+| feed/chinese | 9.091 | 5.373 | 4.788 | 435.229 | 0.53× | 0.89× | 0.01× |
+| feed/combining | 29.161 | 71.539 | 52.507 | 400.296 | 1.80× | 0.73× | 0.13× |
+| feed/emoji | 31.386 | 81.561 | 51.126 | 17.176 | 1.63× | 0.63× | 2.98× |
+| stream/ascii | 28.036 | 24.751 | 22.683 | 5.892 | 0.81× | 0.92× | 3.85× |
+| stream/chinese | 48.528 | 34.924 | 31.793 | 9.269 | 0.66× | 0.91× | 3.43× |
+| stream/combining | 379.802 | 955.830 | 653.359 | 483.859 | 1.72× | 0.68× | 1.35× |
+| stream/emoji | 487.550 | 1254.644 | 755.614 | 730.278 | 1.55× | 0.60× | 1.03× |
+| stream_styled/ascii | 37.695 | 31.113 | 27.268 | 8.187 | 0.72× | 0.88× | 3.33× |
+| stream_styled/chinese | 55.601 | 41.932 | 36.258 | 34.445 | 0.65× | 0.86× | 1.05× |
+| stream_styled/combining | 478.373 | 1081.030 | 730.704 | 480.469 | 1.53× | 0.68× | 1.52× |
+| stream_styled/emoji | 635.641 | 1455.981 | 861.047 | 755.715 | 1.35× | 0.59× | 1.14× |
+| chunked_feed_mixed/whole | 61.703 | 120.302 | 85.841 | — | 1.39× | 0.71× | — |
+| chunked_feed_mixed/7_bytes | 77.707 | 146.453 | 108.746 | — | 1.40× | 0.74× | — |
+| chunked_feed_mixed/4_KiB | 61.940 | 121.139 | 85.772 | — | 1.38× | 0.71× | — |
+| chunked_stream_mixed/whole | 209.745 | 410.880 | 288.253 | — | 1.37× | 0.70× | — |
+| chunked_stream_mixed/7_bytes | 269.987 | 500.200 | 373.448 | — | 1.38× | 0.75× | — |
+| chunked_stream_mixed/4_KiB | 211.232 | 413.720 | 291.621 | — | 1.38× | 0.70× | — |
+| reflow_history/ascii | 1635.742 | 1638.165 | 1276.668 | — | 0.78× | 0.78× | — |
+| reflow_history/chinese | 1313.401 | 1659.102 | 1245.637 | — | 0.95× | 0.75× | — |
+| reflow_history/combining | 2227.519 | 7475.125 | 4443.392 | — | 1.99× | 0.59× | — |
+| reflow_history/emoji | 1606.154 | 5276.927 | 2997.518 | — | 1.87× | 0.57× | — |
+| stream_memory_capped/ascii | 36.711 | 25.294 | 23.233 | — | 0.63× | 0.92× | — |
+| stream_memory_capped/chinese | 57.422 | 35.238 | 31.983 | — | 0.56× | 0.91× | — |
+| stream_memory_capped/combining | 394.760 | 935.022 | 651.976 | — | 1.65× | 0.70× | — |
+| stream_memory_capped/emoji | 490.615 | 1163.733 | 755.013 | — | 1.54× | 0.65× | — |
+| stream_styled_memory_capped/ascii | 46.135 | 31.425 | 27.521 | — | 0.60× | 0.88× | — |
+| stream_styled_memory_capped/chinese | 64.602 | 41.669 | 36.714 | — | 0.57× | 0.88× | — |
+| stream_styled_memory_capped/combining | 487.814 | 1064.063 | 730.828 | — | 1.50× | 0.69× | — |
+| stream_styled_memory_capped/emoji | 653.678 | 1359.887 | 863.605 | — | 1.32× | 0.64× | — |
+
+The paired final comparison confirms 14–31% faster scalar printing and 72–74%
+faster complete text iteration than the initial packed baseline. Plain streams
+improve 8–40%, styled streams 12–41%, and retained-history reflow 22–43%.
+Clone time is essentially unchanged from the packed baseline and remains
+51–58% lower than the pre-migration layout. These are per-workload results;
+the earlier stage ratios should not be multiplied across separate runs.
+
+Compared with 56-byte cells, ASCII and Chinese feed are now 28% and 47% faster;
+plain ASCII/Chinese streams are 19% and 35% faster. Important gaps remain:
+scalar printing takes 1.64–1.99× as long, grapheme feed 1.63–1.80×, and retained
+combining/emoji history reflow 1.87–2.00×. Complete text reads remain 7–26% slower
+than that layout despite recovering most of the packed baseline's cost.
+
+Against the current native run, ordinary ASCII/Chinese streams take 3.85×/3.43×
+as long, combining stream 1.35× and emoji stream 1.03×. The native Chinese-feed
+and combining-overwrite cliffs described earlier still apply: their extreme
+ratios do not describe general Unicode throughput. GPU completion and visible
+presentation were not measured; the application results above describe CPU
+preparation/submission from the clean storage-recovery snapshots.
+
+The full run flagged three first-codepoint scans against the initial packed
+baseline. A separate adjacent/reversed repeat, again 50 samples per direction,
+produced these results. These scans visit only the first codepoint, while
+`read/*` visits complete cell text including suffixes.
+
+| First-codepoint scan repeat | Initial packed µs | Final µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| scalar/ascii | 1.489 | 1.722 | 1.022× | 1.340× |
+| scalar/chinese | 1.914 | 1.873 | 0.980× | 0.971× |
+| scalar/combining | 1.437 | 1.685 | 1.140× | 1.181× |
+| scalar/emoji | 1.708 | 1.715 | 1.018× | 0.980× |
+
+The combining scan retains a repeatable regression: 14–18% in the repeat's
+individual orders, about 0.25 µs per 4,096 cells at the pooled median. Emoji does
+not reproduce its initial regression; ASCII remains strongly order-sensitive.
+Both the original measurements and repeats are retained, rather than replacing
+the full-run samples with selected results. This scan regression is against the
+initial packed baseline; the separate all-54 Unicode acceptance comparison
+against the post-storage default-kernel control had no confirmed regression
+above 3%.
+
+### Final allocation and memory observations
+
+The final normal and instrumented probes exactly match the accepted stage-3/
+wrap-fix observations in all 14 cases, including allocation calls, allocation
+categories, resource admission/reservation/rebuild attempts, logical charges,
+pages and retained rows. Ordinary ASCII, Latin-1, wide writes and row exposure
+allocate zero times within capacity. The native byte and history policies,
+resource limits and whole-page eviction policy are unchanged by this follow-up.
+
+These are live requested heap bytes from the allocation probe, excluding
+allocator overhead; they are not process RSS. The construction and pressure
+cases count the complete newly created terminal. Both unlimited cases retain
+exactly the same 8,161 history rows in all versions.
+
+| Probe | 56-byte cells: live bytes | Initial packed: live bytes | Final packed: live bytes |
+| --- | ---: | ---: | ---: |
+| Fresh 128×32 | 234,975 | 390,735 | 390,543 |
+| Unlimited ASCII; 8,161 history rows | 59,211,711 | 8,906,767 | 8,905,231 |
+| Unlimited linked graphemes; 8,161 history rows | 71,790,767 | 32,388,863 | 32,385,119 |
+| ASCII; zero-byte history budget | 235,199 | 390,735 | 390,543 |
+| Linked graphemes; zero-byte history budget | 278,695 | 496,087 | 495,799 |
+
+The small-screen memory floor remains higher than the pre-migration layout:
+a fresh 128×32 terminal keeps a full page buffer (390,543 requested bytes versus
+234,975 before migration). This follow-up preserves page ownership and capacity.
+Unlimited ASCII heap falls from 59.2 MB before migration to 8.9 MB; linked
+Unicode heap falls from 71.8 MB to 32.4 MB. The follow-up itself reduces temporary
+allocation churn while leaving the initial packed footprint essentially intact.
+
+Unlimited linked-grapheme allocation calls fall from 21,770,860 at the packed
+baseline to 283,116 (98.7% fewer); rebuild allocations fall from 21,019,263 to
+11,505. Additional row-exposure allocations remain zero, versus 598 with the
+56-byte layout. Bounded recycling performs 486 allocations for 20,000 rows,
+versus 20,216 before migration, with zero net live-byte growth in the final probe.
+Budgeted probes preserve exactly the initial packed row counts; the improvements
+do not come from additional eviction. Raw JSON and verification are in `final/`.
+
+### Final validation and reproduction
+
+Rust 1.95 workspace tests pass: **472 passed, two existing environment-dependent
+tests ignored** (named pasteboard service and an explicitly supplied saved-layout
+file). All **308 VT tests** also pass with `scalar-kernels`. Workspace all-target
+checks, the x86_64 Linux VT all-target check and formatting pass. Metal-dependent
+tests ran successfully outside the sandbox. All **90 benchmark correctness
+checks** pass: 54 Rust and 36 native.
+
+The final configured differential suite passes **61,587 comparisons, zero
+failures and zero coverage gaps**, including snapshots, GHOSTSNP v1 wire data,
+page layouts, grid operations, protocols, parser/input/Unicode/OSC cases, corpus
+inputs and 100 generated cases. As before, the independent `--thorough`
+feature-completeness gate is not claimed. Ghostty production terminal sources
+are unchanged from `c366e3768`, and the native executables remain preserved.
+
+```sh
+cargo +1.95.0 test --offline --workspace --lib --tests --no-fail-fast
+cargo +1.95.0 check --offline --workspace --all-targets
+cargo +1.95.0 test --offline -p rustty-vt --lib --tests --features scalar-kernels
+cargo +1.95.0 fmt --all --check
+python3 test/rustty/parity.py --no-build \
+  --rust-bin target/packed-recovery/final/rust-oracle \
+  --zig-bin target/packed-cells/baseline/vt-oracle \
+  --artifacts target/packed-recovery/final/parity-full \
+  --snapshots --snapshot-wire --pages --page-layout --grid --protocols \
+  --parser --input --unicode --osc --corpus --generated 100 --max-failures 10000
+python3 test/rustty/bench_compare.py \
+  --before target/packed-cells/baseline/rust-primitives \
+  --scalar target/packed-recovery/baseline/rust-primitives \
+  --simd target/packed-recovery/final/rust-primitives \
+  --ghostty target/packed-cells/baseline/vt-primitives \
+  --output target/packed-recovery/final/comparison
+```
+
+All follow-up stages are independently committed. Clean source archives,
+compiler/binary manifests, raw timings in both orders, allocation/memory JSON,
+validation logs and the retained rejected experiments are under
+`target/packed-recovery/`. Final artifacts are in `final/`; renderer/application
+artifacts are in `stage4/`. The final runtime keeps 8-byte cells, page ownership,
+bounded recycling, shared immutable graphemes and the existing public interfaces.

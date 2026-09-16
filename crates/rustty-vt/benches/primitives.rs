@@ -631,5 +631,52 @@ fn history_reflow(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, primitives, chunked_input, history_reflow);
+// Match the app's default owned-history cap while retaining the same stream
+// inputs and native line limit as the uncapped primitive comparisons.
+fn memory_capped_streams(c: &mut Criterion) {
+    const MEMORY_LIMIT: usize = 50_000_000;
+    for operation in ["stream", "stream_styled"] {
+        let mut group = c.benchmark_group(format!("rustty/{operation}_memory_capped"));
+        for (name, pattern) in PATTERNS {
+            let input = input(operation, name, pattern);
+            let mut reference = setup_stream(input.as_bytes());
+            let mut terminal = setup_stream(input.as_bytes());
+            terminal.set_scrollback_memory_limit(Some(MEMORY_LIMIT));
+            assert_eq!(
+                terminal.screen().history.len(),
+                reference.screen().history.len()
+            );
+            assert!(reference.feed(input.as_bytes()).is_empty());
+            assert!(terminal.feed(input.as_bytes()).is_empty());
+            assert_eq!(
+                terminal.screen().history.len(),
+                reference.screen().history.len()
+            );
+            let checksum = check_stream(&reference, name, operation == "stream_styled");
+            assert_eq!(
+                check_stream(&terminal, name, operation == "stream_styled"),
+                checksum
+            );
+            assert!(terminal.screen().history_bytes() <= MEMORY_LIMIT);
+            group.throughput(Throughput::Bytes(input.len() as u64));
+            group.bench_function(name, |b| {
+                b.iter(|| black_box(black_box(&mut terminal).feed(black_box(input.as_bytes()))))
+            });
+            assert_eq!(
+                check_stream(&terminal, name, operation == "stream_styled"),
+                checksum
+            );
+            assert!(terminal.screen().history_bytes() <= MEMORY_LIMIT);
+        }
+        group.finish();
+    }
+}
+
+criterion_group!(
+    benches,
+    primitives,
+    chunked_input,
+    history_reflow,
+    memory_capped_streams
+);
 criterion_main!(benches);

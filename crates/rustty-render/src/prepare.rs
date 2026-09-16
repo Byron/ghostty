@@ -193,7 +193,7 @@ impl Renderer {
             self.prepare_graphics(screen, options, omit_excess_images)?;
         frame.quads.extend(below_background);
         let mut foreground = Frame::empty(options.size);
-        let viewport_start = screen.history.len().saturating_sub(screen.viewport_offset);
+        let viewport_start = screen.history_len().saturating_sub(screen.viewport_offset);
         let selection = screen.selection.and_then(|selection| {
             let start = screen
                 .all_rows()
@@ -203,7 +203,7 @@ impl Renderer {
             let b = (end, selection.end.col);
             Some((a.min(b), a.max(b), selection.rectangular))
         });
-        for (row_index, row) in screen.viewport().map(|row| screen.view(row)).enumerate() {
+        for (row_index, row) in screen.viewport().enumerate() {
             let top = options.padding[1] + row_index as f32 * metrics.cell_height as f32;
             if top >= options.size[1] as f32 {
                 break;
@@ -842,7 +842,7 @@ mod tests {
     fn selection_and_unfocused_cursor_have_explicit_geometry() {
         let mut terminal = Terminal::new(10, 2, 10);
         terminal.feed(b"hello");
-        let row = terminal.screen().rows[0].id;
+        let row = terminal.screen().row(0).id;
         terminal.screen_mut().selection = Some(Selection {
             start: GridPoint { row, col: 1 },
             end: GridPoint { row, col: 3 },

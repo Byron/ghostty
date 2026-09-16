@@ -198,10 +198,12 @@ impl Smoke {
                 }
                 {
                     let terminal = app.panes[&pane].session.terminal()?;
-                    let cells = &terminal.screen().rows[0].cells;
-                    if &*terminal.screen().cell_text(&terminal.screen().rows[0], 2) != "✔️"
-                        || (cells[2].width, cells[3].width) != (2, 0)
-                        || cells[3].style.background != vt::Color::Indexed(15)
+                    let screen = terminal.screen();
+                    let row = screen.row(0);
+                    let cells = row.cells;
+                    if &*row.text(2) != "✔️"
+                        || (cells[2].width(), cells[3].width()) != (2, 0)
+                        || row.style(3).background != vt::Color::Indexed(15)
                     {
                         return Err("emoji checkmark lost its second cell's background".into());
                     }

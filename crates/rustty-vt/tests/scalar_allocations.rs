@@ -49,7 +49,7 @@ fn feed_allocations(text: &str, count: usize) -> usize {
     let allocations = ALLOCATIONS.replace(None).unwrap();
     assert!(effects.is_empty());
     assert_eq!(
-        terminal.screen().rows[0].cells[0].codepoint,
+        terminal.screen().row(0).cells[0].codepoint(),
         text.chars().next()
     );
     ALLOCATIONS.set(Some(0));
@@ -68,7 +68,7 @@ fn feed_allocations(text: &str, count: usize) -> usize {
 #[test]
 fn scalar_printing_does_not_allocate_per_cell() {
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<TerminalCell>(), 56);
+    assert_eq!(size_of::<TerminalCell>(), 8);
 
     // Initialize process-wide Unicode tables before counting terminal printing.
     Terminal::new(128, 20, 0).feed("aé界a\u{301}".as_bytes());
@@ -96,6 +96,28 @@ fn grapheme_append_allocates_only_its_shared_payload() {
     terminal.print('\u{302}');
     assert_eq!(ALLOCATIONS.replace(None).unwrap(), 1);
     let screen = terminal.screen();
-    assert_eq!(&*screen.cell_text(&screen.rows[0], 0), "a\u{301}\u{302}");
-    assert_eq!(&*snapshot.cell_text(&snapshot.rows[0], 0), "a\u{301}");
+    assert_eq!(&*screen.cell_text(&screen.row(0), 0), "a\u{301}\u{302}");
+    assert_eq!(&*snapshot.cell_text(&snapshot.row(0), 0), "a\u{301}");
+}
+
+#[test]
+fn scrolling_exposes_initialized_page_rows_without_allocating() {
+    let mut terminal = Terminal::with_limits(80, 2, Default::default());
+    let capacity = usize::from(
+        terminal
+            .screen()
+            .page_allocations()
+            .next()
+            .unwrap()
+            .capacity
+            .rows,
+    );
+    terminal.feed(b"first\r\n");
+    let input = b"next\r\n".repeat(capacity - 2);
+    ALLOCATIONS.set(Some(0));
+    terminal.feed(&input);
+    let allocations = ALLOCATIONS.replace(None).unwrap();
+    assert_eq!(allocations, 0);
+    assert_eq!(terminal.screen().page_allocations().count(), 1);
+    assert_eq!(terminal.screen().history_len(), capacity - 2);
 }

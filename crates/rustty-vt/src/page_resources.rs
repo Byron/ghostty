@@ -1,6 +1,6 @@
 //! Page resource allocation offsets without native backing memory.
 use crate::page_layout::{BitmapLayout, SetLayout};
-use crate::screen::{Cell, Cursor, HyperlinkId, Style};
+use crate::screen::{Cursor, HyperlinkData, HyperlinkId, Style};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -80,6 +80,19 @@ impl StyleAdmission {
 }
 
 impl<T: Eq> SetAdmission<T> {
+    pub fn storage_bytes(&self) -> usize {
+        self.table.capacity() * size_of::<u16>()
+            + self.entries.capacity() * size_of::<SetEntry<T>>()
+    }
+
+    pub fn reset(&mut self) {
+        self.table.fill(0);
+        self.entries.clear();
+        self.max_psl = 0;
+        self.psl_stats.fill(0);
+        self.living = 0;
+    }
+
     pub fn new(layout: SetLayout) -> Self {
         Self {
             table: vec![0; layout.table_cap],
@@ -98,11 +111,6 @@ impl<T: Eq> SetAdmission<T> {
     #[cfg(test)]
     pub fn reference_count(&self, id: u16) -> u16 {
         self.entries[usize::from(id) - 1].references
-    }
-
-    #[cfg(test)]
-    pub fn allocated_buckets(&self) -> usize {
-        self.table.capacity()
     }
 
     pub fn get(&self, id: u16) -> &T {
@@ -297,6 +305,10 @@ impl<T: Eq> SetAdmission<T> {
     }
 
     pub fn retain(&mut self, id: u16) {
+        self.retain_many(id, 1);
+    }
+
+    pub fn retain_many(&mut self, id: u16, count: u16) {
         if id == 0 {
             return;
         }
@@ -304,17 +316,24 @@ impl<T: Eq> SetAdmission<T> {
         assert!(entry.references > 0);
         entry.references = entry
             .references
-            .checked_add(1)
+            .checked_add(count)
             .expect("native page resource reference overflow");
     }
 
     pub fn release(&mut self, id: u16) {
+        self.release_many(id, 1);
+    }
+
+    pub fn release_many(&mut self, id: u16, count: u16) {
         if id == 0 {
             return;
         }
         let entry = &mut self.entries[usize::from(id) - 1];
         assert!(entry.references > 0);
-        entry.references -= 1;
+        entry.references = entry
+            .references
+            .checked_sub(count)
+            .expect("resource reference underflow");
         if entry.references == 0 {
             self.living -= 1;
         }
@@ -372,11 +391,11 @@ pub(crate) struct Hyperlink {
 }
 
 impl Hyperlink {
-    pub fn from_cell(cell: &Cell) -> Option<Self> {
-        cell.hyperlink.as_ref().map(|link| Self {
+    pub fn from_data(link: &HyperlinkData) -> Self {
+        Self {
             id: link.id.clone().unwrap_or(HyperlinkId::Implicit(0)),
             uri: link.uri_bytes().to_vec(),
-        })
+        }
     }
 
     pub fn from_cursor(cursor: &Cursor) -> Option<Self> {
@@ -402,11 +421,13 @@ pub(crate) struct HyperlinkAdmission {
     strings: BitmapAllocator<32>,
     cells: usize,
     capacity: usize,
+    payload_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
 struct HyperlinkEntry {
     link: Hyperlink,
+    data: Arc<HyperlinkData>,
     id_allocation: Option<(usize, usize)>,
     uri_allocation: (usize, usize),
 }
@@ -419,6 +440,17 @@ impl PartialEq for HyperlinkEntry {
 
 impl Eq for HyperlinkEntry {}
 
+impl HyperlinkEntry {
+    fn payload_bytes(&self) -> usize {
+        self.link.uri.capacity()
+            + match &self.link.id {
+                HyperlinkId::Explicit(id) => id.capacity(),
+                _ => 0,
+            }
+            + self.data.storage_bytes()
+    }
+}
+
 impl HyperlinkAdmission {
     pub fn new(set: SetLayout, strings: BitmapLayout, capacity: usize) -> Self {
         Self {
@@ -426,7 +458,23 @@ impl HyperlinkAdmission {
             strings: BitmapAllocator::new(strings),
             cells: 0,
             capacity,
+            payload_bytes: 0,
         }
+    }
+
+    pub fn storage_bytes(&self) -> usize {
+        self.set.storage_bytes() + self.strings.storage_bytes() + self.payload_bytes
+    }
+
+    pub fn reset(&mut self) {
+        self.set.reset();
+        self.strings.reset();
+        self.cells = 0;
+        self.payload_bytes = 0;
+    }
+
+    pub fn data(&self, id: u16) -> &Arc<HyperlinkData> {
+        &self.set.get(id).data
     }
 
     pub fn get(&self, id: u16) -> &Hyperlink {
@@ -439,15 +487,6 @@ impl HyperlinkAdmission {
 
     pub fn release(&mut self, id: u16) {
         self.set.release(id);
-    }
-
-    /// A row rotation temporarily has both copies alive, then releases the
-    /// displaced rows. Its net cell count cannot require additional capacity.
-    pub fn retain_moved_cell(&mut self, id: u16) {
-        if id != 0 {
-            self.set.retain(id);
-            self.cells += 1;
-        }
     }
 
     pub fn retain_cell(&mut self, id: u16) -> Result<(), HyperlinkFull> {
@@ -551,12 +590,17 @@ impl HyperlinkAdmission {
         let uri_allocation = uri_allocation.unwrap();
         let entry = HyperlinkEntry {
             link: link.clone(),
+            data: Arc::new(HyperlinkData::new(&link.uri, Some(link.id.clone()))),
             id_allocation,
             uri_allocation,
         };
         let hash = hyperlink_hash(&link.id, &link.uri);
         let strings = &mut self.strings;
+        let added_bytes = entry.payload_bytes();
+        self.payload_bytes += added_bytes;
+        let payload_bytes = &mut self.payload_bytes;
         let mut deleted = |entry: HyperlinkEntry| {
+            *payload_bytes -= entry.payload_bytes();
             Self::free_strings(strings, entry.id_allocation, entry.uri_allocation);
         };
         let result = if let Some(id) = preferred.filter(|&id| id != 0) {
@@ -566,6 +610,7 @@ impl HyperlinkAdmission {
             self.set.add_hashed_with(entry, hash, &mut deleted)
         };
         if result.is_err() {
+            self.payload_bytes -= added_bytes;
             Self::free_strings(&mut self.strings, id_allocation, uri_allocation);
         }
         result.map_err(HyperlinkFull::Set)
@@ -655,6 +700,7 @@ pub(crate) struct GraphemeAdmission {
     // Only allocation starts own text; continuation chunks stay empty. Grow
     // lazily so scalar-only pages and admission probes allocate no text slots.
     texts: Vec<Option<Arc<str>>>,
+    payload_bytes: usize,
 }
 
 impl GraphemeAdmission {
@@ -664,11 +710,25 @@ impl GraphemeAdmission {
             count: 0,
             capacity,
             texts: Vec::new(),
+            payload_bytes: 0,
         }
     }
 
     pub fn used_bytes(&self) -> usize {
         self.allocator.used_bytes()
+    }
+
+    pub fn storage_bytes(&self) -> usize {
+        self.allocator.storage_bytes()
+            + self.texts.capacity() * size_of::<Option<Arc<str>>>()
+            + self.payload_bytes
+    }
+
+    pub fn reset(&mut self) {
+        self.allocator.reset();
+        self.texts.clear();
+        self.count = 0;
+        self.payload_bytes = 0;
     }
 
     pub fn text(&self, allocation: GraphemeAllocation) -> &str {
@@ -698,34 +758,10 @@ impl GraphemeAdmission {
 
     pub fn set_text(&mut self, allocation: GraphemeAllocation, text: Arc<str>) {
         debug_assert_eq!(text.chars().count(), usize::from(allocation.len) + 1);
-        *self.text_slot(allocation) = Some(text);
-    }
-
-    /// Copy visible owners without repacking runs into a different layout.
-    pub fn clone_subset(&self, allocations: impl Iterator<Item = GraphemeAllocation>) -> Self {
-        let mut result = Self {
-            allocator: BitmapAllocator {
-                bitmaps: vec![0; self.allocator.bitmaps.len()],
-                chunks_start: self.allocator.chunks_start,
-                search_start: 0,
-            },
-            count: 0,
-            capacity: self.capacity,
-            texts: Vec::new(),
-        };
-        for allocation in allocations {
-            let chunk = (allocation.offset.get() as usize - result.allocator.chunks_start) / 16;
-            let chunks = usize::from(allocation.len).div_ceil(4);
-            result.allocator.set_bits(chunk, chunks, true);
-            assert!(
-                result
-                    .text_slot(allocation)
-                    .replace(self.text_arc(allocation))
-                    .is_none()
-            );
-            result.count += 1;
+        self.payload_bytes += text.len() + 2 * size_of::<usize>();
+        if let Some(previous) = self.text_slot(allocation).replace(text) {
+            self.payload_bytes -= previous.len() + 2 * size_of::<usize>();
         }
-        result
     }
 
     pub fn acquire(&mut self, len: u8) -> Result<GraphemeAllocation, SetFull> {
@@ -781,8 +817,8 @@ impl GraphemeAdmission {
         );
         self.count -= 1;
         let index = self.text_index(allocation);
-        if let Some(slot) = self.texts.get_mut(index) {
-            *slot = None;
+        if let Some(text) = self.texts.get_mut(index).and_then(Option::take) {
+            self.payload_bytes -= text.len() + 2 * size_of::<usize>();
         }
     }
 
@@ -823,6 +859,15 @@ pub(crate) struct BitmapAllocator<const CHUNK: usize> {
 }
 
 impl<const CHUNK: usize> BitmapAllocator<CHUNK> {
+    fn storage_bytes(&self) -> usize {
+        self.bitmaps.capacity() * size_of::<u64>()
+    }
+
+    fn reset(&mut self) {
+        self.bitmaps.fill(0);
+        self.search_start = 0;
+    }
+
     pub fn new(layout: BitmapLayout) -> Self {
         assert!(CHUNK.is_power_of_two());
         let capacity = layout
@@ -1424,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn grapheme_subset_keeps_offsets_when_repacking_would_exhaust_capacity() {
+    fn grapheme_clones_keep_offsets_when_repacking_would_exhaust_capacity() {
         let mut source = GraphemeAdmission {
             allocator: allocator::<16>(2),
             capacity: 128,
@@ -1455,7 +1500,7 @@ mod tests {
                 .any(|allocation| repacked.acquire(allocation.len).is_err())
         );
 
-        let snapshot = source.clone_subset(reordered.iter().copied());
+        let snapshot = source.clone();
         snapshot.assert_allocations(reordered.iter().copied());
         for allocation in &reordered {
             assert!(Arc::ptr_eq(
@@ -1463,7 +1508,10 @@ mod tests {
                 &snapshot.text_arc(*allocation)
             ));
         }
-        let mut subset = source.clone_subset(std::iter::once(reordered[0]));
+        let mut subset = source.clone();
+        for &allocation in &reordered[1..] {
+            subset.release(allocation);
+        }
         subset.assert_allocations(std::iter::once(reordered[0]));
         assert_eq!(subset.texts.iter().flatten().count(), 1);
         subset.release(reordered[0]);
@@ -1502,7 +1550,7 @@ mod tests {
         }
         assert_eq!(graphemes.texts.len(), 49);
         assert_eq!(graphemes.texts.iter().flatten().count(), 4);
-        let snapshot = graphemes.clone_subset(std::iter::once(allocations[3]));
+        let snapshot = graphemes.clone();
         graphemes.release(allocations[3]);
         let reused = graphemes.acquire(64).unwrap();
         assert_eq!(reused, allocations[3]);

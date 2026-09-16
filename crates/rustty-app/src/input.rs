@@ -1034,7 +1034,7 @@ mod tests {
         let screen = terminal.screen_mut();
         screen.viewport_offset = 5;
         let point = vt::GridPoint {
-            row: screen.rows[0].id,
+            row: screen.row(0).id,
             col: 0,
         };
         screen.selection = Some(vt::Selection {

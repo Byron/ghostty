@@ -2117,9 +2117,9 @@ impl App {
                     && let Ok(mut terminal) = pane.session.terminal()
                 {
                     let screen = terminal.screen_mut();
-                    let rows = screen.rows.len() as isize;
+                    let rows = screen.height() as isize;
                     match action {
-                        Action::ScrollToTop => screen.viewport_offset = screen.history.len(),
+                        Action::ScrollToTop => screen.viewport_offset = screen.history_len(),
                         Action::ScrollToBottom => screen.viewport_offset = 0,
                         Action::ScrollPageUp => screen.scroll_viewport(rows),
                         Action::ScrollPageDown => screen.scroll_viewport(-rows),
@@ -2129,14 +2129,14 @@ impl App {
                             }
                         }
                         Action::JumpToPrompt(offset) => {
-                            let start = screen.history.len().saturating_sub(screen.viewport_offset);
+                            let start = screen.history_len().saturating_sub(screen.viewport_offset);
                             let prompts = screen
                                 .all_rows()
                                 .enumerate()
                                 .filter(|(_, r)| {
                                     r.cells
                                         .iter()
-                                        .any(|c| c.semantic == vt::SemanticContent::Prompt)
+                                        .any(|c| c.semantic() == vt::SemanticContent::Prompt)
                                 })
                                 .map(|(i, _)| i)
                                 .collect::<Vec<_>>();
@@ -2156,7 +2156,7 @@ impl App {
                             };
                             if let Some(target) = target {
                                 screen.viewport_offset =
-                                    screen.history.len().saturating_sub(target);
+                                    screen.history_len().saturating_sub(target);
                             }
                         }
                         _ => {}
@@ -2532,7 +2532,7 @@ impl App {
 fn reveal(screen: &mut vt::Screen, point: vt::GridPoint) {
     let index = screen.all_rows().position(|row| row.id == point.row);
     if let Some(index) = index {
-        screen.viewport_offset = screen.history.len().saturating_sub(index);
+        screen.viewport_offset = screen.history_len().saturating_sub(index);
     }
 }
 
@@ -3629,10 +3629,10 @@ impl App {
             let screen = terminal.screen();
             let row = screen.viewport().nth((position.y / cell.y) as usize)?;
             let mut col = (position.x / cell.x) as usize;
-            if row.cells.get(col)?.spacer_head {
+            if row.cells.get(col)?.spacer_head() {
                 return None;
             }
-            if row.cells[col].width == 0 && col > 0 {
+            if row.cells[col].width() == 0 && col > 0 {
                 col -= 1;
             }
             let point = vt::GridPoint { row: row.id, col };
@@ -3928,7 +3928,7 @@ fn link_bounds(
                     + rows[index]
                         .cells
                         .get(link.end.col)
-                        .map_or(1, |cell| usize::from(cell.width.max(1)))
+                        .map_or(1, |cell| usize::from(cell.width().max(1)))
             } else {
                 rows[index].cells.len()
             };
@@ -5147,7 +5147,7 @@ mod tests {
         assert!(!prepared.matches(&key(&terminal), &fonts));
         terminal.screen_mut().scroll_viewport(-1);
         let point = vt::GridPoint {
-            row: terminal.screen().rows[0].id,
+            row: terminal.screen().row(0).id,
             col: 0,
         };
         terminal.screen_mut().selection = Some(vt::Selection {

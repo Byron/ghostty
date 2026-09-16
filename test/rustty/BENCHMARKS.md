@@ -2523,3 +2523,14 @@ threshold in either order; the Chinese printing gain passes the 5% gate.
 This is a focused stage comparison. The complete 54-workload and native timing
 table will be refreshed at the next checkpoint; the preceding Ghostty table
 still describes step 4.
+
+### Step 8a: reject standard-library validation before chunk iteration
+
+Trying `str::from_utf8` before the existing malformed/partial-input fallback
+passes parser, batched-input and benchmark checks, but none of the six Unicode
+feed/stream cases improves by 5% in both orders. Chinese feed changes from
+4.398 to 4.577 µs (1.040×/1.042×), and Chinese scrolling from 18.637 to 19.250 µs
+(1.039×/1.029×). Combining feed improves only 0.966×/0.975×; its stream is
+0.995×/0.995×. The extra validation attempt is removed. All 50 samples per
+direction, the frozen candidate and its patch remain in
+`target/packed-simplify/step8-std/`.

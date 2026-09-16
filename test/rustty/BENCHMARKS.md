@@ -1775,3 +1775,37 @@ repeat are in `target/packed-recovery/utf8-candidate/`. All current ARM builds
 inherit `-C target-cpu=native` from `/Users/byron/dev/.cargo/config.toml`, including
 both clean application snapshots and both sides of these kernel comparisons.
 The x86 check overrides it with `-C target-cpu=x86-64`.
+
+
+#### Grapheme transition table: rejected
+
+A separate candidate derived all 1,445 canonical transitions at compile time
+from the existing rules, retained the ordinary-character shortcut, and called
+the reference rules for noncanonical inputs. All 16,777,216 combinations of
+u8 state and input classes matched the reference; 309 VT tests and 484 selected
+Unicode parity comparisons passed.
+
+All 12 complete feed/plain-stream/styled-stream cases ran with 50 samples in
+each direction against the accepted UTF-8 decoder. None improved by 5% in both
+orders. The best repeatable feed gain was only about 1.4% for combining text,
+so the candidate was removed and the original rule implementation retained.
+No all-54 acceptance run was needed after the gain gate failed.
+
+| Workload | Original rules µs | Table µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| feed/ascii | 1.064 | 1.066 | 1.002× | 1.002× |
+| feed/chinese | 4.767 | 4.777 | 1.005× | 1.000× |
+| feed/combining | 52.387 | 51.730 | 0.986× | 0.986× |
+| feed/emoji | 51.323 | 51.927 | 1.013× | 1.010× |
+| stream/ascii | 22.804 | 22.714 | 0.993× | 0.996× |
+| stream/chinese | 31.707 | 31.651 | 1.004× | 0.996× |
+| stream/combining | 654.210 | 671.122 | 1.001× | 1.046× |
+| stream/emoji | 759.141 | 762.450 | 1.016× | 0.993× |
+| stream_styled/ascii | 27.307 | 27.459 | 1.005× | 1.007× |
+| stream_styled/chinese | 36.861 | 36.645 | 0.993× | 0.996× |
+| stream_styled/combining | 731.380 | 735.109 | 1.016× | 0.993× |
+| stream_styled/emoji | 876.222 | 871.709 | 0.990× | 1.002× |
+
+The rejected source patch, binary, tests and raw timings remain in
+`target/packed-recovery/grapheme-table-candidate/`. The shipped runtime contains
+no transition table or fallback machinery from this experiment.

@@ -1868,8 +1868,7 @@ impl App {
                     }
                 } else if let Some(target) = target {
                     if !quadrant && let Some(tab) = self.tab_mut(host.id) {
-                        // Ordinary navigation reveals the quadrant layer below full zoom.
-                        tab.zoom = tab.quadrant_zoom;
+                        tab.zoom = tab.pane_navigation_zoom(target);
                     }
                     host.navigation_warning = None;
                     self.focus_pane(host.id, target);

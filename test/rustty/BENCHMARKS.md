@@ -2437,3 +2437,44 @@ storage-recovery snapshots. They are not measurements of the final bookkeeping
 changes or of the low-latency policy. All follow-up source archives, manifests,
 validation logs, timings and rejected/control measurements are retained under
 `target/packed-simplify/`.
+
+## Further progress toward Ghostty, 2026-09-16
+
+### Step 5: reuse the width already validated for printing
+
+Printing first widens the current physical page to the logical screen width.
+Cursor clamping now uses that established width directly, avoiding a second
+page lookup. Other cursor operations retain physical-width clamping. There is
+no additional cached state. The regression test covers narrow pages, public
+cursor edits, scalar/batched printing and both screens.
+
+All 311 VT tests, 57 benchmark correctness checks and 13,652 page, snapshot-wire
+and grid comparisons pass. The 14 allocation observations exactly match step 4.
+Frozen sources, binaries and validation are in `target/packed-simplify/step5/`.
+
+The focused eight-case comparison is followed by all 54 workloads, with 50
+samples per direction and the existing compiler/profile guard. Medians below
+are microseconds; ratios divide step 5 by step 4. Large-page cases use the
+separate supplemental comparison.
+
+| Workload | Step 4 µs | Step 5 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| print/ascii | 13.639 | 11.916 | 0.862× | 0.885× |
+| print/chinese | 26.330 | 24.741 | 0.937× | 0.942× |
+| print/combining | 40.905 | 37.365 | 0.917× | 0.910× |
+| print/emoji | 42.277 | 41.554 | 0.960× | 0.993× |
+| feed/ascii | 0.921 | 0.876 | 0.963× | 0.940× |
+| stream/ascii | 10.133 | 9.821 | 0.994× | 0.966× |
+| stream/chinese | 19.016 | 18.971 | 1.005× | 0.997× |
+| stream_styled/ascii | 14.007 | 13.690 | 0.970× | 0.983× |
+| page_spans/print | 42.026 | 37.199 | 0.887× | 0.879× |
+| page_spans/stream | 10.982 | 10.995 | 0.998× | 1.004× |
+| page_spans/styled | 11.631 | 11.602 | 0.999× | 0.995× |
+
+ASCII printing improves about 13%, Chinese printing 6% and combining printing
+9%; the large-page printing case improves 11–12%. The only full-run flag,
+emoji reflow at 1.184×/1.006×, does not reproduce: its repeat is
+1.004×/0.989×. No regression above 3% is confirmed. Original measurements and
+the confirmation remain in `comparison/`, `confirmation/` and `supplemental/`.
+Ghostty was not remeasured for this individual step; the preceding native table
+remains tied to its stated runtime until the next complete native comparison.

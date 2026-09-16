@@ -168,6 +168,43 @@ fn scrolling_widens_all_active_pages_after_restore() {
 }
 
 #[test]
+fn printing_widens_before_clamping_public_cursor_edits() {
+    for alternate in [false, true] {
+        for batched in [false, true] {
+            for col in [3, usize::MAX] {
+                let mut terminal = Terminal::new(8, 2, 0);
+                if alternate {
+                    terminal.feed(b"\x1b[?1049h");
+                }
+                let screen = terminal.screen_mut();
+                screen.pages = PageList::default();
+                screen.pages.append(
+                    PageCapacity {
+                        cols: 4,
+                        rows: 2,
+                        ..PageCapacity::STANDARD
+                    },
+                    2,
+                );
+                screen.pages.pages[0].row_ids[..2].copy_from_slice(&[0, 1]);
+                screen.cursor.col = col;
+                if batched {
+                    terminal.feed(b"X");
+                } else {
+                    terminal.print('X');
+                }
+                let screen = terminal.screen();
+                assert_eq!(screen.row(0).cells.len(), 8);
+                assert_eq!(screen.row(0).cells[col.min(7)].codepoint(), Some('X'));
+                assert_eq!(screen.cursor.col, col.min(7).saturating_add(1).min(7));
+                assert_eq!(screen.cursor.pending_wrap, col >= 7);
+                assert_references(screen);
+            }
+        }
+    }
+}
+
+#[test]
 fn plain_copies_release_payload_charges() {
     for whole_row in [false, true] {
         let mut terminal = Terminal::new(8, 2, 0);

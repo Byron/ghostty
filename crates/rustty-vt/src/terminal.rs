@@ -933,7 +933,8 @@ impl Terminal {
         }
         while !bytes.is_empty() {
             self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
-            self.clamp_cursor();
+            let col = self.screen().cursor.col.min(usize::from(self.cols) - 1);
+            self.screen_mut().cursor.col = col;
             // Reuse scalar wrapping, including margins, scrolling and prompt state.
             if self.screen().cursor.pending_wrap {
                 self.print(char::from(bytes[0]));
@@ -1043,7 +1044,9 @@ impl Terminal {
             return;
         }
         self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
-        self.clamp_cursor();
+        // The row now spans the logical screen, so clamping needs no page lookup.
+        let col = self.screen().cursor.col.min(usize::from(self.cols) - 1);
+        self.screen_mut().cursor.col = col;
         let cursor = &self.screen().cursor;
         let (col, pending_wrap) = (cursor.col, cursor.pending_wrap);
         let right = if col > self.margins.right {

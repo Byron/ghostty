@@ -2489,3 +2489,37 @@ qualifies; ASCII and Chinese streams take 1.012×/1.019× and 1.018×/1.015× as
 long. Emoji printing also flags 1.001×/1.062×, without a confirmation run since
 the candidate is already rejected. The annotation is reverted. Its frozen
 binaries, patch and complete measurements remain in `target/packed-simplify/step6/`.
+
+### Step 7: inspect the preceding Unicode cell through one row
+
+Unicode printing now borrows the cursor row once to find the preceding cell,
+its width and its last grapheme scalar. This replaces repeated page lookups and
+removes the unused cursor-cell adapter. ASCII retains its existing path; no
+cache or stored state is added.
+
+All 311 VT tests, 57 benchmark correctness checks and 13,652 page, snapshot-wire
+and grid comparisons pass. All 14 allocation/memory observations exactly match
+step 5. Frozen sources, binaries, validation and the subsequent matched
+emoji-printing profiles are in `target/packed-simplify/step7/`.
+
+The 22 affected print/feed/stream workloads were measured against step 5 with
+50 samples in each order, including styled output and mixed/chunked input.
+Times below are pooled medians in microseconds. None crosses the 3% regression
+threshold in either order; the Chinese printing gain passes the 5% gate.
+
+| Workload | Step 5 µs | Step 7 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| print/ascii | 11.995 | 12.024 | 1.000× | 1.003× |
+| print/chinese | 25.004 | 23.316 | 0.935× | 0.937× |
+| print/combining | 38.061 | 37.612 | 0.978× | 1.007× |
+| print/emoji | 40.897 | 37.806 | 0.905× | 0.952× |
+| feed/emoji | 45.154 | 42.609 | 0.918× | 0.952× |
+| stream/ascii | 9.720 | 9.650 | 0.983× | 0.996× |
+| stream/chinese | 18.672 | 18.655 | 1.001× | 0.998× |
+| stream/emoji | 603.569 | 575.796 | 0.953× | 0.955× |
+| stream_styled/emoji | 723.677 | 700.083 | 0.970× | 0.969× |
+| chunked_stream_mixed/7_bytes | 305.667 | 298.146 | 0.975× | 0.976× |
+
+This is a focused stage comparison. The complete 54-workload and native timing
+table will be refreshed at the next checkpoint; the preceding Ghostty table
+still describes step 4.

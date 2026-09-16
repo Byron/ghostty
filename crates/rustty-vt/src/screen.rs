@@ -744,12 +744,6 @@ impl Screen {
         usize::from(self.pages.pages[index].columns)
     }
     #[inline]
-    pub(crate) fn cursor_cell(&self, col: usize) -> Cell {
-        let (index, row) = self.cursor_location();
-        let page = &self.pages.pages[index];
-        page.cells[page.slot(row, col)]
-    }
-    #[inline]
     pub(crate) fn cursor_row(&self) -> Row<'_> {
         let (index, row) = self.cursor_location();
         self.pages.pages[index].row(row)

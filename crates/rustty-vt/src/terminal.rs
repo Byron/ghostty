@@ -1054,63 +1054,62 @@ impl Terminal {
         } else {
             self.margins.right
         };
-        let previous_col = if cp as u32 <= 255 {
+        let previous = if cp as u32 <= 255 {
             None
-        } else if pending_wrap && self.modes.dec(7) {
-            Some(col)
-        } else if self.modes.dec(2027)
-            && !self.modes.dec(7)
-            && col == right
-            && self.screen().cursor_cell(right).codepoint().is_some()
-        {
-            Some(right)
         } else {
-            col.checked_sub(1)
-        };
-        let previous_col = previous_col.map(|col| {
-            if self.screen().cursor_cell(col).width() == 0 {
-                col.saturating_sub(1)
+            let row = self.screen().cursor_row();
+            let previous_col = if pending_wrap && self.modes.dec(7) {
+                Some(col)
+            } else if self.modes.dec(2027)
+                && !self.modes.dec(7)
+                && col == right
+                && row.cells[right].codepoint().is_some()
+            {
+                Some(right)
             } else {
-                col
-            }
-        });
+                col.checked_sub(1)
+            };
+            previous_col.map(|previous_col| {
+                let previous_col = if row.cells[previous_col].width() == 0 {
+                    previous_col.saturating_sub(1)
+                } else {
+                    previous_col
+                };
+                let cell = row.cells[previous_col];
+                let last = if cell.has_grapheme() && self.modes.dec(2027) && col > 0 {
+                    row.text(previous_col).chars().last()
+                } else {
+                    cell.codepoint()
+                };
+                (previous_col, cell, last)
+            })
+        };
 
         if cp as u32 > 255
             && self.modes.dec(2027)
             && col > 0
-            && let Some(col) = previous_col
+            && let Some((col, previous, Some(last))) = previous
         {
-            let previous = self.screen().cursor_cell(col);
             let previous_width = previous.width();
-            let last = if previous.has_grapheme() {
-                self.screen()
-                    .cell_text(self.screen().row(self.screen().cursor.row), col)
-                    .chars()
-                    .last()
-            } else {
-                previous.codepoint()
-            };
-            if let Some(last) = last {
-                let old_state = self.grapheme_state;
-                let last_prop = properties(last);
-                if !unicode::grapheme_break_properties(
-                    last_prop.grapheme,
-                    prop.grapheme,
-                    &mut self.grapheme_state,
-                ) {
-                    let mut width = previous_width;
-                    if matches!(cp, '\u{fe0f}' | '\u{fe0e}') {
-                        if !last_prop.emoji_vs_base {
-                            self.grapheme_state = old_state;
-                            return;
-                        }
-                        width = if cp == '\u{fe0f}' { 2 } else { 1 };
-                    } else if !prop.zero_in_grapheme {
-                        width = 2;
+            let old_state = self.grapheme_state;
+            let last_prop = properties(last);
+            if !unicode::grapheme_break_properties(
+                last_prop.grapheme,
+                prop.grapheme,
+                &mut self.grapheme_state,
+            ) {
+                let mut width = previous_width;
+                if matches!(cp, '\u{fe0f}' | '\u{fe0e}') {
+                    if !last_prop.emoji_vs_base {
+                        self.grapheme_state = old_state;
+                        return;
                     }
-                    self.append_grapheme(col, cp, width, right);
-                    return;
+                    width = if cp == '\u{fe0f}' { 2 } else { 1 };
+                } else if !prop.zero_in_grapheme {
+                    width = 2;
                 }
+                self.append_grapheme(col, cp, width, right);
+                return;
             }
         }
         let width = if cp as u32 <= 255 { 1 } else { prop.width };
@@ -1118,8 +1117,7 @@ impl Terminal {
             if self.modes.dec(2027) {
                 return;
             }
-            if let Some(col) = previous_col {
-                let previous = self.screen().cursor_cell(col);
+            if let Some((col, previous, _)) = previous {
                 if previous.codepoint().is_none() {
                     return;
                 }

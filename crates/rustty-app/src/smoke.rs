@@ -776,6 +776,7 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
             std::mem::take(&mut pane.input),
             std::mem::take(&mut pane.input_bytes),
             pane.mouse_cell.take(),
+            std::mem::take(&mut pane.scroll),
         ));
         // Hold encoded reports in the existing queue instead of sending them to a shell.
         pane.input.push_back(Vec::new());
@@ -807,6 +808,24 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
         }
         check_link_hover(app, host, focused, hovered)?;
         host.mouse = host.rects[&hovered].center();
+        let pixels = f64::from(host.fonts.metrics().cell_height) * host.window.scale_factor() / 2.0;
+        // Fractional movement, a reversal, then a decaying native momentum tail.
+        // The final reverse scroll returns the viewport and remainder to zero.
+        let trackpad = [
+            (0.25, 0_isize),
+            (0.25, 0),
+            (0.0, 0),
+            (-0.125, 0),
+            (0.25, 0),
+            (0.375, 1),
+            (1.5, 1),
+            (0.75, 1),
+            (0.375, 0),
+            (0.1875, 0),
+            (0.125, 0),
+            (0.0625, 1),
+            (-4.0, -4),
+        ];
         for (focused_mode, hovered_mode, shift, capture) in [
             (0, 0, false, false),
             (1000, 0, false, false),
@@ -833,13 +852,30 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
                 });
             }
             let reporting = hovered_mode != 0 && (!shift || capture);
-            let pixels = f64::from(host.fonts.metrics().cell_height);
-            for (delta, offset, code) in [
-                (MouseScrollDelta::LineDelta(0.0, 1.0), 3, 64),
-                (MouseScrollDelta::PixelDelta((0.0, pixels).into()), 6, 64),
-                (MouseScrollDelta::LineDelta(0.0, -1.0), 3, 65),
-                (MouseScrollDelta::PixelDelta((0.0, -pixels).into()), 0, 65),
-            ] {
+            let mut offset = 0;
+            for (delta, rows, reports, code) in [
+                (MouseScrollDelta::LineDelta(0.0, 1.0), 3, 1, 64),
+                (MouseScrollDelta::PixelDelta((0.0, pixels).into()), 1, 1, 64),
+                (MouseScrollDelta::LineDelta(0.0, -1.0), -3, 1, 65),
+                (
+                    MouseScrollDelta::PixelDelta((0.0, -pixels).into()),
+                    -1,
+                    1,
+                    65,
+                ),
+                (MouseScrollDelta::LineDelta(0.0, 0.1), 0, 1, 64),
+                (MouseScrollDelta::LineDelta(0.0, -0.1), 0, 1, 65),
+            ]
+            .into_iter()
+            .chain(trackpad.into_iter().map(|(fraction, rows)| {
+                (
+                    MouseScrollDelta::PixelDelta((0.0, fraction * pixels).into()),
+                    rows,
+                    rows.unsigned_abs(),
+                    if rows > 0 { 64 } else { 65 },
+                )
+            })) {
+                offset += rows;
                 app.scroll(host, delta);
                 let focused_pane = &app.panes[&focused];
                 if app.focused(host.id) != Some(focused)
@@ -852,17 +888,33 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
                 }
                 let pane = app.panes.get_mut(&hovered).unwrap();
                 if pane.session.terminal()?.screen().viewport_offset
-                    != if reporting { 0 } else { offset }
-                    || pane.input.len() != if reporting { 2 } else { 1 }
+                    != if reporting { 0 } else { offset as usize }
+                    || pane.input.len() != if reporting { 1 + reports } else { 1 }
                     || reporting
-                        && !pane.input.back().unwrap().starts_with(
-                            format!("\x1b[<{};", code + if shift { 4 } else { 0 }).as_bytes(),
-                        )
+                        && pane.input.iter().skip(1).any(|bytes| {
+                            !bytes.starts_with(
+                                format!("\x1b[<{};", code + if shift { 4 } else { 0 }).as_bytes(),
+                            )
+                        })
                 {
                     return Err(format!("hovered pane did not scroll correctly: {delta:?}, mouse modes {focused_mode}/{hovered_mode}, shift={shift}").into());
                 }
                 if reporting {
-                    pane.input.pop_back();
+                    pane.input.truncate(1);
+                    pane.input_bytes = 0;
+                }
+            }
+            if reporting {
+                for sign in [1.0, -1.0] {
+                    app.scroll(
+                        host,
+                        MouseScrollDelta::PixelDelta((0.0, sign * pixels * 200.0).into()),
+                    );
+                    let pane = app.panes.get_mut(&hovered).unwrap();
+                    if pane.input.len() != 129 {
+                        return Err("precise scroll exceeded the mouse-report limit".into());
+                    }
+                    pane.input.truncate(1);
                     pane.input_bytes = 0;
                 }
             }
@@ -880,16 +932,40 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
                 terminal.set_mode(true, 1007, enabled);
                 terminal.set_mode(true, 1, application);
             }
-            for (lines, key) in [(1.0, b'A'), (-1.0, b'B')] {
-                app.scroll(host, MouseScrollDelta::LineDelta(0.0, lines));
+            for (delta, rows) in [
+                (MouseScrollDelta::LineDelta(0.0, 1.0), 3),
+                (MouseScrollDelta::LineDelta(0.0, -1.0), -3),
+                (
+                    MouseScrollDelta::PixelDelta((0.0, pixels * 200.0).into()),
+                    128,
+                ),
+                (
+                    MouseScrollDelta::PixelDelta((0.0, -pixels * 200.0).into()),
+                    -128,
+                ),
+            ]
+            .into_iter()
+            .chain(trackpad.into_iter().map(|(fraction, rows)| {
+                (
+                    MouseScrollDelta::PixelDelta((0.0, fraction * pixels).into()),
+                    rows,
+                )
+            })) {
+                app.scroll(host, delta);
                 let pane = app.panes.get_mut(&hovered).unwrap();
-                let expected = [0x1b, if application { b'O' } else { b'[' }, key].repeat(3);
-                if pane.input.len() != if enabled { 2 } else { 1 }
-                    || enabled && pane.input.back() != Some(&expected)
+                let expected = [
+                    0x1b,
+                    if application { b'O' } else { b'[' },
+                    if rows > 0 { b'A' } else { b'B' },
+                ]
+                .repeat(rows.unsigned_abs());
+                let emitted = enabled && rows != 0;
+                if pane.input.len() != if emitted { 2 } else { 1 }
+                    || emitted && pane.input.back() != Some(&expected)
                 {
                     return Err("alternate scroll ignored mode 1007 or cursor-key mode".into());
                 }
-                if enabled {
+                if emitted {
                     pane.input.pop_back();
                     pane.input_bytes = 0;
                 }
@@ -963,12 +1039,13 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
         }
         Ok(())
     })();
-    for (id, terminal, input, input_bytes, mouse_cell) in saved {
+    for (id, terminal, input, input_bytes, mouse_cell, scroll) in saved {
         let pane = app.panes.get_mut(&id).unwrap();
         *pane.session.terminal()? = terminal;
         pane.input = input;
         pane.input_bytes = input_bytes;
         pane.mouse_cell = mouse_cell;
+        pane.scroll = scroll;
     }
     host.mouse = mouse;
     host.modifiers = modifiers;
@@ -987,7 +1064,9 @@ fn check_pointer_targets(app: &mut App, host: &mut Host) -> Result<()> {
     };
     let _ = host.egui.on_window_event(&host.window, &event);
     result?;
-    eprintln!("Native smoke: scrolling and file drops followed the pointer without changing focus");
+    eprintln!(
+        "Native smoke: trackpad momentum, scrolling, and file drops followed the pointer without changing focus"
+    );
     Ok(())
 }
 

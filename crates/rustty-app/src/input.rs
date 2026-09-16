@@ -24,6 +24,23 @@ pub fn mouse_reporting(
     terminal.mouse_mode != 0 && (!modifiers.shift_key() || capture)
 }
 
+/// Convert precise scrolling to terminal rows without losing the momentum tail.
+#[derive(Default)]
+pub struct ScrollAccumulator {
+    pending_rows: f64,
+}
+
+impl ScrollAccumulator {
+    pub fn take_pixels(&mut self, pixels: f64, scale_factor: f64, cell_height: u32) -> isize {
+        // Winit scales AppKit's logical deltas to physical pixels. Ghostty
+        // instead doubles the logical delta before dividing by the cell height.
+        self.pending_rows += pixels / scale_factor * 2.0 / f64::from(cell_height);
+        let rows = self.pending_rows.trunc();
+        self.pending_rows -= rows;
+        rows as isize
+    }
+}
+
 /// Selection begins on pointer movement, including movement within one cell.
 pub struct SelectionDrag {
     anchor: vt::GridPoint,
@@ -505,6 +522,56 @@ pub fn chord_held(chord: config::Modifiers, current: config::Modifiers) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn precise_scroll_preserves_small_deltas_and_the_decaying_tail() {
+        let cell_height = 32;
+        for sign in [1.0, -1.0] {
+            let mut scroll = ScrollAccumulator::default();
+            for (rows, expected) in [
+                (0.25, 0),
+                (0.25, 0),
+                (0.0, 0), // Finger release must not discard the pending half row.
+                (-0.125, 0),
+                (0.25, 0),
+                (0.375, 1),
+                (1.5, 1),
+                (0.75, 1),
+                (0.375, 0),
+                (0.1875, 0),
+                (0.125, 0),
+                (0.0625, 1), // The smallest momentum event still completes a row.
+                (0.0, 0),
+            ] {
+                assert_eq!(
+                    scroll.take_pixels(sign * rows * f64::from(cell_height), 2.0, cell_height),
+                    expected * sign as isize,
+                    "{sign} {rows}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn precise_scroll_matches_ghostty_scaling_and_keeps_panes_independent() {
+        for scale in [1.0, 2.0] {
+            let mut first = ScrollAccumulator::default();
+            let mut second = ScrollAccumulator::default();
+            let cell_height = (16.0 * scale) as u32;
+            // Winit supplies physical pixels; Ghostty doubles logical points.
+            let pixels = 6.0 * scale;
+            assert_eq!(first.take_pixels(pixels, scale, cell_height), 0);
+            assert_eq!(second.take_pixels(0.0, scale, cell_height), 0);
+            assert_eq!(second.take_pixels(pixels, scale, cell_height), 0);
+            assert_eq!(
+                first.take_pixels(pixels, scale, cell_height),
+                if scale == 1.0 { 1 } else { 0 }
+            );
+            assert_eq!(first.take_pixels(pixels, scale, cell_height), 1);
+            assert_eq!(second.take_pixels(-pixels, scale, cell_height), 0);
+            assert_eq!(second.take_pixels(0.0, scale, cell_height), 0);
+        }
+    }
 
     #[test]
     fn shift_mouse_capture_follows_application_requests_and_user_overrides() {

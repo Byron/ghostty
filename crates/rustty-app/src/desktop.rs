@@ -72,6 +72,7 @@ struct Pane {
     exit_message: Option<String>,
     links: vt::search::LinkMatcher,
     mouse_cell: Option<[u16; 2]>,
+    scroll: input::ScrollAccumulator,
     sync_output: SynchronizedOutput,
 }
 impl Pane {
@@ -991,6 +992,7 @@ impl App {
                 exit_message: None,
                 links: vt::search::LinkMatcher::default(),
                 mouse_cell: None,
+                scroll: input::ScrollAccumulator::default(),
                 sync_output: SynchronizedOutput::default(),
             },
         );
@@ -3508,12 +3510,6 @@ impl App {
         {
             return;
         }
-        let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y,
-            MouseScrollDelta::PixelDelta(pos) => {
-                pos.y as f32 / host.fonts.metrics().cell_height as f32
-            }
-        };
         if let Some(id) = host.hovered_pane() {
             let mut cursor_keys = None;
             let mouse = self
@@ -3529,12 +3525,23 @@ impl App {
                     })
                 })
                 .unwrap_or(false);
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, y) if mouse => y.abs().ceil().copysign(y) as isize,
+                MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
+                MouseScrollDelta::PixelDelta(pos) => self.panes.get_mut(&id).map_or(0, |pane| {
+                    pane.scroll.take_pixels(
+                        pos.y,
+                        host.window.scale_factor(),
+                        host.fonts.metrics().cell_height,
+                    )
+                }),
+            };
             if mouse {
-                for _ in 0..lines.abs().ceil().min(128.0) as usize {
+                for _ in 0..rows.unsigned_abs().min(128) {
                     self.mouse(
                         host,
                         vt::MouseAction::Press,
-                        Some(if lines > 0.0 {
+                        Some(if rows > 0 {
                             vt::MouseButton::WheelUp
                         } else {
                             vt::MouseButton::WheelDown
@@ -3550,20 +3557,18 @@ impl App {
                 {
                     // Like Ghostty, alternate scroll emits ordinary cursor keys,
                     // independent of Kitty keyboard flags and held modifiers.
-                    let count = (lines * 3.0).abs().round().min(128.0) as usize;
+                    let count = rows.unsigned_abs().min(128);
                     let sequence = [
                         0x1b,
                         if terminal.modes.dec(1) { b'O' } else { b'[' },
-                        if lines > 0.0 { b'A' } else { b'B' },
+                        if rows > 0 { b'A' } else { b'B' },
                     ];
                     if count != 0 {
                         terminal.screen_mut().selection = None;
                     }
                     cursor_keys = Some(sequence.repeat(count));
                 } else {
-                    terminal
-                        .screen_mut()
-                        .scroll_viewport((lines * 3.0).round() as isize);
+                    terminal.screen_mut().scroll_viewport(rows);
                 }
             }
             if let Some(bytes) = cursor_keys {

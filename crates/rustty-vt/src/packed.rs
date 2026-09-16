@@ -1,7 +1,7 @@
 //! Ghostty's cell and row bit layouts. Resource identities belong to the page.
 use crate::screen::{Color, SemanticContent};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(transparent)]
 pub struct Cell(u64);
 

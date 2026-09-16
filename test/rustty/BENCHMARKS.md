@@ -1373,3 +1373,57 @@ Their source is [allocations.rs](allocations.rs); it uses APIs shared with the
 baseline and runs unchanged on all three revisions. Assembly extracts are in
 `assembly/verified/`; verification logs and native failure artifacts are retained
 beside them. [bench_compare.py](bench_compare.py) reproduces the timing schedule.
+
+## Packed-storage recovery, 2026-09-16
+
+The follow-up freezes `3759451f3` as its packed baseline. Its VT benchmark and
+oracle hashes match the previously preserved `6c4096104` binaries. The original
+56-byte-cell and Ghostty executables remain in `target/packed-cells/baseline/`.
+Rust builds use 1.95.0 and the unchanged release profile. Follow-up sources,
+binary manifests, validation logs and raw measurements are retained separately
+in `target/packed-recovery/`.
+
+### Stage 1: ordinary reads and writes
+
+Small packed-cell and row-text adapters now inline, so scalar iteration can
+remove unused UTF-8 encoding and bypass grapheme resolution. Printing reads
+physical widths and cells through the validated cursor location. Ordinary
+narrow replacements update cells and style references directly; wide-boundary
+repair and resource release retain their existing path. Ordinary writes, row
+resets and erases skip charge recomputation when no payload or capacity changes.
+
+The serial runner now also accepts a pair of frozen Rust binaries and repeated
+`--case` filters. Each selected workload runs baseline → candidate, immediately
+followed by candidate → baseline, with 50 samples per direction, 0.3 seconds of
+warmup and a 1-second measurement target. No builds, tests or profiling run
+during timing. Times below pool the 100 normalized samples; below 1 is faster.
+
+| Workload | Packed baseline µs | Stage 1 µs | Stage 1 / baseline |
+| --- | ---: | ---: | ---: |
+| print/ascii | 26.289 | 18.631 | 0.71× |
+| print/chinese | 39.151 | 34.289 | 0.88× |
+| print/combining | 65.464 | 65.858 | 1.01× |
+| print/emoji | 70.943 | 70.350 | 0.99× |
+| read/ascii | 9.692 | 2.757 | 0.28× |
+| read/chinese | 10.479 | 2.784 | 0.27× |
+| read/combining | 13.022 | 5.457 | 0.42× |
+| read/emoji | 12.309 | 4.222 | 0.34× |
+| feed/ascii | 1.137 | 1.105 | 0.97× |
+| feed/chinese | 5.409 | 5.357 | 0.99× |
+| feed/combining | 73.022 | 71.208 | 0.98× |
+| feed/emoji | 82.457 | 73.272 | 0.89× |
+| stream/ascii | 25.269 | 23.400 | 0.93× |
+| stream_styled/ascii | 31.535 | 27.961 | 0.89× |
+
+These changes primarily recover reads and ordinary writes; grapheme append and
+resource reconstruction remain for subsequent stages. All 14 original allocation
+probe observations match the packed baseline exactly, including zero allocation
+for ordinary writes and row exposure, bounded page recycling, memory charges,
+and retained history. An additional check covers repeated plain/styled narrow
+overwrites and inline backgrounds without allocation or charge growth.
+
+VT library/integration tests pass (302 tests including the new check). The
+14,325 page, layout, grid and snapshot differential comparisons report only the
+three existing one-row alternate-screen grapheme-wrap failures, with zero
+coverage gaps. Stage 1 artifacts are in `target/packed-recovery/stage1/`;
+`comparison/results.json` retains both measurement orders.

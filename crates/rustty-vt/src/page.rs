@@ -180,24 +180,29 @@ impl Page {
             + self.map_bytes.iter().sum::<usize>();
     }
 
+    #[inline]
     pub fn slot(&self, row: usize, col: usize) -> usize {
         self.headers[row].offset() + col
     }
 
+    #[inline]
     pub fn row_cells(&self, row: usize) -> &[Cell] {
         let start = self.slot(row, 0);
         &self.cells[start..start + usize::from(self.columns)]
     }
 
+    #[inline]
     pub fn row_cells_mut(&mut self, row: usize) -> &mut [Cell] {
         let start = self.slot(row, 0);
         &mut self.cells[start..start + usize::from(self.columns)]
     }
 
+    #[inline]
     pub fn row(&self, row: usize) -> RowView<'_> {
         RowView::new(self, row)
     }
 
+    #[inline]
     pub fn style(&self, slot: usize) -> Style {
         let cell = self.cells[slot];
         let mut style = if cell.style_id() == 0 {
@@ -211,6 +216,7 @@ impl Page {
         style
     }
 
+    #[inline]
     pub fn link_id(&self, slot: usize) -> u16 {
         if self.cells[slot].has_hyperlink() {
             self.link_map[&(slot as u32)]
@@ -219,6 +225,7 @@ impl Page {
         }
     }
 
+    #[inline]
     pub fn grapheme(&self, slot: usize) -> Option<GraphemeAllocation> {
         self.cells[slot]
             .has_grapheme()
@@ -262,6 +269,7 @@ impl Page {
         }
     }
 
+    #[inline]
     pub fn mark_cell(&mut self, row: usize, cell: Cell) {
         let header = &mut self.headers[row];
         header.set(RowHeader::DIRTY, true);
@@ -279,6 +287,7 @@ impl Page {
         }
     }
 
+    #[inline]
     pub fn replace_simple_styles(&mut self, old: u16, new: u16, count: usize) {
         if old != new && count != 0 {
             let count = u16::try_from(count).expect("run fits a physical row");
@@ -312,6 +321,7 @@ impl Page {
 
     pub fn reset_row(&mut self, row: usize, id: u64, background: Color) {
         let start = self.slot(row, 0);
+        let released_payload = self.headers[row].has(RowHeader::GRAPHEME | RowHeader::HYPERLINK);
         if self.headers[row].has(RowHeader::MANAGED) {
             for slot in start..start + usize::from(self.columns) {
                 self.clear_cell(slot, background);
@@ -321,7 +331,9 @@ impl Page {
         }
         self.headers[row].reset();
         self.row_ids[row] = id;
-        self.refresh_charge();
+        if released_payload {
+            self.refresh_charge();
+        }
     }
 
     pub fn expose(&mut self, id: u64, background: Color) {
@@ -416,13 +428,18 @@ impl Page {
             end += 1;
         }
         let offset = self.slot(row, 0);
+        let mut released_payload = false;
         for slot in offset + start..offset + end {
             if !protected || !self.cells[slot].protected() {
+                released_payload |=
+                    self.cells[slot].has_grapheme() || self.cells[slot].has_hyperlink();
                 self.clear_cell(slot, background);
             }
         }
         self.headers[row].set(RowHeader::DIRTY, true);
-        self.refresh_charge();
+        if released_payload {
+            self.refresh_charge();
+        }
     }
 
     fn swap_cells(&mut self, a: usize, b: usize) {

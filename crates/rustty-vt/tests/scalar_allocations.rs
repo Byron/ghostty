@@ -88,6 +88,25 @@ fn scalar_printing_does_not_allocate_per_cell() {
 }
 
 #[test]
+fn ordinary_overwrites_with_backgrounds_do_not_allocate() {
+    for setup in ["", "\x1b[31;44m", "\x1b[48;2;12;34;56m\x1b[2J"] {
+        let mut terminal = Terminal::new(8, 2, 0);
+        terminal.feed(setup.as_bytes());
+        terminal.print('é');
+        let bytes = terminal.screen().owned_bytes();
+        ALLOCATIONS.set(Some(0));
+        for cp in ['x', 'é', ' ', 'z'].into_iter().cycle().take(1024) {
+            terminal.screen_mut().cursor.col = 0;
+            terminal.print(cp);
+            let row = terminal.screen().row(0);
+            assert_eq!(row.text(0).chars().next(), Some(cp));
+        }
+        assert_eq!(ALLOCATIONS.replace(None).unwrap(), 0);
+        assert_eq!(terminal.screen().owned_bytes(), bytes);
+    }
+}
+
+#[test]
 fn grapheme_append_allocates_only_its_shared_payload() {
     let mut terminal = Terminal::new(4, 2, 0);
     terminal.feed("\x1b[?2027ha\u{301}".as_bytes());

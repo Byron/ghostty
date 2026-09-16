@@ -299,6 +299,7 @@ impl CellText<'_> {
 
 impl std::ops::Deref for CellText<'_> {
     type Target = str;
+    #[inline]
     fn deref(&self) -> &str {
         self.as_str()
     }
@@ -380,12 +381,14 @@ impl DoubleEndedIterator for Rows<'_> {
 impl ExactSizeIterator for Rows<'_> {}
 
 impl<'a> From<&RowView<'a>> for RowView<'a> {
+    #[inline]
     fn from(row: &RowView<'a>) -> Self {
         *row
     }
 }
 
 impl<'a> RowView<'a> {
+    #[inline]
     pub(crate) fn new(page: &'a Page, row: usize) -> Self {
         let header = page.headers[row];
         Self {
@@ -399,28 +402,33 @@ impl<'a> RowView<'a> {
             offset: header.offset(),
         }
     }
+    #[inline]
     pub fn cells(self) -> &'a [Cell] {
         self.cells
     }
+    #[inline]
     pub fn text(self, col: usize) -> CellText<'a> {
         let cell = self.cells[col];
-        match self
-            .page
-            .grapheme(self.offset + col)
-            .filter(|_| cell.codepoint().is_some())
-        {
-            Some(allocation) => CellText(CellTextStorage::Grapheme(
-                self.page.graphemes.text(allocation),
-            )),
-            None => CellText::scalar(cell.codepoint()),
+        let codepoint = cell.codepoint();
+        if cell.has_grapheme() && codepoint.is_some() {
+            CellText(CellTextStorage::Grapheme(self.grapheme_text(col)))
+        } else {
+            CellText::scalar(codepoint)
         }
     }
+    fn grapheme_text(self, col: usize) -> &'a str {
+        let allocation = self.page.grapheme_map[&((self.offset + col) as u32)];
+        self.page.graphemes.text(allocation)
+    }
+    #[inline]
     pub fn style(self, col: usize) -> Style {
         self.page.style(self.offset + col)
     }
+    #[inline]
     pub fn hyperlink(self, col: usize) -> Option<&'a HyperlinkData> {
         self.page.hyperlink(self.offset + col).map(Arc::as_ref)
     }
+    #[inline]
     pub(crate) fn grapheme(self, col: usize) -> Option<GraphemeAllocation> {
         self.page.grapheme(self.offset + col)
     }
@@ -734,6 +742,22 @@ impl Screen {
         assert!(row < self.height);
         self.physical_row(self.history_len() + row)
     }
+    #[inline]
+    pub(crate) fn row_columns(&self, y: usize) -> usize {
+        let index = if y == self.cursor.row {
+            self.cursor_location().0
+        } else {
+            self.pages.page_index(self.history_len() + y)
+        };
+        usize::from(self.pages.pages[index].columns)
+    }
+    #[inline]
+    pub(crate) fn cursor_cell(&self, col: usize) -> Cell {
+        let (index, row) = self.cursor_location();
+        let page = &self.pages.pages[index];
+        page.cells[page.slot(row, col)]
+    }
+    #[inline]
     pub fn cell_text<'a>(&self, row: impl Into<Row<'a>>, col: usize) -> CellText<'a> {
         row.into().text(col)
     }
@@ -802,6 +826,7 @@ impl Screen {
         (self.pages.page_index(absolute), row)
     }
 
+    #[inline]
     fn cursor_location(&self) -> (usize, usize) {
         let absolute = self.history_len() + self.cursor.row;
         if let Some((list, serial, generation, index, row, old_absolute)) =
@@ -1184,24 +1209,37 @@ impl Screen {
         width: u8,
         spacer_head: bool,
     ) {
-        self.sync_cursor_resources();
+        let (index, row) = self.sync_cursor_resources();
         let y = self.cursor.row;
         let col = self.cursor.col;
-        let old_width = self.row(y).cells[col].width();
+        let page = &self.pages.pages[index];
+        let offset = page.slot(row, 0);
+        let columns = usize::from(page.columns);
+        let old = page.cells[offset + col];
+        let old_width = old.width();
         if y > 0 && col <= 1 && old_width != width && old_width != 1 {
-            let last = self.row(y - 1).cells.len() - 1;
+            let last = self.row_columns(y - 1) - 1;
             self.cell_mut(y - 1, last).set_spacer_head(false);
         }
         let template = self.cursor_template(codepoint, width, spacer_head);
-        let (index, row) = self.cursor_location();
         let page = &mut self.pages.pages[index];
-        let offset = page.slot(row, 0);
-        let cells = page.row_cells(row);
-        let end = (col + usize::from(width)).min(cells.len());
+        if width == 1 && old_width == 1 && !old.has_grapheme() && !old.has_hyperlink() {
+            page.replace_simple_styles(old.style_id(), template.style_id(), 1);
+            page.cells[offset + col] = template;
+            page.mark_cell(row, template);
+            if self.cursor.hyperlink.is_some() {
+                self.set_cell_cursor_hyperlink(col);
+            }
+            return;
+        }
+        let end = (col + usize::from(width)).min(columns);
         let clear_start = col - usize::from(old_width == 0 && col > 0);
-        let clear_end = end + usize::from(end < cells.len() && cells[end - 1].width() == 2);
+        let clear_end =
+            end + usize::from(end < columns && page.cells[offset + end - 1].width() == 2);
+        let mut released_payload = false;
         for x in clear_start..clear_end {
             let slot = offset + x;
+            released_payload |= page.cells[slot].has_grapheme() || page.cells[slot].has_hyperlink();
             let old_style = page.cells[slot].style_id();
             let replacement = if x < col || x >= end {
                 Cell::blank(self.cursor.style.background)
@@ -1223,10 +1261,12 @@ impl Screen {
             page.cells[slot] = replacement;
             page.mark_cell(row, replacement);
         }
-        page.refresh_charge();
+        if released_payload {
+            page.refresh_charge();
+        }
         if self.cursor.hyperlink.is_some() {
             self.set_cell_cursor_hyperlink(col);
-            if width == 2 && col + 1 < self.row(y).cells.len() {
+            if width == 2 && col + 1 < columns {
                 self.set_cell_cursor_hyperlink(col + 1);
             }
         }
@@ -1234,9 +1274,8 @@ impl Screen {
 
     pub(crate) fn write_cursor_ascii(&mut self, bytes: &[u8]) -> usize {
         use crate::printing;
-        self.sync_cursor_resources();
+        let (index, row) = self.sync_cursor_resources();
         let template = self.cursor_template(None, 1, false);
-        let (index, row) = self.cursor_location();
         let page = &mut self.pages.pages[index];
         let offset = page.slot(row, self.cursor.col);
         let len = bytes.len().min(usize::from(page.columns) - self.cursor.col);
@@ -1993,14 +2032,26 @@ impl Screen {
 
     /// Page movement renews implicit cursor links. Resource growth on the same
     /// page reinstalls their existing identities; printed cells retain theirs.
-    pub(crate) fn sync_cursor_resources(&mut self) {
-        if self.cursor_style.is_none()
-            && self.cursor_link.is_none()
-            && self.cursor.style == Style::default()
-            && self.cursor.hyperlink.is_none()
-        {
-            return;
+    #[inline]
+    pub(crate) fn sync_cursor_resources(&mut self) -> (usize, usize) {
+        let location = self.cursor_location();
+        if self.cursor_link.is_none() && self.cursor.hyperlink.is_none() {
+            let page = &self.pages.pages[location.0];
+            let style_matches = match self.cursor_style {
+                None => self.cursor.style == Style::default(),
+                Some((owner, id)) => {
+                    owner == page.serial && *page.styles.get(id) == self.cursor.style
+                }
+            };
+            if style_matches {
+                return location;
+            }
         }
+        self.sync_cursor_resources_slow();
+        self.cursor_location()
+    }
+
+    fn sync_cursor_resources_slow(&mut self) {
         let index = self.cursor_page_index();
         let serial = self.pages.pages[index].serial;
         let moved = self.cursor_link.is_some_and(|(owner, _)| owner != serial);

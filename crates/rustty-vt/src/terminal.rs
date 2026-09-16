@@ -462,7 +462,7 @@ impl Terminal {
     #[inline(always)]
     fn ensure_row_cells(&mut self, row: usize, end: usize) {
         let columns = usize::from(self.cols);
-        if self.screen().row(row).cells.len() < end.min(columns) {
+        if self.screen().row_columns(row) < end.min(columns) {
             // A partial reflow can leave a physical row narrower than the
             // logical screen. Extend its actual page when an edit reaches
             // past it, so subsequent snapshots keep valid PAGE dimensions.
@@ -484,7 +484,7 @@ impl Terminal {
             .cursor
             .col
             .min(columns - 1)
-            .min(screen.row(screen.cursor.row).cells.len() - 1);
+            .min(screen.row_columns(screen.cursor.row) - 1);
     }
 
     pub fn limits(&self) -> ScrollbackLimits {
@@ -1044,7 +1044,7 @@ impl Terminal {
         self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
         self.clamp_cursor();
         let cursor = &self.screen().cursor;
-        let (row, col, pending_wrap) = (cursor.row, cursor.col, cursor.pending_wrap);
+        let (col, pending_wrap) = (cursor.col, cursor.pending_wrap);
         let right = if col > self.margins.right {
             self.cols as usize - 1
         } else {
@@ -1057,14 +1057,14 @@ impl Terminal {
         } else if self.modes.dec(2027)
             && !self.modes.dec(7)
             && col == right
-            && self.screen().row(row).cells[right].codepoint().is_some()
+            && self.screen().cursor_cell(right).codepoint().is_some()
         {
             Some(right)
         } else {
             col.checked_sub(1)
         };
         let previous_col = previous_col.map(|col| {
-            if self.screen().row(row).cells[col].width() == 0 {
+            if self.screen().cursor_cell(col).width() == 0 {
                 col.saturating_sub(1)
             } else {
                 col
@@ -1076,11 +1076,11 @@ impl Terminal {
             && col > 0
             && let Some(col) = previous_col
         {
-            let previous = &self.screen().row(row).cells[col];
+            let previous = self.screen().cursor_cell(col);
             let previous_width = previous.width();
             let last = if previous.has_grapheme() {
                 self.screen()
-                    .cell_text(&self.screen().row(row), col)
+                    .cell_text(self.screen().row(self.screen().cursor.row), col)
                     .chars()
                     .last()
             } else {
@@ -1115,7 +1115,7 @@ impl Terminal {
                 return;
             }
             if let Some(col) = previous_col {
-                let previous = &self.screen().row(row).cells[col];
+                let previous = self.screen().cursor_cell(col);
                 if previous.codepoint().is_none() {
                     return;
                 }

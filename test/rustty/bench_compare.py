@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure frozen before/scalar/SIMD binaries serially, reversing each workload's order."""
+"""Measure frozen binaries serially, reversing each workload's order."""
 import argparse
 import hashlib
 import json
@@ -60,21 +60,28 @@ def measure(binary, native, output, variant, case, direction):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for variant in ["before", "scalar", "simd", "ghostty"]:
-        parser.add_argument(f"--{variant}", required=True, type=Path)
+        parser.add_argument(f"--{variant}", type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--case", default="", help="Only workload names containing this text")
+    parser.add_argument("--case", action="append", default=[],
+                        help="Only workload names containing any of these texts (repeatable)")
     parser.add_argument("--check", action="store_true", help="Validate and list workloads without timing")
     args = parser.parse_args()
     binaries = {name: getattr(args, name).resolve()
-                for name in ["before", "scalar", "simd", "ghostty"]}
-    rust = benchmarks(binaries["before"])
+                for name in ["before", "scalar", "simd", "ghostty"] if getattr(args, name)}
+    variants = [name for name in binaries if name != "ghostty"]
+    if len(variants) < 2:
+        parser.error("supply at least two Rust binaries (--before, --scalar, --simd)")
+    rust = benchmarks(binaries[variants[0]])
     assert len(rust) == 54, rust
-    for variant in ["scalar", "simd"]:
+    for variant in variants[1:]:
         assert benchmarks(binaries[variant]) == rust, variant
-    native = benchmarks(binaries["simd"], binaries["ghostty"])
-    native = {name.removeprefix("ghostty/") for name in native if name.startswith("ghostty/")}
-    assert len(native) == 36, native
-    cases = [name.removeprefix("rustty/") for name in rust if args.case in name]
+    native = set()
+    if "ghostty" in binaries:
+        native = benchmarks(binaries[variants[-1]], binaries["ghostty"])
+        native = {name.removeprefix("ghostty/") for name in native if name.startswith("ghostty/")}
+        assert len(native) == 36, native
+    cases = [name.removeprefix("rustty/") for name in rust
+             if not args.case or any(case in name for case in args.case)]
     assert cases, "No matching workloads"
     if args.check:
         print("\n".join(cases))
@@ -102,14 +109,14 @@ def main():
     for index, case in enumerate(cases, 1):
         if case in completed:
             continue
-        order = ["before", "scalar", "simd"] + (["ghostty"] if case in native else [])
+        order = variants + (["ghostty"] if case in native else [])
         result = {"case": case, "forward": {}, "reverse": {}}
-        for direction, variants in [("forward", order), ("reverse", order[::-1])]:
-            for variant in variants:
+        for direction, scheduled in [("forward", order), ("reverse", order[::-1])]:
+            for variant in scheduled:
                 print(f"{index}/{len(cases)} {case} {direction} {variant}", flush=True)
-                binary = binaries["simd" if variant == "ghostty" else variant]
+                binary = binaries[variants[-1] if variant == "ghostty" else variant]
                 result[direction][variant] = measure(
-                    binary, binaries["ghostty"], output, variant, case, direction
+                    binary, binaries.get("ghostty"), output, variant, case, direction
                 )
         result["median_ns"] = {
             variant: statistics.median(result["forward"][variant]["samples_ns"]

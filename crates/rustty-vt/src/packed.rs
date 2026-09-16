@@ -31,14 +31,17 @@ impl Cell {
     pub(crate) const WIDE_MASK: u64 = 3 << 42;
     pub(crate) const HYPERLINK_MASK: u64 = 1 << 45;
 
+    #[inline]
     pub fn bits(self) -> u64 {
         self.0
     }
 
+    #[inline]
     pub(crate) fn from_bits(bits: u64) -> Self {
         Self(bits & ((1 << 48) - 1))
     }
 
+    #[inline]
     pub fn content_tag(self) -> ContentTag {
         match self.0 & 3 {
             0 => ContentTag::Codepoint,
@@ -48,6 +51,7 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub fn codepoint(self) -> Option<char> {
         if self.0 & 2 != 0 {
             return None;
@@ -58,10 +62,12 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub fn style_id(self) -> u16 {
         (self.0 >> 26) as u16
     }
 
+    #[inline]
     pub fn wide(self) -> Wide {
         match (self.0 >> 42) & 3 {
             0 => Wide::Narrow,
@@ -71,6 +77,7 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub fn width(self) -> u8 {
         match self.wide() {
             Wide::Narrow | Wide::SpacerHead => 1,
@@ -79,22 +86,27 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub fn spacer_head(self) -> bool {
         self.wide() == Wide::SpacerHead
     }
 
+    #[inline]
     pub fn protected(self) -> bool {
         self.0 & (1 << 44) != 0
     }
 
+    #[inline]
     pub fn has_hyperlink(self) -> bool {
         self.0 & Self::HYPERLINK_MASK != 0
     }
 
+    #[inline]
     pub fn has_grapheme(self) -> bool {
         self.content_tag() == ContentTag::Grapheme
     }
 
+    #[inline]
     pub fn semantic(self) -> SemanticContent {
         match (self.0 >> 46) & 3 {
             1 => SemanticContent::Input,
@@ -103,6 +115,7 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub fn background(self) -> Option<Color> {
         match self.content_tag() {
             ContentTag::BackgroundPalette => Some(Color::Indexed((self.0 >> 2) as u8)),
@@ -115,20 +128,24 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub fn is_empty(self) -> bool {
         self.codepoint().is_none() && self.width() != 0
     }
 
+    #[inline]
     pub(crate) fn blank(background: Color) -> Self {
         let mut cell = Self::default();
         cell.set_background(background);
         cell
     }
 
+    #[inline]
     pub(crate) fn set_codepoint(&mut self, cp: Option<char>) {
         self.0 = (self.0 & !Self::CONTENT_MASK) | (u64::from(cp.map_or(0, u32::from)) << 2);
     }
 
+    #[inline]
     pub(crate) fn set_background(&mut self, color: Color) {
         let content = match color {
             Color::Default => 0,
@@ -140,14 +157,17 @@ impl Cell {
         self.0 = (self.0 & !Self::CONTENT_MASK) | content;
     }
 
+    #[inline]
     pub(crate) fn set_style_id(&mut self, id: u16) {
         self.0 = (self.0 & !Self::STYLE_MASK) | (u64::from(id) << 26);
     }
 
+    #[inline]
     pub(crate) fn set_wide(&mut self, wide: Wide) {
         self.0 = (self.0 & !Self::WIDE_MASK) | ((wide as u64) << 42);
     }
 
+    #[inline]
     pub(crate) fn set_width(&mut self, width: u8) {
         self.set_wide(match width {
             0 => Wide::SpacerTail,
@@ -157,6 +177,7 @@ impl Cell {
         });
     }
 
+    #[inline]
     pub(crate) fn set_spacer_head(&mut self, value: bool) {
         if value {
             self.set_wide(Wide::SpacerHead);
@@ -165,19 +186,23 @@ impl Cell {
         }
     }
 
+    #[inline]
     pub(crate) fn set_protected(&mut self, value: bool) {
         self.0 = (self.0 & !(1 << 44)) | (u64::from(value) << 44);
     }
 
+    #[inline]
     pub(crate) fn set_hyperlink(&mut self, value: bool) {
         self.0 = (self.0 & !Self::HYPERLINK_MASK) | (u64::from(value) << 45);
     }
 
+    #[inline]
     pub(crate) fn set_grapheme(&mut self, value: bool) {
         debug_assert!(self.0 & 2 == 0);
         self.0 = (self.0 & !3) | u64::from(value);
     }
 
+    #[inline]
     pub(crate) fn set_semantic(&mut self, value: SemanticContent) {
         let value = match value {
             SemanticContent::Output => 0,
@@ -206,22 +231,27 @@ impl RowHeader {
     pub const DIRTY: u64 = 1 << 40;
     pub const MANAGED: u64 = Self::GRAPHEME | Self::STYLED | Self::HYPERLINK;
 
+    #[inline]
     pub fn new(offset: u32) -> Self {
         Self(u64::from(offset) | Self::DIRTY)
     }
 
+    #[inline]
     pub fn offset(self) -> usize {
         self.0 as u32 as usize
     }
 
+    #[inline]
     pub fn has(self, flag: u64) -> bool {
         self.0 & flag != 0
     }
 
+    #[inline]
     pub fn set(&mut self, flag: u64, value: bool) {
         self.0 = (self.0 & !flag) | if value { flag } else { 0 };
     }
 
+    #[inline]
     pub fn semantic(self) -> SemanticContent {
         match (self.0 >> 37) & 3 {
             1 => SemanticContent::Prompt,
@@ -230,6 +260,7 @@ impl RowHeader {
         }
     }
 
+    #[inline]
     pub fn set_semantic(&mut self, value: SemanticContent) {
         let value = match value {
             SemanticContent::Output => 0,
@@ -239,6 +270,7 @@ impl RowHeader {
         self.0 = (self.0 & !(3 << 37)) | (value << 37);
     }
 
+    #[inline]
     pub fn reset(&mut self) {
         *self = Self::new(self.offset() as u32);
     }

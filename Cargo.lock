@@ -3173,6 +3173,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "libc",
  "muda",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -3213,6 +3214,7 @@ version = "0.1.0"
 dependencies = [
  "rustty-font",
  "rustty-vt",
+ "serde_json",
 ]
 
 [[package]]

@@ -1566,3 +1566,134 @@ Two serial timing controls show no material cost: emoji feed is 51.687 → 51.75
 µs and emoji stream is 773.025 → 765.904 µs (50 samples in each order).
 Sources, binaries, raw timings and the full differential log are in
 `target/packed-recovery/wrap-fix/`.
+
+
+### Stage 4: renderer and application measurements on macOS
+
+The expanded `prepare_frames` example and opt-in application replay share six
+fixed workloads: warmed redraw, scrolling ASCII/styled output, mixed Unicode,
+alternate-screen repaint, and resize/reflow with 1,000 seeded history rows.
+Each process warms 50 frames and measures 50. `frame_compare.py` runs adjacent
+before/after processes, reverses their order, validates the controls, and retains
+all individual frames. The tables pool 100 samples per version; p95/p99 use
+nearest ranks rather than Criterion's per-iteration batch averages.
+
+The comparison uses clean archives of packed baseline `3759451f3` and wrap fix
+`43f4c0c8e`. Identical measurement controls, including the desktop entry point,
+were overlaid on both; `stage4/source-manifest.json` records every control hash.
+Both are Rust 1.95 release builds with identical app resources and disposable
+ad hoc signed bundles. No build, test, profiling or other benchmark ran during
+these serial measurements.
+
+```sh
+cargo +1.95.0 run --offline --release -p rustty-render \
+  --example prepare_frames -- --case mixed_unicode
+RUSTTY_SMOKE_DIR=/tmp/rustty-frame-replay \
+  RUSTTY_SMOKE_TIMING=mixed_unicode RUSTTY_SMOKE_OFFSCREEN=1 \
+  path/to/Rustty.app/Contents/MacOS/rustty
+python3 test/rustty/frame_compare.py --kind prepare \
+  --before BEFORE/prepare_frames --after AFTER/prepare_frames --output RESULTS
+python3 test/rustty/frame_compare.py --kind app --offscreen \
+  --before BEFORE/Rustty.app/Contents/MacOS/rustty \
+  --after AFTER/Rustty.app/Contents/MacOS/rustty --output RESULTS
+```
+
+The renderer probe fixes Menlo 13 pt, scale 1, a 120×40 grid and a 1200×850
+pixel target. Feed/resize time is measured separately from `Renderer::prepare`.
+Its thread-local Rust allocator counter remains enabled inside both timers;
+these timings include that counter's overhead. It counts successful Rust
+allocation/reallocation requests, not CoreText's private native allocations.
+A warmed redraw here reuses font/shape caches but still calls `prepare`; the
+application replay below also exercises the app's retained-frame cache.
+
+| Renderer workload | Prepare median µs, before → after | p95 µs | p99 µs | After / before |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 472.375 → 410.396 | 478.583 → 421.875 | 482.000 → 435.125 | 0.87× |
+| scroll_ascii | 463.896 → 407.541 | 470.416 → 415.833 | 478.167 → 425.250 | 0.88× |
+| scroll_styled | 445.500 → 383.584 | 452.250 → 394.542 | 461.750 → 398.625 | 0.86× |
+| mixed_unicode | 474.584 → 413.750 | 520.583 → 419.750 | 523.542 → 423.833 | 0.87× |
+| alternate_repaint | 472.709 → 413.397 | 488.375 → 425.208 | 525.333 → 438.125 | 0.87× |
+| resize_reflow | 437.666 → 371.750 | 513.083 → 428.334 | 522.916 → 432.166 | 0.85× |
+
+Preparation improves 12–15% in pooled medians, with improvements in both
+measurement orders. Its allocation counts and requested bytes are unchanged.
+Ordinary/styled scrolling feed remains allocation-free within this capacity;
+Unicode payloads and history reflow remain visible in their own phase.
+
+| Renderer workload | Feed/resize median µs, before → after | Feed/resize p95 µs | Feed/resize p99 µs | Feed allocations/frame | Prepare allocations/frame | Prepare requested bytes/frame |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| cached_redraw | 0.000 → 0.000 | 0.042 → 0.042 | 0.042 → 0.042 | 0 | 812 | 996,848 |
+| scroll_ascii | 0.375 → 0.375 | 0.417 → 0.375 | 0.417 → 0.417 | 0 | 774 | 1,279,184 |
+| scroll_styled | 0.833 → 0.791 | 0.875 → 0.833 | 0.958 → 0.833 | 0 | 1,912 | 1,097,524 |
+| mixed_unicode | 1.334 → 1.125 | 1.625 → 1.292 | 2.250 → 1.500 | 5 | 812 | 996,848 |
+| alternate_repaint | 45.958 → 36.834 | 47.292 → 38.667 | 50.500 → 43.875 | 200 | 812 | 996,848 |
+| resize_reflow | 1478.521 → 1056.667 | 1624.584 → 1069.667 | 1638.667 → 1098.250 | 56 | 792 | 903,248 |
+
+Resize allocation requests fall by 192 bytes/frame at the median; counts remain
+56 at the median and 68 at p95/p99. The font/frame preparation allocations are
+an existing cost and were not changed in this storage follow-up.
+
+
+The application replay fixes Menlo 13 pt, default in-memory settings, a
+1200×850 physical window and one disposable `/bin/sleep` session. This Mac
+reports scale 2, producing a 74×24 grid. It injects identical terminal inputs,
+then calls the application's drawing path, including egui composition,
+retained-frame handling, GPU buffer preparation, encoding and queue submission.
+Timing is opt-in through `RUSTTY_SMOKE_TIMING`; the regular saved workspace and
+configuration are not overwritten.
+
+The Mac's surface reports `Occluded`. The timing replay therefore renders the
+same application primitives into one reusable offscreen Metal target rather
+than accepting a skipped surface render. It does not wait for GPU completion.
+The numbers below describe **CPU preparation/submission**, not GPU completion
+or visible presentation. Process CPU includes the app's other threads and
+replay overhead; it is expressed as a percentage of one core. RSS comes from
+macOS `proc_pidinfo`. No allocator counter runs in this app measurement.
+
+| App workload | Frame wall median ms, before → after | Wall p95 ms | Wall p99 ms | Main-thread CPU median ms | After / before wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cached_redraw | 0.582 → 0.625 | 0.993 → 0.832 | 1.110 → 1.030 | 0.581 → 0.624 | 1.07× |
+| scroll_ascii | 1.880 → 1.563 | 2.775 → 2.644 | 2.813 → 2.835 | 1.881 → 1.564 | 0.83× |
+| scroll_styled | 1.929 → 1.737 | 2.822 → 2.650 | 2.903 → 2.705 | 1.930 → 1.738 | 0.90× |
+| mixed_unicode | 1.954 → 1.518 | 2.722 → 2.551 | 2.766 → 2.627 | 1.956 → 1.519 | 0.78× |
+| alternate_repaint | 1.750 → 1.749 | 2.648 → 2.484 | 2.677 → 2.594 | 1.751 → 1.750 | 1.00× |
+| resize_reflow | 1.313 → 1.161 | 1.919 → 1.899 | 2.236 → 2.063 | 1.313 → 1.162 | 0.88× |
+
+| App workload | Feed/resize median µs, before → after | p95 µs | p99 µs | Process CPU %, before → after | RSS median MiB, before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cached_redraw | 1.000 → 0.917 | 2.083 → 1.500 | 2.875 → 1.667 | 2.10 → 2.14 | 108.95 → 108.81 |
+| scroll_ascii | 9.167 → 8.834 | 16.750 → 14.792 | 18.000 → 17.583 | 4.55 → 4.31 | 107.00 → 106.94 |
+| scroll_styled | 16.605 → 14.937 | 26.125 → 22.625 | 27.709 → 25.250 | 4.73 → 4.44 | 107.29 → 107.21 |
+| mixed_unicode | 24.562 → 20.792 | 38.417 → 36.500 | 43.541 → 42.541 | 4.54 → 4.21 | 110.12 → 109.95 |
+| alternate_repaint | 126.374 → 110.959 | 241.709 → 194.375 | 244.209 → 197.792 | 4.71 → 4.52 | 110.39 → 110.18 |
+| resize_reflow | 4538.229 → 3887.833 | 8415.666 → 6492.042 | 9003.834 → 8296.583 | 11.66 → 10.10 | 115.02 → 115.00 |
+
+Each replay frame follows a minimum 50 ms pause. These intervals describe the
+controlled replay and OS scheduling, not display refresh latency or maximum
+frame rate. Tail spikes therefore cannot establish a presentation regression.
+
+| App workload | Interval median ms, before → after | p95 ms | p99 ms |
+| --- | ---: | ---: | ---: |
+| cached_redraw | 52.649 → 52.589 | 53.170 → 52.994 | 90.916 → 53.345 |
+| scroll_ascii | 53.667 → 53.581 | 54.955 → 54.786 | 74.329 → 89.750 |
+| scroll_styled | 53.809 → 53.658 | 54.994 → 54.876 | 73.716 → 85.790 |
+| mixed_unicode | 53.686 → 53.517 | 54.878 → 54.727 | 72.586 → 54.837 |
+| alternate_repaint | 53.748 → 53.839 | 54.938 → 54.786 | 80.040 → 85.058 |
+| resize_reflow | 58.052 → 56.789 | 61.684 → 60.407 | 64.660 → 62.045 |
+
+Application scrolling/mixed-Unicode frame medians improve 10–22%, and the
+resize frame median improves 12%; both measurement orders improve for these
+cases. RSS is essentially unchanged. Cached redraw has no demonstrated gain:
+its primary ratio is 1.075×, but the repeated pair is 1.011× (forward 1.123×,
+reverse 1.028×). Alternate repaint is 0.999× initially and 0.964× on repeat;
+it also varies by order. These two cases do not establish a repeatable change
+across both orders. Their raw repeats remain in `stage4/app-confirmation/`.
+
+Renderer/session checks and all 22 application tests pass, including the Metal
+retained-frame test outside the sandbox. All six replays finish with 50 measured
+frames and verified dimensions. The existing disposable smoke suite also
+passes, and its offscreen screenshot was inspected after the capture refactor.
+The GPU-unavailable sandbox test was rerun successfully with Metal access.
+Artifacts, binaries, manifests, raw samples and logs are in
+`target/packed-recovery/stage4/`; GPU completion and visible presentation remain
+outside the claims of this measurement.

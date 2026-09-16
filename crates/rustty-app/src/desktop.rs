@@ -2540,6 +2540,15 @@ fn reveal(screen: &mut vt::Screen, point: vt::GridPoint) {
 
 impl App {
     fn draw(&mut self, event_loop: &ActiveEventLoop, host: &mut Host) -> Result<()> {
+        self.draw_frame(event_loop, host, None)
+    }
+
+    fn draw_frame(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        host: &mut Host,
+        offscreen: Option<&wgpu::Texture>,
+    ) -> Result<()> {
         host.messages_open = !self.errors.is_empty();
         if !host.visible || host.occluded {
             return Ok(());
@@ -3411,19 +3420,31 @@ impl App {
             )?;
             host.capture = false;
         }
-        self.painter.paint_and_update_textures(
-            host.viewport,
-            output.pixels_per_point,
-            [0.0; 4],
-            &primitives,
-            &mut output.textures_delta,
-            if std::mem::take(&mut host.capture) {
-                vec![egui::UserData::default()]
-            } else {
-                Vec::new()
-            },
-            &host.window,
-        );
+        if let Some(target) = offscreen {
+            let state = self.painter.render_state().ok_or("GPU unavailable")?;
+            smoke::submit_offscreen(
+                &state,
+                &primitives,
+                &output.textures_delta,
+                [size.width, size.height],
+                output.pixels_per_point,
+                target,
+            );
+        } else {
+            self.painter.paint_and_update_textures(
+                host.viewport,
+                output.pixels_per_point,
+                [0.0; 4],
+                &primitives,
+                &mut output.textures_delta,
+                if std::mem::take(&mut host.capture) {
+                    vec![egui::UserData::default()]
+                } else {
+                    Vec::new()
+                },
+                &host.window,
+            );
+        }
         host.frames += 1;
         host.deadline = animation_deadline;
         if let Some(deadline) = host.focus_hint.deadline(now) {

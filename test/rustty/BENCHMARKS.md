@@ -2478,3 +2478,14 @@ emoji reflow at 1.184×/1.006×, does not reproduce: its repeat is
 the confirmation remain in `comparison/`, `confirmation/` and `supplemental/`.
 Ghostty was not remeasured for this individual step; the preceding native table
 remains tied to its stated runtime until the next complete native comparison.
+
+### Step 6: reject forced resource-check inlining
+
+Forcing `sync_cursor_resources` to inline passes all 57 benchmark correctness
+checks but fails the performance gate. The 16-case print/feed/stream comparison
+uses 50 samples per direction. ASCII printing changes from 11.983 to 11.474 µs
+(0.959×/0.956×), below the required 5% improvement in both orders. No other case
+qualifies; ASCII and Chinese streams take 1.012×/1.019× and 1.018×/1.015× as
+long. Emoji printing also flags 1.001×/1.062×, without a confirmation run since
+the candidate is already rejected. The annotation is reverted. Its frozen
+binaries, patch and complete measurements remain in `target/packed-simplify/step6/`.

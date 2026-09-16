@@ -1485,3 +1485,62 @@ have only the three known alternate-screen grapheme-wrap failures and zero
 coverage gaps. Formatting and diff checks pass. Artifacts are in
 `target/packed-recovery/stage2/`; the instrumented stage-1 baseline is in
 `stage2-probe-before/`.
+
+
+### Stage 3: grapheme append and reflow
+
+Grapheme append reuses the cursor's resolved page, copies already-valid text
+without validating it again, and refreshes coordinates only after a split.
+Cell copies carry their known suffix length. Resource admission reuses those
+coordinates, and general row lookup finds page and relative row in one pass.
+Same-page wrapped transfers retain immutable text when the base is unchanged;
+character-set remapping still reconstructs the changed base. A small integer
+hasher mixes physical slots into both bucket indices and fingerprints, including
+row-strided keys. Style and hyperlink admission keep their native hashes.
+
+The following 26 focused workloads use the same serial protocol and frozen
+normal binaries. These are stage 3 versus stage 2, before the separate wrap fix.
+
+| Workload | Stage 2 µs | Stage 3 µs | Stage 3 / stage 2 |
+| --- | ---: | ---: | ---: |
+| print/combining | 66.246 | 46.875 | 0.71× |
+| print/emoji | 72.700 | 48.935 | 0.67× |
+| read/ascii | 2.909 | 2.898 | 1.00× |
+| read/chinese | 2.864 | 2.876 | 1.00× |
+| read/combining | 5.574 | 3.401 | 0.61× |
+| read/emoji | 4.338 | 3.199 | 0.74× |
+| reflow/ascii | 42.049 | 38.442 | 0.91× |
+| reflow/chinese | 67.209 | 58.898 | 0.88× |
+| reflow/combining | 82.580 | 53.297 | 0.65× |
+| reflow/emoji | 66.869 | 43.279 | 0.65× |
+| feed/ascii | 1.095 | 1.080 | 0.99× |
+| feed/chinese | 5.331 | 5.316 | 1.00× |
+| feed/combining | 72.862 | 52.617 | 0.72× |
+| feed/emoji | 75.519 | 54.029 | 0.72× |
+| stream/ascii | 23.525 | 23.160 | 0.98× |
+| stream/chinese | 34.170 | 33.858 | 0.99× |
+| stream/combining | 887.489 | 676.221 | 0.76× |
+| stream/emoji | 1120.349 | 783.220 | 0.70× |
+| stream_styled/ascii | 28.098 | 27.993 | 1.00× |
+| stream_styled/chinese | 39.040 | 38.338 | 0.98× |
+| stream_styled/combining | 965.295 | 760.056 | 0.79× |
+| stream_styled/emoji | 1227.682 | 883.933 | 0.72× |
+| reflow_history/ascii | 1463.149 | 1278.989 | 0.87× |
+| reflow_history/chinese | 1452.129 | 1253.300 | 0.86× |
+| reflow_history/combining | 7233.507 | 4481.942 | 0.62× |
+| reflow_history/emoji | 5215.240 | 3032.571 | 0.58× |
+
+Grapheme printing improves 29–33%, grapheme feed 28%, and retained-history
+combining/emoji reflow 38–42%. Improvements hold in both orders. Ordinary
+ASCII/CJK feed and reads remain close to unchanged.
+
+All 14 final allocation probes preserve allocation calls, admission/reservation/
+growth attempts, native charges, page counts and retained rows. Removing map
+hasher state slightly reduces retained heap (32,386,655 → 32,385,119 bytes in
+the unlimited linked-grapheme probe); ordinary writes and row exposure remain
+allocation-free. Conservative map-capacity accounting remains in place.
+
+The final source passes 305 VT library/integration tests, including shared-text
+identity, remapped bases and detached-snapshot lifetimes. Its 6,585 page/layout/
+snapshot comparisons report only the three existing wrapped-grapheme failures,
+with zero coverage gaps. Artifacts are in `target/packed-recovery/stage3/`.

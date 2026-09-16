@@ -77,20 +77,19 @@ impl PageList {
         self.allocations().map(|page| page.allocation_bytes).sum()
     }
 
-    pub fn page_at(&self, mut row: usize) -> (&Page, usize) {
-        for page in &self.pages {
-            if row < usize::from(page.rows) {
-                return (page, row);
-            }
-            row -= usize::from(page.rows);
-        }
-        panic!("row is outside the page list");
+    pub fn page_at(&self, row: usize) -> (&Page, usize) {
+        let (index, row) = self.locate(row);
+        (&self.pages[index], row)
     }
 
-    pub fn page_index(&self, mut row: usize) -> usize {
+    pub fn page_index(&self, row: usize) -> usize {
+        self.locate(row).0
+    }
+
+    pub fn locate(&self, mut row: usize) -> (usize, usize) {
         for (index, page) in self.pages.iter().enumerate() {
             if row < usize::from(page.rows) {
-                return index;
+                return (index, row);
             }
             row -= usize::from(page.rows);
         }

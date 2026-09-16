@@ -241,7 +241,7 @@ impl<'de> Deserialize<'de> for Screen {
                     style: wire.style,
                     link: wire.hyperlink,
                     link_id: 0,
-                    text: (suffix > 0).then(|| Arc::from(wire.text)),
+                    text: (suffix > 0).then(|| (Arc::from(wire.text), suffix as u8)),
                 };
                 screen
                     .install_cell(absolute, col, copy, false)

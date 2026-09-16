@@ -1162,10 +1162,10 @@ impl Terminal {
     fn append_grapheme(&mut self, mut col: usize, cp: char, width: u8, right: usize) {
         let cursor = self.screen().cursor.clone();
         self.ensure_row_cells(cursor.row, col + usize::from(width));
-        let old_width = self.screen().row(cursor.row).cells[col].width();
-        if self
-            .screen()
-            .row(cursor.row)
+        let row = self.screen().cursor_row();
+        let cell = row.cells[col];
+        let old_width = cell.width();
+        if row
             .grapheme(col)
             .is_some_and(|allocation| allocation.len >= 64)
         {
@@ -1175,8 +1175,7 @@ impl Terminal {
             if !self.modes.dec(7) {
                 return;
             }
-            let cell = self.screen().row(cursor.row).cells[col].clone();
-            let text = self.screen().row(cursor.row).copy_cell(col).text;
+            let text = row.copy_cell(col).text.map(|(text, _)| text);
             self.screen_mut().cursor.col = col;
             if text.is_some() {
                 // Native moves existing grapheme data without printing a

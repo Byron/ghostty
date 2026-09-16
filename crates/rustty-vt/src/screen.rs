@@ -329,12 +329,11 @@ pub struct Rows<'a> {
 
 impl<'a> Rows<'a> {
     fn new(pages: &'a PageList, start: usize, len: usize) -> Self {
-        let locate = |absolute| (pages.page_index(absolute), pages.page_at(absolute).1);
         Self {
             pages,
-            front: if len > 0 { locate(start) } else { (0, 0) },
+            front: if len > 0 { pages.locate(start) } else { (0, 0) },
             back: if len > 0 {
-                locate(start + len - 1)
+                pages.locate(start + len - 1)
             } else {
                 (0, 0)
             },
@@ -758,6 +757,11 @@ impl Screen {
         page.cells[page.slot(row, col)]
     }
     #[inline]
+    pub(crate) fn cursor_row(&self) -> Row<'_> {
+        let (index, row) = self.cursor_location();
+        self.pages.pages[index].row(row)
+    }
+    #[inline]
     pub fn cell_text<'a>(&self, row: impl Into<Row<'a>>, col: usize) -> CellText<'a> {
         row.into().text(col)
     }
@@ -822,8 +826,7 @@ impl Screen {
     }
 
     fn locate(&self, absolute: usize) -> (usize, usize) {
-        let (_, row) = self.pages.page_at(absolute);
-        (self.pages.page_index(absolute), row)
+        self.pages.locate(absolute)
     }
 
     #[inline]
@@ -928,10 +931,11 @@ impl Screen {
         self.set_cell_style(y, col, style);
         if suffix > 0 {
             let absolute = self.history_len() + y;
+            let mut location = self.locate(absolute);
             let allocation = self
-                .acquire_grapheme(absolute, suffix as u8)
+                .acquire_grapheme(absolute, &mut location, suffix as u8)
                 .expect("cell grapheme fits after growth");
-            let (index, row) = self.locate(absolute);
+            let (index, row) = location;
             let page = &mut self.pages.pages[index];
             let slot = page.slot(row, col);
             page.graphemes.set_text(allocation, Arc::from(text));
@@ -944,7 +948,9 @@ impl Screen {
 
     pub fn set_cell_style(&mut self, y: usize, col: usize, style: Style) {
         let absolute = self.history_len() + y;
-        let cell = self.row(y).cells[col];
+        let mut location = self.locate(absolute);
+        let page = &self.pages.pages[location.0];
+        let cell = page.cells[page.slot(location.1, col)];
         let inline = cell.codepoint().is_none()
             && cell.width() == 1
             && !cell.spacer_head()
@@ -956,10 +962,10 @@ impl Screen {
         let id = if inline {
             0
         } else {
-            self.acquire_style(absolute, style, None)
+            self.acquire_style(absolute, &mut location, style, None)
                 .expect("cell style fits after growth")
         };
-        let (index, row) = self.locate(absolute);
+        let (index, row) = location;
         let page = &mut self.pages.pages[index];
         let slot = page.slot(row, col);
         page.styles.release(page.cells[slot].style_id());
@@ -1016,7 +1022,8 @@ impl Screen {
         copy: CellCopy,
         reflow: bool,
     ) -> Result<(), SetFull> {
-        let (index, row) = self.locate(absolute);
+        let mut location = self.locate(absolute);
+        let (index, row) = location;
         let page = &mut self.pages.pages[index];
         let slot = page.slot(row, col);
         page.clear_cell(slot, Color::Default);
@@ -1029,10 +1036,9 @@ impl Screen {
         }
         page.cells[slot] = cell;
         page.mark_cell(row, cell);
-        if let Some(text) = copy.text {
-            let len = text.chars().count().saturating_sub(1);
-            if let Ok(allocation) = self.acquire_grapheme(absolute, len as u8) {
-                let (index, row) = self.locate(absolute);
+        if let Some((text, len)) = copy.text {
+            if let Ok(allocation) = self.acquire_grapheme(absolute, &mut location, len) {
+                let (index, row) = location;
                 let page = &mut self.pages.pages[index];
                 let slot = page.slot(row, col);
                 page.graphemes.set_text(allocation, text);
@@ -1047,7 +1053,7 @@ impl Screen {
             let link = HyperlinkKey::from_data(&data);
             let id = if reflow {
                 loop {
-                    let index = self.pages.page_index(absolute);
+                    let index = location.0;
                     match self.pages.pages[index]
                         .links
                         .reflow_cell(link, copy.link_id)
@@ -1064,11 +1070,11 @@ impl Screen {
                     }
                 }
             } else {
-                self.acquire_link_cell(absolute, link, copy.link_id)
+                self.acquire_link_cell(location.0, link, copy.link_id)
                     .unwrap_or(0)
             };
             if id != 0 {
-                let (index, row) = self.locate(absolute);
+                let (index, row) = location;
                 let page = &mut self.pages.pages[index];
                 let slot = page.slot(row, col);
                 page.set_link_data(slot, id, data);
@@ -1081,9 +1087,14 @@ impl Screen {
         }
         if copy.cell.style_id() != 0 {
             let id = self
-                .acquire_style(absolute, copy.style, Some(copy.cell.style_id()))
+                .acquire_style(
+                    absolute,
+                    &mut location,
+                    copy.style,
+                    Some(copy.cell.style_id()),
+                )
                 .unwrap_or(0);
-            let (index, row) = self.locate(absolute);
+            let (index, row) = location;
             let page = &mut self.pages.pages[index];
             let slot = page.slot(row, col);
             page.cells[slot].set_style_id(id);
@@ -1092,44 +1103,52 @@ impl Screen {
                 result = Err(SetFull::OutOfMemory);
             }
         }
-        let index = self.pages.page_index(absolute);
-        self.pages.pages[index].refresh_charge();
+        self.pages.pages[location.0].refresh_charge();
         result
     }
 
     pub(crate) fn append_grapheme(&mut self, col: usize, cp: char) -> Result<(), SetFull> {
-        let absolute = self.history_len() + self.cursor.row;
+        let mut location = self.cursor_location();
+        let page = &mut self.pages.pages[location.0];
+        let slot = page.slot(location.1, col);
+        let previous = page.grapheme(slot);
         let mut bytes = [0; 4 * 65];
-        let text = self.row(self.cursor.row).text(col);
-        let len = text.len();
-        bytes[..len].copy_from_slice(text.as_bytes());
+        let len = if let Some(previous) = previous {
+            let text = page.graphemes.text(previous);
+            bytes[..text.len()].copy_from_slice(text.as_bytes());
+            text.len()
+        } else {
+            page.cells[slot]
+                .codepoint()
+                .map_or(0, |base| base.encode_utf8(&mut bytes).len())
+        };
         let len = len + cp.encode_utf8(&mut bytes[len..]).len();
-        let (index, row) = self.locate(absolute);
-        let slot = self.pages.pages[index].slot(row, col);
-        let previous = self.pages.pages[index].grapheme(slot);
-        let allocation = match self.pages.pages[index].graphemes.append(previous) {
+        let allocation = match page.graphemes.append(previous) {
             Ok(allocation) => allocation,
             Err(_) => {
                 if self
-                    .grow_resource_page(index, Some(PageResource::Graphemes))
+                    .grow_resource_page(location.0, Some(PageResource::Graphemes))
                     .is_err()
                 {
+                    let absolute = self.history_len() + self.cursor.row;
                     self.split_resource_page(absolute)?;
+                    location = self.cursor_location();
                 }
-                let (index, row) = self.locate(absolute);
+                let (index, row) = location;
                 let page = &mut self.pages.pages[index];
                 let previous = page.grapheme(page.slot(row, col));
                 page.graphemes.append(previous)?
             }
         };
-        let (index, row) = self.locate(absolute);
+        let (index, row) = location;
         let page = &mut self.pages.pages[index];
         let slot = page.slot(row, col);
         page.grapheme_map.insert(slot as u32, allocation);
         page.cells[slot].set_grapheme(true);
         page.graphemes.set_text(
             allocation,
-            Arc::from(std::str::from_utf8(&bytes[..len]).unwrap()),
+            // The prefix is stored UTF-8; encode_utf8 appends one valid scalar.
+            Arc::from(unsafe { std::str::from_utf8_unchecked(&bytes[..len]) }),
         );
         page.mark_cell(row, page.cells[slot]);
         page.refresh_charge();
@@ -1148,7 +1167,7 @@ impl Screen {
             }
             Some((index, allocation))
         });
-        let (index, row) = self.locate(absolute);
+        let (index, row) = self.cursor_location();
         if let Some((source_index, allocation)) = source
             && source_index == index
         {
@@ -1157,14 +1176,17 @@ impl Screen {
             let slot = page.slot(row, col);
             page.grapheme_map.insert(slot as u32, allocation);
             page.cells[slot].set_grapheme(true);
-            let mut text = String::with_capacity(4 + suffix.len());
-            text.push(
-                page.cells[slot]
-                    .codepoint()
-                    .expect("wrapped grapheme has a base"),
-            );
-            text.push_str(suffix);
-            page.graphemes.set_text(allocation, Arc::from(text));
+            let base = page.cells[slot]
+                .codepoint()
+                .expect("wrapped grapheme has a base");
+            // A pending character-set shift can remap the base while wrapping.
+            // Otherwise the allocation already owns exactly the destination text.
+            if !page.graphemes.text(allocation).starts_with(base) {
+                let mut text = String::with_capacity(4 + suffix.len());
+                text.push(base);
+                text.push_str(suffix);
+                page.graphemes.set_text(allocation, Arc::from(text));
+            }
             page.mark_cell(row, page.cells[slot]);
             page.refresh_charge();
         } else {
@@ -2078,12 +2100,11 @@ impl Screen {
 
     fn acquire_link_cell(
         &mut self,
-        absolute: usize,
+        index: usize,
         link: HyperlinkKey<'_>,
         preferred: u16,
     ) -> Result<u16, SetFull> {
         loop {
-            let index = self.pages.page_index(absolute);
             match self.pages.pages[index].links.copy_cell(link, preferred) {
                 Ok(id) => {
                     self.pages.pages[index].refresh_charge();
@@ -2114,9 +2135,10 @@ impl Screen {
             return true;
         }
         let absolute = self.history_len() + self.cursor.row;
-        match self.acquire_style(absolute, self.cursor.style, None) {
+        let mut location = self.cursor_location();
+        match self.acquire_style(absolute, &mut location, self.cursor.style, None) {
             Ok(id) => {
-                self.cursor_style = Some((self.pages.pages[self.cursor_page_index()].serial, id));
+                self.cursor_style = Some((self.pages.pages[location.0].serial, id));
                 true
             }
             Err(_) => false,
@@ -2145,10 +2167,11 @@ impl Screen {
     fn acquire_style(
         &mut self,
         absolute: usize,
+        location: &mut (usize, usize),
         style: Style,
         preferred: Option<u16>,
     ) -> Result<u16, SetFull> {
-        let index = self.pages.page_index(absolute);
+        let index = location.0;
         let acquire = |set: &mut StyleAdmission| match preferred {
             Some(id) if id != 0 => set.acquire_with_id(style, id),
             _ => set.acquire(style),
@@ -2167,8 +2190,9 @@ impl Screen {
                     .is_err()
                 {
                     self.split_resource_page(absolute)?;
+                    *location = self.locate(absolute);
                 }
-                let index = self.pages.page_index(absolute);
+                let index = location.0;
                 let result = acquire(&mut self.pages.pages[index].styles);
                 self.pages.pages[index].refresh_charge();
                 result
@@ -2179,10 +2203,11 @@ impl Screen {
     fn acquire_grapheme(
         &mut self,
         absolute: usize,
+        location: &mut (usize, usize),
         len: u8,
     ) -> Result<GraphemeAllocation, SetFull> {
         loop {
-            let index = self.pages.page_index(absolute);
+            let index = location.0;
             if let Ok(allocation) = self.pages.pages[index].graphemes.acquire(len) {
                 return Ok(allocation);
             }
@@ -2191,8 +2216,8 @@ impl Screen {
                 .is_err()
             {
                 self.split_resource_page(absolute)?;
-                let index = self.pages.page_index(absolute);
-                return self.pages.pages[index].graphemes.acquire(len);
+                *location = self.locate(absolute);
+                return self.pages.pages[location.0].graphemes.acquire(len);
             }
         }
     }

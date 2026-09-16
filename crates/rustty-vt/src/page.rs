@@ -1,5 +1,10 @@
 //! Typed page storage. Row rotations move headers, leaving physical cell keys stable.
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::{BuildHasher, BuildHasherDefault, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 
 #[cfg(feature = "allocation-probe")]
 use crate::allocation_probe::{Kind, Scope};
@@ -41,7 +46,7 @@ pub(crate) struct CellCopy {
     pub style: Style,
     pub link: Option<Arc<HyperlinkData>>,
     pub link_id: u16,
-    pub text: Option<Arc<str>>,
+    pub text: Option<(Arc<str>, u8)>,
 }
 
 impl CellCopy {
@@ -55,6 +60,30 @@ impl CellCopy {
         }
     }
 }
+
+// Keys are bounded physical cell slots, never user-provided strings. Mix both
+// consecutive and row-strided slots into bucket indices and fingerprints.
+#[derive(Default)]
+pub(crate) struct SlotHasher(u64);
+
+impl Hasher for SlotHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write_u32(&mut self, slot: u32) {
+        let mixed = u64::from(slot).wrapping_mul(0x9e3779b97f4a7c15);
+        self.0 = mixed ^ (mixed >> 32);
+    }
+
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("physical slot maps only hash u32 keys");
+    }
+}
+
+type SlotMap<T> = HashMap<u32, T, BuildHasherDefault<SlotHasher>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Page {
@@ -76,13 +105,13 @@ pub(crate) struct Page {
     #[serde(skip)]
     pub row_ids: Vec<u64>,
     #[serde(skip)]
-    pub grapheme_map: HashMap<u32, GraphemeAllocation>,
+    pub grapheme_map: SlotMap<GraphemeAllocation>,
     #[serde(skip)]
-    pub link_map: HashMap<u32, u16>,
+    pub link_map: SlotMap<u16>,
     // Legacy JSON can give equal native links different display strings or
     // omit their ID. Preserve those uncommon host values outside live words.
     #[serde(skip)]
-    link_overrides: HashMap<u32, Arc<HyperlinkData>>,
+    link_overrides: SlotMap<Arc<HyperlinkData>>,
     #[serde(skip)]
     override_bytes: usize,
     #[serde(skip)]
@@ -128,9 +157,9 @@ impl Page {
                 let _scope = Scope::enter(Kind::PageBuffer);
                 vec![0; usize::from(capacity.rows)]
             },
-            grapheme_map: HashMap::new(),
-            link_map: HashMap::new(),
-            link_overrides: HashMap::new(),
+            grapheme_map: SlotMap::default(),
+            link_map: SlotMap::default(),
+            link_overrides: SlotMap::default(),
             override_bytes: 0,
             map_bytes: [0; 3],
             owned_bytes: 0,
@@ -171,7 +200,7 @@ impl Page {
     pub fn refresh_charge(&mut self) {
         // HashMap::capacity excludes empty buckets; round up to charge the
         // bucket array, control bytes and the sentinel group conservatively.
-        fn map_bytes<K, V>(map: &HashMap<K, V>) -> usize {
+        fn map_bytes<K, V, S: BuildHasher>(map: &HashMap<K, V, S>) -> usize {
             if map.capacity() == 0 {
                 0
             } else {
@@ -279,7 +308,7 @@ impl Page {
             link_id,
             text: self
                 .grapheme(slot)
-                .map(|allocation| self.graphemes.text_arc(allocation)),
+                .map(|allocation| (self.graphemes.text_arc(allocation), allocation.len)),
         }
     }
 
@@ -461,7 +490,7 @@ impl Page {
     }
 
     fn swap_cells(&mut self, a: usize, b: usize) {
-        let swap = |map: &mut HashMap<u32, _>| {
+        let swap = |map: &mut SlotMap<_>| {
             let left = map.remove(&(a as u32));
             let right = map.remove(&(b as u32));
             if let Some(value) = left {
@@ -623,8 +652,10 @@ impl Page {
         );
         styles.reserve_entries(self.styles.count());
         links.reserve_entries(&self.links);
-        let mut grapheme_map = HashMap::with_capacity(self.grapheme_map.len());
-        let mut link_map = HashMap::with_capacity(self.link_map.len());
+        let mut grapheme_map =
+            SlotMap::with_capacity_and_hasher(self.grapheme_map.len(), Default::default());
+        let mut link_map =
+            SlotMap::with_capacity_and_hasher(self.link_map.len(), Default::default());
         let mut pending = Vec::new();
         for row in 0..usize::from(self.rows) {
             if !self.headers[row].has(RowHeader::MANAGED) {

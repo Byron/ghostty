@@ -671,8 +671,6 @@ pub struct Screen {
     /// Host memory policy, separate from native page accounting and snapshots.
     #[serde(skip)]
     pub(crate) memory_limit: Option<usize>,
-    #[serde(skip)]
-    cursor_location: std::cell::Cell<Option<(u64, u64, u64, usize, usize, usize)>>,
     pub(crate) pages: PageList,
     #[serde(skip)]
     pub(crate) cursor_style: Option<(u64, u16)>,
@@ -712,7 +710,6 @@ impl Screen {
             pages,
             cursor_style: None,
             cursor_link: None,
-            cursor_location: std::cell::Cell::new(None),
             next_row: rows as u64,
             tracked: TrackedPoints::default(),
         }
@@ -743,11 +740,7 @@ impl Screen {
     }
     #[inline]
     pub(crate) fn row_columns(&self, y: usize) -> usize {
-        let index = if y == self.cursor.row {
-            self.cursor_location().0
-        } else {
-            self.pages.page_index(self.history_len() + y)
-        };
+        let (index, _) = self.pages.locate_from_end(self.height - 1 - y);
         usize::from(self.pages.pages[index].columns)
     }
     #[inline]
@@ -807,7 +800,6 @@ impl Screen {
             iso_protection: self.iso_protection,
             limits: ScrollbackLimits::NONE,
             memory_limit: None,
-            cursor_location: std::cell::Cell::new(None),
             pages: self.pages.clone_range(
                 self.history_len().saturating_sub(self.viewport_offset),
                 self.height,
@@ -831,39 +823,8 @@ impl Screen {
 
     #[inline]
     fn cursor_location(&self) -> (usize, usize) {
-        let absolute = self.history_len() + self.cursor.row;
-        if let Some((list, serial, generation, index, row, old_absolute)) =
-            self.cursor_location.get()
-            && list == self.pages.identity()
-            && absolute == old_absolute
-            && self
-                .pages
-                .pages
-                .get(index)
-                .is_some_and(|page| page.serial == serial && page.layout_generation == generation)
-        {
-            return (index, row);
-        }
-        let index = self
-            .pages
-            .page_index_from_end(self.height - 1 - self.cursor.row);
-        let after: usize = self
-            .pages
-            .pages
-            .range(index + 1..)
-            .map(|page| usize::from(page.rows))
-            .sum();
-        let page = &self.pages.pages[index];
-        let row = usize::from(page.rows) - (self.height - self.cursor.row - after);
-        self.cursor_location.set(Some((
-            self.pages.identity(),
-            page.serial,
-            page.layout_generation,
-            index,
-            row,
-            absolute,
-        )));
-        (index, row)
+        self.pages
+            .locate_from_end(self.height - 1 - self.cursor.row)
     }
 
     fn cursor_page_index(&self) -> usize {

@@ -97,10 +97,10 @@ impl PageList {
     }
 
     /// Locate a row by its distance from the last row, skipping history pages.
-    pub fn page_index_from_end(&self, mut distance: usize) -> usize {
+    pub fn locate_from_end(&self, mut distance: usize) -> (usize, usize) {
         for (index, page) in self.pages.iter().enumerate().rev() {
             if distance < usize::from(page.rows) {
-                return index;
+                return (index, usize::from(page.rows) - distance - 1);
             }
             distance -= usize::from(page.rows);
         }
@@ -444,8 +444,8 @@ mod tests {
             let total = pages.total_rows();
             for row in 0..total {
                 assert_eq!(
-                    pages.page_index_from_end(total - row - 1),
-                    pages.page_index(row),
+                    pages.locate_from_end(total - row - 1),
+                    pages.locate(row),
                     "row={row}, total={total}"
                 );
             }
@@ -457,5 +457,11 @@ mod tests {
         compare(&pages);
         pages.remove_prefix(2);
         compare(&pages);
+        pages.truncate(2);
+        compare(&pages);
+        for _ in 0..2 {
+            pages.append(capacity, 1);
+            compare(&pages);
+        }
     }
 }

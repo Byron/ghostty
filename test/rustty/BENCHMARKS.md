@@ -2007,3 +2007,94 @@ validation logs and the retained rejected experiments are under
 `target/packed-recovery/`. Final artifacts are in `final/`; renderer/application
 artifacts are in `stage4/`. The final runtime keeps 8-byte cells, page ownership,
 bounded recycling, shared immutable graphemes and the existing public interfaces.
+
+## Removing repeated page bookkeeping, 2026-09-16
+
+The follow-up baseline is the settled `f3897ef8b` source. Its preserved Rust and
+native executables, source archive and provenance are in
+`target/packed-simplify/baseline/`. Builds use Rust 1.95.0 and the same native CPU
+flags as the preceding recovery. Each candidate is compared with the preceding
+accepted binary, with adjacent forward/reverse measurements and 50 samples per
+direction. Acceptance requires at least 5% improvement in a target workload in
+both orders and no separately confirmed regression above 3%.
+
+Twelve fresh, matched six-second profiles cover scalar ASCII printing, plain
+ASCII/Chinese/combining streams, and ASCII/combining reflow in both engines.
+The nominal sampling interval is 1 ms. The table reports physical-symbol sample
+shares, not inclusive call-tree percentages; inlined work can be attributed to
+its caller. Raw profiles and a parsed summary are in `baseline-profiles/`,
+`reflow-profiles/` and `profile-summary.json` under the follow-up artifact root.
+
+| Rustty workload | Main avoidable work in the baseline profile |
+| --- | --- |
+| print/ascii | Cursor lookup 43.1%; row-width lookup 10.9% |
+| stream/ascii | Row-width lookup 30.8%; cursor lookup 13.5%; layout/metadata 10.3% |
+| stream/chinese | Row-width lookup 21.4%; cursor lookup 10.0% |
+| stream/combining | Cursor lookup 28.3%; sparse-map rehash 7.4% |
+| reflow/ascii | Cell installation 20.3%; charge refresh 12.1%; cell copy 9.6% |
+| reflow/combining | Sparse-map rehash 13.3%; cell installation 11.9%; charge refresh 5.9% |
+
+The matching native profiles put ordinary stream work in batched printing,
+decoding and page reclamation. Rustty still spends substantial time repeating
+page lookup and accounting around that work. This motivates four small changes:
+remove the cursor-location cache, check physical widths once per active page,
+defer page-layout work until growth needs it, and skip charge recomputation when
+a cell copy cannot change allocated storage.
+
+### Step 1: locate active rows without a cache
+
+Cursor lookup now returns the page and local row in one backward traversal.
+Row-width queries use that same traversal, so neither path sums history rows
+or validates cached page identities. The production change removes more code
+than it adds. Page identities and layout generations remain available to search.
+
+The clean all-54 comparison is in `step1/comparison/`. An earlier focused run
+overlapped independent Cargo activity and is excluded from acceptance evidence.
+These medians combine both directions; the direction columns are candidate /
+baseline and values below one are faster. Ghostty's combining-overwrite cliff
+still limits what its unusually large overwrite times say about general Unicode
+throughput.
+
+| Workload | Baseline µs | Step 1 µs | Forward ratio | Reverse ratio | Ghostty µs | Step 1 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 19.130 | 13.708 | 0.718× | 0.715× | 6.329 | 2.17× |
+| print/chinese | 34.462 | 27.087 | 0.790× | 0.778× | 12.311 | 2.20× |
+| print/combining | 47.852 | 41.855 | 0.869× | 0.881× | 413.054 | 0.10× |
+| print/emoji | 49.365 | 44.468 | 0.902× | 0.899× | 15.276 | 2.91× |
+| feed/ascii | 1.090 | 0.930 | 0.851× | 0.853× | 0.507 | 1.84× |
+| feed/combining | 53.554 | 46.921 | 0.876× | 0.877× | 418.289 | 0.11× |
+| stream/ascii | 23.338 | 17.658 | 0.759× | 0.754× | 6.241 | 2.83× |
+| stream/chinese | 32.372 | 26.872 | 0.826× | 0.836× | 9.641 | 2.79× |
+| stream/combining | 672.002 | 571.622 | 0.851× | 0.851× | 495.872 | 1.15× |
+| stream/emoji | 769.612 | 670.768 | 0.873× | 0.874× | 769.713 | 0.87× |
+| stream_styled/ascii | 27.866 | 21.935 | 0.789× | 0.785× | 8.592 | 2.55× |
+| chunked_stream_mixed/7_bytes | 382.551 | 328.038 | 0.858× | 0.858× | — | — |
+
+The separate `page_spans` benchmark exercises a 1024×96 active screen and 1024
+history lines, including scalar printing at the top, middle and bottom of the
+screen. It leaves the standard 54-workload list unchanged. Its baseline was
+built before the runtime edit; `step1/supplement/` uses the same serial runner
+and 50 samples per direction.
+
+| Supplemental workload | Baseline µs | Step 1 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| page_spans/print | 79.853 | 45.203 | 0.558× | 0.571× |
+| page_spans/stream | 34.534 | 15.572 | 0.453× | 0.450× |
+| page_spans/styled | 35.225 | 16.207 | 0.460× | 0.460× |
+
+Validation passes 308 VT tests, all 57 Rust benchmark correctness checks, and
+14,661 relevant differential comparisons with zero failures or coverage gaps.
+The reverse-lookup test covers prefixes removed, truncation, and subsequent
+appends. All 14 allocation/memory observations exactly match the preceding final
+baseline, including zero allocations for ordinary writes and row exposure within
+capacity. Formatting and diff checks pass.
+
+The only all-54 regression flag was `scalar/chinese`. It did not reproduce
+consistently: full-run ratios were 1.035×/1.120×, the isolated repeat was
+1.014×/1.121×, and the repeat of all four scans was 1.016×/0.863×. Other scans
+also changed direction between processes. An identical-binary control measured
+0.878×/0.910×, despite both labels invoking the same frozen executable. These
+short scans therefore do not establish 3% equivalence; no regression was
+confirmed. All original samples and controls remain in `step1/scan-confirmation/`,
+`step1/scans-repeat/` and `step1/scan-control/`. No other workload exceeded 3%
+in either direction in the complete run.

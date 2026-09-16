@@ -41,3 +41,7 @@ path = "../../test/rustty/allocations.rs"
 [[bench]]
 name = "primitives"
 harness = false
+
+[[bench]]
+name = "page_spans"
+harness = false

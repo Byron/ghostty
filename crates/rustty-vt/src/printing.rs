@@ -3,14 +3,16 @@ use crate::packed::Cell;
 
 pub(crate) const DEST_MASK: u64 = 3 | Cell::STYLE_MASK | Cell::WIDE_MASK | Cell::HYPERLINK_MASK;
 
-#[cfg(not(any(
-    all(target_arch = "aarch64", target_feature = "neon"),
-    all(target_arch = "x86_64", target_feature = "sse2")
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    not(feature = "scalar-kernels")
 )))]
 pub(crate) use scalar::*;
-#[cfg(any(
-    all(target_arch = "aarch64", target_feature = "neon"),
-    all(target_arch = "x86_64", target_feature = "sse2")
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    not(feature = "scalar-kernels")
 ))]
 pub(crate) use simd::*;
 
@@ -72,9 +74,10 @@ mod scalar {
     }
 }
 
-#[cfg(any(
-    all(target_arch = "aarch64", target_feature = "neon"),
-    all(target_arch = "x86_64", target_feature = "sse2")
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    not(feature = "scalar-kernels")
 ))]
 mod simd {
     use super::*;
@@ -99,7 +102,7 @@ mod simd {
 
     #[inline]
     pub(crate) fn destination_narrow(cells: &[Cell], expected: u64) -> usize {
-        // Compare the two 32-bit halves: baseline SSE2 has no 64-bit equality.
+        // Compare both halves while accepting ordinary Cell alignment.
         let mask: u32x4 = cast(DESTINATION_MASK);
         let wanted: u32x4 = cast(u64x2::splat(expected));
         let (chunks, tail) = cells.as_chunks::<2>();

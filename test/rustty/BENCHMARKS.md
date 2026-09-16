@@ -1697,3 +1697,37 @@ The GPU-unavailable sandbox test was rerun successfully with Metal access.
 Artifacts, binaries, manifests, raw samples and logs are in
 `target/packed-recovery/stage4/`; GPU completion and visible presentation remain
 outside the claims of this measurement.
+
+
+### Stage 5: scalar reference kernels and platform defaults
+
+`rustty-vt` now exposes `scalar-kernels` for ARM reference validation and
+measurement. Explicit vector scans/stores run only on aarch64 with NEON;
+x86 and unsupported targets use the existing scalar kernels. LLVM's normal
+optimizations remain enabled. The `wide` dependency is now ARM-only, and
+neither parser events nor the packed representation change.
+
+```sh
+cargo +1.95.0 test --offline -p rustty-vt --lib --tests
+cargo +1.95.0 test --offline -p rustty-vt --lib --tests --features scalar-kernels
+cargo +1.95.0 bench --offline -p rustty-vt --bench primitives --features scalar-kernels
+```
+
+All 306 VT tests pass in both ARM modes. Default-mode tests compare every
+scan/store boundary and field against the scalar implementation. The x86_64
+Linux all-target check also passes; the installed Zig compiler supplies the
+Criterion `alloca` helper's cross C compiler. x86 binaries were checked, not
+executed or performance-tuned on this ARM host.
+
+Four feed/stream controls use 50 samples per direction. “Previous” is the
+wrap-fix binary, “default” keeps NEON, and “reference” enables `scalar-kernels`.
+
+| Workload | Previous µs | Default NEON µs | Scalar reference µs |
+| --- | ---: | ---: | ---: |
+| feed/ascii | 1.063 | 1.062 | 1.133 |
+| feed/chinese | 5.561 | 5.560 | 5.821 |
+| stream/ascii | 22.800 | 22.706 | 22.943 |
+| stream/chinese | 33.916 | 33.798 | 34.801 |
+
+Raw controls and frozen binaries are in `kernel-comparison/`, `kernel-default/`
+and `kernel-scalar/` under `target/packed-recovery/`.

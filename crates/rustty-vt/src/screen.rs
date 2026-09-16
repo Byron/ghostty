@@ -1157,6 +1157,11 @@ impl Screen {
 
     pub(crate) fn move_wrapped_grapheme(&mut self, source_col: usize, suffix: &str) {
         let absolute = self.history_len() + self.cursor.row;
+        // Native transfer stops when scrolling leaves no preceding row. Only
+        // host-budget pruning preserves active text through the saved suffix.
+        if absolute == 0 && (self.memory_limit.is_none() || self.limits.bytes == Some(0)) {
+            return;
+        }
         let source = absolute.checked_sub(1).and_then(|source| {
             let (index, row) = self.locate(source);
             let page = &mut self.pages.pages[index];

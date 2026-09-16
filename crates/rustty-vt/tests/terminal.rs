@@ -111,6 +111,34 @@ fn combining_at_right_edge_respects_grapheme_and_wrap_modes() {
 }
 
 #[test]
+fn wrapped_graphemes_drop_suffixes_when_native_scrolling_discards_the_source() {
+    for (cols, rows, line) in [(3, 1, 1), (3, 2, 2), (1024, 48, 46)] {
+        for alternate in [false, true] {
+            for memory_limit in [None, Some(0), Some(1)] {
+                let mut terminal = Terminal::new(cols, rows, 1000);
+                terminal.set_scrollback_memory_limit(memory_limit);
+                if alternate {
+                    terminal.feed(b"\x1b[?1049h");
+                }
+                terminal.feed(format!("\x1b[?2027h\x1b[{line};{cols}H☺\u{200d}❤").as_bytes());
+                let row = terminal.screen().row(usize::from(line.min(rows - 1)));
+                assert_eq!(
+                    &*row.text(0),
+                    if alternate && rows == 1 {
+                        "☺❤"
+                    } else {
+                        "☺\u{200d}❤"
+                    },
+                    "{cols}x{rows}, alternate={alternate}, host limit={memory_limit:?}"
+                );
+                assert_eq!(row.cells[0].width(), 2);
+                invariant(&terminal);
+            }
+        }
+    }
+}
+
+#[test]
 fn legacy_combining_without_wrap_is_ignored_at_column_zero() {
     let mut terminal = Terminal::new(1, 2, 0);
     terminal.feed("\x1b[?7la\u{596}".as_bytes());

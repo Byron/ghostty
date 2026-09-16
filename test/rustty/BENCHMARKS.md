@@ -1544,3 +1544,25 @@ The final source passes 305 VT library/integration tests, including shared-text
 identity, remapped bases and detached-snapshot lifetimes. Its 6,585 page/layout/
 snapshot comparisons report only the three existing wrapped-grapheme failures,
 with zero coverage gaps. Artifacts are in `target/packed-recovery/stage3/`.
+
+### Wrapped grapheme correctness (separate commit)
+
+When a one-row alternate screen scrolls away a wrapped cluster's source,
+Ghostty's preceding-row pin is absent and its old suffixes are not transferred.
+Rustty now follows that rule: `☺ + ZWJ + ❤` produces `☺❤` at the destination.
+Surviving same-page and cross-page transfers retain their suffixes. The separate
+host memory-budget policy still preserves active text when it prunes primary
+history, including budgets of zero and one byte.
+
+The regression test failed before the fix and passes afterward across both
+screens, same-page/cross-page geometry and host memory limits. All 306 VT tests
+pass, and all 14 allocation/memory observations match stage 3. The complete
+configured differential matrix now passes **61,587 comparisons with zero
+failures**, including the three previously failing delivery variants. This is
+the same matrix used for the packed baseline: all suite flags and 100 generated
+cases. The separate `--thorough` feature-completeness gate remains unchanged.
+
+Two serial timing controls show no material cost: emoji feed is 51.687 → 51.756
+µs and emoji stream is 773.025 → 765.904 µs (50 samples in each order).
+Sources, binaries, raw timings and the full differential log are in
+`target/packed-recovery/wrap-fix/`.

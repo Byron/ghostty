@@ -84,6 +84,10 @@ pub(crate) fn grapheme_break(a: char, b: char, state: &mut u8) -> bool {
         }
         _ => {}
     }
+    // Ordinary characters, including CJK ideographs, need no further joining rules.
+    if a == 0 && b == 0 {
+        return true;
+    }
     if a == L && matches!(b, L | V | LV | LVT)
         || matches!(a, LV | V) && matches!(b, V | T)
         || matches!(a, LVT | T) && b == T
@@ -204,6 +208,27 @@ mod tests {
                 assert_eq!(properties(cp), expected, "{cp:?}");
             }
         }
+    }
+
+    #[test]
+    fn ordinary_boundaries_preserve_state_transitions_and_special_joins() {
+        for (a, b) in [('天', '地'), ('a', '界'), ('é', 'Ｘ')] {
+            for initial in 0..=u8::MAX {
+                let mut state = initial;
+                assert!(grapheme_break(a, b, &mut state));
+                assert_eq!(
+                    state,
+                    if (1..=4).contains(&initial) {
+                        0
+                    } else {
+                        initial
+                    }
+                );
+            }
+        }
+        let mut state = 0;
+        assert!(!grapheme_break('\u{0600}', '天', &mut state));
+        assert!(!grapheme_break('天', '\u{0301}', &mut state));
     }
 
     #[test]

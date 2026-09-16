@@ -1975,6 +1975,23 @@ impl Screen {
         }));
         let index = self.pages.page_index_from_end(self.rows.len() - 1 - blank);
         self.rows[blank].resource_page = Some(self.pages.pages[index].serial);
+        // History insertion leaves surviving rows on their original pages.
+        // Check whole page ranges before paying for individual owner lookups.
+        let mut end = self.rows.len();
+        for page in self.pages.pages.iter().rev() {
+            let start = end.saturating_sub(usize::from(page.rows));
+            if self.rows[start..end]
+                .iter()
+                .any(|row| row.resource_page != Some(page.serial))
+            {
+                break;
+            }
+            if start == 0 {
+                self.sync_cursor_resources();
+                return;
+            }
+            end = start;
+        }
         let count = self.rows.len();
         for offset in 0..count {
             let absolute = self.history.len() + if reverse { count - 1 - offset } else { offset };
@@ -3743,6 +3760,32 @@ mod resource_tests {
             &link
         ));
         assert_references(screen);
+    }
+
+    #[test]
+    fn scrolling_adopts_unowned_public_links_before_skipping_resource_moves() {
+        let boundary = PageCapacity::initial(128).unwrap().rows;
+        let mut terminal = Terminal::with_limits(128, boundary + 1, ScrollbackLimits::default());
+        let link = Arc::new(HyperlinkData::new(
+            b"https://example.org",
+            Some(HyperlinkId::Explicit(b"public".to_vec())),
+        ));
+        let row = &mut terminal.screen_mut().rows[1];
+        assert!(row.resource_page.is_none());
+        row.cells[0].codepoint = Some('P');
+        row.cells[0].hyperlink = Some(link.clone());
+        terminal.feed(format!("\x1b[{};1H\n", boundary + 1).as_bytes());
+        let cell = &terminal.screen().rows[0].cells[0];
+        assert_eq!(cell.codepoint, Some('P'));
+        assert_ne!(cell.link_id, 0);
+        assert!(Arc::ptr_eq(cell.hyperlink.as_ref().unwrap(), &link));
+        assert_references(terminal.screen());
+
+        terminal.feed(&vec![b'\n'; usize::from(boundary)]);
+        assert_references(terminal.screen());
+        let encoded = crate::snapshot::encode_to_vec(&terminal).unwrap();
+        let restored = crate::snapshot::decode(encoded.as_slice(), Default::default()).unwrap();
+        assert_references(restored.screen());
     }
 
     #[test]

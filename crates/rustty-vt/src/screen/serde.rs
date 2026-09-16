@@ -1,7 +1,7 @@
 //! The JSON text field needs its owning page; metadata uses derived adapters.
 use super::{
     Arc, Cell, CellText, GraphemeAdmission, HashSet, Hyperlink, HyperlinkAdmission, HyperlinkData,
-    HyperlinkId, Row, Screen, StyleAdmission,
+    HyperlinkId, Row, RowView, Screen, StyleAdmission,
 };
 use ::serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 
@@ -29,10 +29,7 @@ impl Serialize for RowsRef<'_> {
                 .take(self.len)
                 .map(|row| RowRef {
                     row,
-                    cells: CellsRef {
-                        screen: self.screen,
-                        row,
-                    },
+                    cells: CellsRef(self.screen.view(row)),
                 }),
         )
     }
@@ -45,21 +42,18 @@ struct RowRef<'a> {
     cells: CellsRef<'a>,
 }
 
-struct CellsRef<'a> {
-    screen: &'a Screen,
-    row: &'a Row,
-}
+struct CellsRef<'a>(RowView<'a>);
 
 impl Serialize for CellsRef<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(
-            self.row
-                .cells
+            self.0
+                .cells()
                 .iter()
                 .enumerate()
                 .map(|(col, cell)| CellRef {
                     cell,
-                    text: self.screen.cell_text(self.row, col),
+                    text: self.0.text(col),
                 }),
         )
     }

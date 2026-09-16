@@ -352,6 +352,26 @@ impl Default for Cell {
 }
 
 impl Cell {
+    pub fn codepoint(&self) -> Option<char> {
+        self.codepoint
+    }
+
+    pub fn width(&self) -> u8 {
+        self.width
+    }
+
+    pub fn protected(&self) -> bool {
+        self.protected
+    }
+
+    pub fn semantic(&self) -> SemanticContent {
+        self.semantic
+    }
+
+    pub fn spacer_head(&self) -> bool {
+        self.spacer_head
+    }
+
     pub(crate) fn clear_link(&mut self) {
         self.link_id = 0;
         self.hyperlink = None;
@@ -386,6 +406,49 @@ pub struct Row {
     /// Input denotes a prompt continuation. Cells keep their own content kind.
     pub semantic: SemanticContent,
     pub dirty: bool,
+}
+
+/// Borrow a row and its resource owner together. Resolve the page once, then
+/// read text, styles and links without searching the screen for each cell.
+#[derive(Clone, Copy, Debug)]
+pub struct RowView<'a> {
+    row: &'a Row,
+    page: Option<&'a Page>,
+}
+
+impl<'a> RowView<'a> {
+    pub fn cells(self) -> &'a [Cell] {
+        &self.row.cells
+    }
+
+    pub fn text(self, col: usize) -> CellText<'a> {
+        let cell = &self.row.cells[col];
+        match cell.grapheme.filter(|_| cell.codepoint.is_some()) {
+            Some(allocation) => CellText(CellTextStorage::Grapheme(
+                self.page
+                    .expect("grapheme has an owning page")
+                    .graphemes
+                    .text(allocation),
+            )),
+            None => CellText::scalar(cell.codepoint),
+        }
+    }
+
+    pub fn style(self, col: usize) -> Style {
+        self.row.cells[col].style
+    }
+
+    pub fn hyperlink(self, col: usize) -> Option<&'a HyperlinkData> {
+        self.row.cells[col].hyperlink.as_deref()
+    }
+}
+
+impl std::ops::Deref for RowView<'_> {
+    type Target = Row;
+
+    fn deref(&self) -> &Row {
+        self.row
+    }
 }
 
 pub(crate) struct RowCopy {
@@ -758,6 +821,19 @@ impl Screen {
 
     pub fn all_rows(&self) -> impl DoubleEndedIterator<Item = &Row> {
         self.history.iter().chain(self.rows.iter())
+    }
+
+    pub fn view<'a>(&'a self, row: &'a Row) -> RowView<'a> {
+        RowView {
+            row,
+            page: row
+                .resource_page
+                .and_then(|serial| self.pages.pages.iter().find(|page| page.serial == serial)),
+        }
+    }
+
+    pub fn row(&self, row: usize) -> RowView<'_> {
+        self.view(&self.rows[row])
     }
 
     /// Resolve text against its owning screen. Ordinary scalar reads allocate nothing.
@@ -3333,6 +3409,27 @@ type GridPointKey = (u64, usize);
 #[cfg(test)]
 mod text_tests {
     use super::{CellText, CellTextStorage};
+
+    #[test]
+    fn contextual_view_resolves_detached_resources_and_blank_backgrounds() {
+        let mut terminal = crate::Terminal::new(8, 2, 0);
+        terminal.feed(b"\x1b[41m\x1b[2K\x1b[1;32m\x1b]8;id=opaque;https://example/\xff\x07");
+        terminal.feed("a\u{301}".as_bytes());
+        let snapshot = terminal.screen().snapshot_viewport();
+        terminal.feed(b"\x1b[0m\x1b]8;;\x07\x1b[2J");
+        drop(terminal);
+        let row = snapshot.row(0);
+        assert_eq!(&*row.text(0), "a\u{301}");
+        assert_eq!(row.cells()[0].codepoint(), Some('a'));
+        assert!(row.style(0).bold);
+        assert_eq!(row.style(0).foreground, super::Color::Indexed(2));
+        assert_eq!(row.style(1).background, super::Color::Indexed(1));
+        assert_eq!(
+            row.hyperlink(0).unwrap().uri_bytes(),
+            b"https://example/\xff"
+        );
+        assert!(row.hyperlink(1).is_none());
+    }
 
     #[test]
     fn inline_text_matches_utf8_for_every_scalar() {

@@ -5024,3 +5024,34 @@ Frozen source, executables, all accepted samples and controls, assembly, allocat
 observations and validation are under `target/packed-simplify/step49c/`.
 Application-wide timing and the native scheduling smoke retain their previously
 documented limitations.
+
+
+### Step 50 experiment: reuse the scalar wide-store loop (not retained)
+
+Matched Chinese-scrolling profiles put 373 of 5,037 Rustty self samples (7.4%)
+in the handwritten wide-cell store. Its assembly loads codepoints into scalar
+registers before constructing two-lane vectors. Reusing the existing scalar
+loop removes 15 net source lines and lets LLVM load vectors directly, handling
+16 codepoints per main-loop iteration. The generated code improves scrolling,
+but the complete workloads do not meet the acceptance threshold.
+
+Frozen Rust 1.95.0 binaries use native ARM flags, adjacent comparisons and 50
+samples per direction. The guard waits automatically for independent builds.
+One interrupted profile was excluded and both profiles were recaptured.
+
+| Workload | Before µs | Candidate µs | Ghostty µs | Candidate / before, forward / reverse |
+| --- | ---: | ---: | ---: | ---: |
+| feed/ascii | 0.418 | 0.432 | 0.506 | 1.052× / 1.020× |
+| feed/chinese | 2.295 | 2.180 | 445.547 | 0.973× / 0.937× |
+| stream/chinese | 9.860 | 9.532 | 9.497 | 0.970× / 0.967× |
+| stream_styled/chinese | 13.456 | 13.169 | 37.015 | 0.977× / 0.981× |
+
+Chinese scrolling improves 3.0–3.3%; Chinese feed improves 2.7%/6.3%.
+No complete feed/stream workload improves at least 5% in both orders, so the
+candidate is restored without a broader sweep. The ASCII-feed slowdown is
+retained in the record; regression controls are unnecessary for this rejection.
+All 328 VT tests, both benchmark self-checks and formatting pass. Sources,
+frozen binaries, assembly, matched profiles and all 1,200 timing samples are
+preserved in `target/packed-simplify/step50/`. The step-49 core, full Ghostty
+table and validation remain current. The native Chinese-feed cliff retains
+the workload-specific limitation described above.

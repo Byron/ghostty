@@ -393,29 +393,30 @@ impl Renderer {
                 (true, true) => FontStyle::BoldItalic,
             };
             let glyphs = self.shape(text, font_style)?;
-            let column = |g: &ShapedGlyph| {
-                sources[sources
+            let source = |g: &ShapedGlyph| {
+                sources
                     .partition_point(|(byte, _)| *byte <= g.cluster)
-                    .saturating_sub(1)]
-                .1
+                    .saturating_sub(1)
             };
-            let mut anchors = HashMap::new();
+            // Source indices are dense within this run, including wide cells.
+            let mut anchors = vec![None; sources.len()];
             for glyph in glyphs.iter() {
                 if glyph.advance > 0.0 {
-                    anchors.entry(column(glyph)).or_insert(glyph.x);
+                    anchors[source(glyph)].get_or_insert(glyph.x);
                 }
             }
             for glyph in glyphs.iter() {
-                anchors.entry(column(glyph)).or_insert(glyph.x);
+                anchors[source(glyph)].get_or_insert(glyph.x);
             }
             for glyph in glyphs.iter() {
                 let cached = self.glyph(glyph)?;
                 if cached.size.contains(&0) {
                     continue;
                 }
-                let col = column(glyph);
+                let source = source(glyph);
+                let col = sources[source].1;
                 let x = options.padding[0] + col as f32 * metrics.cell_width as f32 + glyph.x
-                    - anchors[&col]
+                    - anchors[source].unwrap()
                     + cached.bearing[0] as f32;
                 let y = top + metrics.baseline - glyph.y - cached.bearing[1] as f32;
                 frame.quads.push(Quad {
@@ -704,6 +705,62 @@ fn decorations(
 mod tests {
     use super::*;
     use rustty_vt::{GridPoint, Selection, Terminal};
+
+    #[test]
+    fn glyph_anchors_preserve_marks_wide_cells_and_unordered_clusters() {
+        let mut renderer = Renderer::new(FontConfig::default()).unwrap();
+        let glyph = renderer.fonts.shape("a", FontStyle::Regular).unwrap()[0].clone();
+        let bearing = renderer.glyph(&glyph).unwrap().bearing[0] as f32;
+        // The first cluster-3 glyph is a mark before its advancing base.
+        // Cluster 6 has only marks and therefore anchors at its first glyph.
+        let glyphs: Vec<_> = [
+            (3, 20.0, 0.0),
+            (0, 80.0, 8.0),
+            (3, 24.0, 8.0),
+            (3, 27.0, 0.0),
+            (6, 11.0, 0.0),
+            (6, 12.0, 0.0),
+        ]
+        .into_iter()
+        .map(|(cluster, x, advance)| ShapedGlyph {
+            cluster,
+            x,
+            advance,
+            ..glyph.clone()
+        })
+        .collect();
+        renderer.shaped[FontStyle::Regular as usize].insert("a\u{301}界b".into(), glyphs.into());
+        let mut terminal = Terminal::new(4, 1, 0);
+        terminal.feed("\x1b[?2027ha\u{301}界b".as_bytes());
+        let options = RenderOptions::default();
+        let mut frame = Frame::empty(options.size);
+        renderer
+            .row_text(
+                terminal.screen().row(0),
+                &[Color::rgb([255; 3]); 4],
+                0.0,
+                &options,
+                &mut frame,
+            )
+            .unwrap();
+        let width = renderer.metrics().cell_width as f32;
+        let positions: Vec<_> = frame
+            .quads
+            .iter()
+            .map(|q| q.rect[0] - options.padding[0] - bearing)
+            .collect();
+        assert_eq!(
+            positions,
+            [
+                width - 4.0,
+                0.0,
+                width,
+                width + 3.0,
+                3.0 * width,
+                3.0 * width + 1.0
+            ]
+        );
+    }
 
     #[test]
     fn blink_metadata_matches_visible_text_and_decorations() {

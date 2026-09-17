@@ -12,6 +12,8 @@ changes. Each table identifies its measured source; stage ratios are not
 multiplied.
 The newer [step 26 comparison](#step-26-expose-initialized-rows-without-clearing-them-again)
 covers printing, feed, scrolling and reflow after removing redundant row resets.
+The [step 35 renderer comparison](#step-35-index-glyph-anchors-directly-during-frame-preparation)
+uses the supplied scrolling profile to remove per-run glyph-anchor hashing.
 
 ```sh
 cargo bench --offline -p rustty-vt --bench primitives
@@ -3529,3 +3531,205 @@ passes 480 tests with two opt-in platform tests ignored; it runs outside the
 sandbox because the retained-GPU-frame test needs a Metal adapter. Validated
 Rust source matches the frozen measured patch. The focused parity run does
 not replace the complete configured suite recorded at step 19.
+
+### Step 27 experiment: share the screen borrow during scalar writes (rejected)
+
+Selecting the active screen once for charset mapping and cell writing removes
+a repeated selection, but does not improve any printing case by 5% in both
+orders. ASCII printing measures 9.024 → 10.577 µs (1.151×/1.202×); Chinese,
+combining and emoji printing stay within 2%. The change is reverted. All
+313 default VT tests and 57 benchmark checks passed. Frozen binaries, source
+and all four 50-sample comparisons remain in `target/packed-simplify/step27/`.
+
+### Step 28 experiments: reuse the location through grapheme append (rejected)
+
+Using the validated row for Unicode's preceding-cell lookup alone falls short
+of a 5% gain in both orders. Carrying that location through append improves
+emoji printing and complete feed about 10%, but produces an ASCII-print
+regression. Reducing the append argument list restores the original printing
+stack-frame size without fixing that regression. Keeping the original
+preceding-cell lookup narrows the change and retains a 7–8% emoji gain; ASCII
+printing still fails the regression check. None of these variants is retained.
+
+| Variant | Emoji print forward / reverse | Emoji feed forward / reverse | ASCII print forward / reverse |
+| --- | ---: | ---: | ---: |
+| Preceding row only (`step28`) | 0.969× / 0.978× | 0.965× / 0.984× | 1.005× / 1.207× |
+| Row and append (`step28b`) | 0.902× / 0.898× | 0.892× / 0.900× | 0.924× / 1.126× |
+| Fewer append arguments (`step28c`) | 0.906× / 0.913× | 0.923× / 0.908× | 1.111× / 1.193× |
+| Append only (`step28d`) | 0.917× / 0.919× | 0.925× / 0.921× | 1.042× / 1.081× |
+
+The second variant's ASCII repeat measures 0.935×/1.113×, with identical
+baseline controls at 0.882×/1.025×. The final variant repeats at
+1.073×/1.015×, with controls at 0.979×/1.001×. The final forward slowdown
+reproduces. A smaller instruction count and restored stack-frame size did
+not establish faster execution; the runtime cause of the ASCII sensitivity
+remains unresolved. All four variants pass 313 default VT tests and 57
+benchmark checks. Frozen patches, binaries, initial samples and controls are
+retained under `target/packed-simplify/step28{,b,c,d}/`.
+
+### Step 29 experiments: eager packed-codepoint validation (rejected)
+
+An eager `then_some` expression preserves Unicode validation and simplifies
+the accessor, but slows ASCII text reading 44.1%/43.4% while improving scalar
+scans 9.9%/5.6%. Assembly confirms that empty cells now execute the character
+validation instructions in the text-reading loop. Restoring the empty-cell
+early return restores text reading (1.001×/0.997×), but scalar scans measure
+0.874×/1.086× and no longer qualify in both orders. Both versions are reverted.
+Each passes 314 VT tests and 57 benchmark checks, including checks for invalid
+Unicode and arbitrary public cell bits. Source, binaries and 50-sample
+comparisons are retained in `target/packed-simplify/step29/` and `step29b/`.
+
+### Step 30 experiment: mark a replaced row once (rejected)
+
+Moving the row-metadata update outside the general cell-replacement loop
+improves Chinese printing 5.8%/5.4%, but ASCII printing regresses 9.4%/24.9%.
+The ASCII repeat measures 1.127×/1.236×, with identical-baseline controls at
+0.964×/1.090×. The regression persists beyond the observed control variation,
+so the change is reverted. Combining printing measures 1.011×/1.019× and
+emoji printing 0.991×/0.990×. All 313 VT tests and 57 benchmark checks pass;
+source, binaries, all four print comparisons and the control remain in
+`target/packed-simplify/step30/`.
+
+### Step 31 experiment: pass the validated location to ASCII batches (rejected)
+
+Reusing width validation's cursor location in the ASCII batch writer does not
+produce a qualifying gain: complete ASCII feed measures 0.994×/1.001×, plain
+scrolling 0.998×/1.017×, styled scrolling 1.013×/1.016×, and scalar printing
+1.025×/1.002×. The change is reverted. All 313 VT tests and 57 benchmark checks
+pass. All four comparisons, source and binaries remain under
+`target/packed-simplify/step31/`.
+
+### Step 32 experiment: write reflow's known final row (rejected)
+
+Using the last exposed row for reflow cell installation, spacer-tail copies
+and row metadata reduces retained-history emoji reflow 4.6%/3.1%. Viewport
+emoji reflow measures 0.980×/0.995×, retained combining reflow 0.986×/1.030×,
+and the ASCII-printing guard 1.093×/0.993×. No case reaches 5% in both orders,
+so the change is reverted. All 313 VT tests and 57 benchmark checks pass.
+The four comparisons and frozen candidate are in `target/packed-simplify/step32/`.
+
+### Step 33 experiment: validate cursor resources on the appended page (rejected)
+
+Reporting the cursor-resource match from the resolved append page avoids a
+second lookup during final synchronization. Emoji printing improves only
+2.7%/2.2%, emoji feed 1.7%/0.5%, and combining feed 0.1%/2.2%; no case qualifies.
+The ASCII-printing guard measures 1.126×/1.001×. The change is reverted. All
+314 VT tests and 57 benchmark checks pass, including public cursor style/link
+edits and detached snapshots on both screens. Frozen source and measurements
+remain in `target/packed-simplify/step33/`.
+
+
+### Step 34 experiment: combine two width-preserving grapheme appends (not retained)
+
+Fresh matched emoji-feed profiles show 511/5,048 Rust samples in text copying,
+with host allocation/free work also prominent; the native profile has no
+comparable host allocator cost. A bounded pair path retains both native
+admission calls but allocates only the final immutable text. Pairs fall back
+when the second admission could allocate or either scalar changes width.
+
+Emoji feed improves 29.4% in both orders (33.317 → 23.543 µs), reaching 1.35×
+the adjacent Ghostty measurement. Emoji scrolling improves 24.7%/25.4%.
+However, ASCII printing measures 1.118×/1.058× and repeats at 1.007×/1.225×;
+identical-baseline controls are 0.992×/1.093×. Combining feed repeats at
+1.025×/1.034× with controls 0.992×/1.000×. This version is not retained.
+All 315 VT tests and 57 benchmark checks pass, including allocation and
+scalar/batched checks around native chunk boundaries, maximum cluster length,
+wrapping, both screens and detached text. The measured candidate and all
+samples remain in `target/packed-simplify/step34/`; the matched profiles are in
+`step26c/feed-profiles/`. This is a useful lead, but the guard regressions must
+be resolved before shipping it.
+
+
+### Step 35: index glyph anchors directly during frame preparation
+
+The supplied full-screen scrolling trace (`Rustty-scrolling.trace`, run
+`stop-scroll-stop`, 12.197 seconds) contains 3,368 one-millisecond CPU samples.
+The main thread accounts for 2,628 samples; `Renderer::prepare_once` appears
+in 1,374 stacks. Hashing the temporary glyph-anchor map and growing that map
+account for 432 distinct stacks, all under preparation. PTY readers account
+for only three samples. These are sampled stacks, not frame-latency or GPU
+completion measurements. Exports and the reproducible summary are retained in
+`target/packed-simplify/scrolling-trace/`. The installed executable's source
+revision is not inferred from its trace.
+
+Ghostty's `src/renderer/generic.zig` walks shaped cells using `shaper_cells_i`
+and their stored cell coordinates. Rustty instead rebuilt a `HashMap<usize,
+f32>` for every shaped run to anchor glyph positions. Source indices are
+already dense, so a `Vec<Option<f32>>` removes hashing and repeated map growth.
+It preserves the preference for an advancing glyph over preceding marks and
+the first-glyph fallback for clusters containing only marks. A focused test
+also checks wide cells, UTF-8 source offsets and unordered clusters.
+
+Both sources come from clean archives of `20bf494e9`; only `prepare.rs`
+differs. Rust 1.95.0 and native CPU flags are fixed. The ordinary probe uses
+Menlo 13 pt, scale 1, 120×40 cells and 1200×850 pixels. The supplemental probe
+uses the same font at scale 2 with 3456×2234 pixels, deriving a 215×71 grid
+from the font metrics. Its temporary measurement source is identical in both
+snapshots. Each case warms 50 frames and records 50 in each measurement order.
+Preparation and feed/resize are timed and counted separately.
+
+A shared Cargo target initially reused local artifacts across extracted
+source directories: the first application and supplemental probes had
+identical before/after binary hashes. Those datasets are explicitly marked
+invalid comparisons and retained as identical-binary observations. Cleaning
+all local Rustty packages before each snapshot build fixes this. The clean
+build reproduces both original standard-probe hashes exactly, confirming
+that the standard preparation comparison already used the intended binaries.
+All final supplemental and application comparisons use distinct verified
+hashes; third-party dependency artifacts remain reusable.
+
+| Workload | Standard prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 437.1 → 224.9 | 453.8 → 228.8 | 0.536× / 0.501× | 812 → 572 |
+| scroll_ascii | 420.9 → 224.8 | 446.0 → 242.5 | 0.518× / 0.539× | 774 → 534 |
+| scroll_styled | 396.8 → 231.0 | 419.8 → 237.3 | 0.582× / 0.582× | 1912 → 1477 |
+| mixed_unicode | 436.2 → 225.6 | 461.4 → 229.8 | 0.509× / 0.532× | 812 → 572 |
+| alternate_repaint | 435.2 → 226.7 | 505.6 → 247.4 | 0.543× / 0.481× | 812 → 572 |
+| resize_reflow | 381.1 → 218.9 | 435.2 → 233.7 | 0.572× / 0.578× | 792 → 572 |
+
+| Workload | Scale-2 prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 1208.2 → 679.5 | 1233.2 → 701.0 | 0.548× / 0.576× | 1505 → 1079 |
+| scroll_ascii | 1202.3 → 663.5 | 1247.8 → 709.1 | 0.544× / 0.555× | 1506 → 1080 |
+| scroll_styled | 1160.8 → 660.2 | 1177.5 → 700.5 | 0.575× / 0.564× | 3614 → 2768 |
+| mixed_unicode | 1218.3 → 660.2 | 1259.2 → 690.5 | 0.541× / 0.547× | 1505 → 1079 |
+| alternate_repaint | 1220.0 → 662.5 | 1237.9 → 676.8 | 0.543× / 0.545× | 1505 → 1079 |
+| resize_reflow | 1196.3 → 653.9 | 1268.0 → 695.9 | 0.549× / 0.553× | 1505 → 1079 |
+
+The application replay fixes Menlo 13 pt, a 1200×850 physical window, scale 2
+and a 74×24 terminal. It uses disposable signed bundles, a sleeping PTY and
+50 warmup/50 measured frames per order. Frame CPU includes egui composition,
+accessibility, GPU preparation, encoding and submission. GPU completion and
+visible presentation are unmeasured. The replay deliberately pauses at least
+50 ms between frames, so its intervals are not typing latency or maximum FPS.
+
+| Application workload | Frame CPU median ms, before → after | p95 ms, before → after | Forward / reverse | Process CPU %, before → after | Median RSS MiB, before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cached_redraw | 0.977 → 0.671 | 1.382 → 1.247 | 0.542× / 0.748× | 3.9 → 3.8 | 116.5 → 115.5 |
+| scroll_ascii | 2.517 → 1.802 | 2.919 → 2.500 | 0.622× / 0.880× | 5.5 → 4.4 | 112.4 → 113.4 |
+| scroll_styled | 2.663 → 2.145 | 3.223 → 2.815 | 0.847× / 0.744× | 6.2 → 5.2 | 113.7 → 121.6 |
+| mixed_unicode | 2.830 → 2.352 | 3.185 → 2.655 | 0.841× / 0.791× | 6.3 → 5.6 | 120.7 → 116.7 |
+| alternate_repaint | 2.432 → 2.267 | 3.052 → 2.533 | 1.273× / 0.871× | 5.7 → 6.3 | 120.6 → 120.6 |
+| resize_reflow | 1.785 → 1.912 | 3.049 → 2.725 | 0.798× / 1.376× | 12.0 → 13.1 | 125.2 → 121.2 |
+
+Ordinary scrolling, styled scrolling and mixed Unicode improve in both orders.
+Application alternate repaint initially flags in one order; its repeat is
+0.824×/0.819×. Resize/reflow remains variable: the initial CPU ratios are
+0.798×/1.376×, the repeat is 1.269×/0.972×, and its identical-baseline control
+was 0.997×/1.735×. Its p95 improves in both comparisons. The direction of the
+median slowdown does not repeat, but these samples do not establish 3%
+equivalence or an application resize speedup. All original samples are retained.
+Measured median frame intervals are about 52–58 ms under the replay's imposed
+pause; raw p95/p99 intervals, frame CPU/wall time, process CPU and RSS are
+preserved in the reports.
+
+Preparation improves in both orders across all twelve standard/scale-2 cases.
+Feed/resize allocation counts and requested bytes are unchanged. Standard
+ASCII preparation requests 1,279,184 → 969,904 bytes/frame; its scale-2 case
+requests fewer bytes and makes 1,506 → 1,080 allocation calls. The renderer
+and font checks pass 32 tests. Full workspace validation passes 481 tests
+with two opt-in platform tests ignored, plus workspace/all-target and formatting
+checks. The measured renderer source matches the validated working source.
+The core VT code is unchanged by this step. This establishes renderer and
+application improvements; it is not an application performance ratio to Ghostty.
+Artifacts are under `target/packed-simplify/step35/`.

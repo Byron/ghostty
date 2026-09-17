@@ -1028,6 +1028,20 @@ impl Terminal {
                     self.generation = self.generation.wrapping_add(count as u64);
                     offset += count;
                 } else {
+                    if graphemes && codepoints[offset] == '\u{200d}' && offset + 1 < len {
+                        let count = self.screen_mut().append_zwj_pair(
+                            codepoints[offset + 1],
+                            unicode::Properties::from_bits(properties[offset + 1]).grapheme,
+                            right,
+                            &mut state,
+                        );
+                        if count != 0 {
+                            self.grapheme_state = state;
+                            self.generation = self.generation.wrapping_add(count as u64);
+                            offset += count;
+                            continue;
+                        }
+                    }
                     // Scalar printing resolves wrapping, joins and resource growth.
                     self.print_with_properties(
                         codepoints[offset],

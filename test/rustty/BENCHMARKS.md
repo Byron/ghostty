@@ -4488,3 +4488,160 @@ and application scheduling are unchanged; the Ghostty table still applies,
 and application-wide performance remains unresolved. Source, binaries,
 exhaustive check, all samples and validation are under
 `target/packed-simplify/step43/`.
+
+
+### Step 44: build one shared payload for a ZWJ pair
+
+Ghostty's `Page.appendGrapheme` normally appends into spare page-chunk space.
+Rustty's matched emoji-feed profile instead spends 511/5,048 samples copying
+text, with additional allocation and release costs for each immutable payload.
+Rustty now joins a ZWJ and its following scalar using one final `Arc<str>`,
+while retaining both native admission operations in their original order.
+The caller only tries this path for a ZWJ in grapheme mode, avoiding the broad
+pair checks from the rejected step-34 experiment.
+
+The pair must preserve an existing wide cell's width and fit within the
+first admission's native chunk. Chunk boundaries, selectors, Latin-1 scalars,
+partial rows and mismatched cursor resources retain scalar handling. The
+first admission may still grow, split or fail; the second cannot require
+another native allocation. Cursor state, REP's previous character, generation,
+shared immutable text and detached-snapshot lifetimes are preserved.
+
+This complete serial comparison measures all 54 Rust workloads and 36
+Ghostty counterparts, with 50 samples in each order (14,400 samples). Rust
+1.95.0, native CPU flags and the harness are unchanged. The before executable
+is the frozen step-26c core: its production and benchmark sources still match
+the core at `59210757e`. The candidate changes only the two core source files;
+renderer and application changes cannot affect these headless measurements.
+Independent build interruptions discard the unfinished workload and resume
+through the existing process guard. No owned builds or profiles overlap.
+The runner's `simd` label denotes the candidate; this change adds no SIMD.
+
+Times below are pooled medians in microseconds. Lower ratios are faster.
+
+| Workload | Before µs | After µs | Ghostty µs | Forward / reverse | After / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.341 | 0.344 | 0.338 | 1.025× / 0.985× | 1.018× |
+| width/chinese | 0.349 | 0.346 | 0.339 | 0.985× / 1.001× | 1.020× |
+| width/combining | 0.343 | 0.349 | 0.425 | 1.016× / 1.017× | 0.821× |
+| width/emoji | 0.310 | 0.310 | 0.317 | 0.986× / 1.036× | 0.978× |
+| print/ascii | 9.188 | 9.234 | 6.230 | 1.056× / 0.990× | 1.482× |
+| print/chinese | 16.404 | 16.691 | 12.169 | 1.023× / 1.027× | 1.372× |
+| print/combining | 29.011 | 30.228 | 399.112 | 1.005× / 1.048× | 0.076× |
+| print/emoji | 31.257 | 30.354 | 15.177 | 0.976× / 0.966× | 2.000× |
+| scalar/ascii | 1.938 | 1.869 | 1.327 | 0.962× / 1.112× | 1.409× |
+| scalar/chinese | 2.168 | 1.644 | 1.309 | 0.754× / 0.829× | 1.256× |
+| scalar/combining | 1.690 | 2.046 | 1.292 | 1.408× / 1.060× | 1.584× |
+| scalar/emoji | 1.853 | 1.835 | 1.298 | 1.001× / 0.845× | 1.414× |
+| read/ascii | 2.797 | 2.778 | 1.938 | 0.994× / 0.993× | 1.433× |
+| read/chinese | 2.861 | 2.858 | 1.957 | 1.007× / 0.994× | 1.460× |
+| read/combining | 3.325 | 3.317 | 5.950 | 0.992× / 1.002× | 0.557× |
+| read/emoji | 3.224 | 3.226 | 2.448 | 1.002× / 1.001× | 1.318× |
+| clone/ascii | 4.932 | 4.913 | 5.816 | 0.995× / 0.999× | 0.845× |
+| clone/chinese | 4.947 | 4.944 | 5.987 | 0.999× / 0.999× | 0.826× |
+| clone/combining | 6.270 | 6.262 | 17.498 | 0.994× / 1.002× | 0.358× |
+| clone/emoji | 5.670 | 5.702 | 9.935 | 1.002× / 1.008× | 0.574× |
+| reflow/ascii | 19.361 | 19.380 | 25.285 | 1.008× / 0.989× | 0.766× |
+| reflow/chinese | 20.395 | 20.285 | 28.051 | 1.009× / 0.983× | 0.723× |
+| reflow/combining | 49.003 | 48.575 | 52.806 | 0.994× / 0.990× | 0.920× |
+| reflow/emoji | 37.819 | 39.244 | 33.993 | 0.995× / 1.082× | 1.154× |
+| feed/ascii | 0.507 | 0.505 | 0.500 | 0.989× / 1.001× | 1.009× |
+| feed/chinese | 2.261 | 2.273 | 442.884 | 1.014× / 1.005× | 0.005× |
+| feed/combining | 32.524 | 33.198 | 415.906 | 1.024× / 1.018× | 0.080× |
+| feed/emoji | 33.138 | 19.548 | 17.537 | 0.591× / 0.586× | 1.115× |
+| stream/ascii | 6.349 | 6.361 | 5.855 | 1.011× / 0.987× | 1.086× |
+| stream/chinese | 10.174 | 10.121 | 9.164 | 1.000× / 0.993× | 1.104× |
+| stream/combining | 446.950 | 450.552 | 489.896 | 1.008× / 1.009× | 0.920× |
+| stream/emoji | 470.143 | 300.224 | 762.655 | 0.635× / 0.641× | 0.394× |
+| stream_styled/ascii | 10.112 | 10.184 | 8.288 | 1.022× / 0.985× | 1.229× |
+| stream_styled/chinese | 13.933 | 14.091 | 36.670 | 1.020× / 1.001× | 0.384× |
+| stream_styled/combining | 529.691 | 527.688 | 492.735 | 0.998× / 0.994× | 1.071× |
+| stream_styled/emoji | 613.923 | 445.312 | 809.676 | 0.726× / 0.728× | 0.550× |
+| chunked_feed_mixed/whole | 62.638 | 54.921 | — | 0.869× / 0.890× | — |
+| chunked_feed_mixed/7_bytes | 87.201 | 86.270 | — | 0.992× / 0.984× | — |
+| chunked_feed_mixed/4_KiB | 62.105 | 54.758 | — | 0.885× / 0.878× | — |
+| chunked_stream_mixed/whole | 191.850 | 172.082 | — | 0.901× / 0.893× | — |
+| chunked_stream_mixed/7_bytes | 282.924 | 281.221 | — | 0.996× / 0.992× | — |
+| chunked_stream_mixed/4_KiB | 192.169 | 168.177 | — | 0.872× / 0.882× | — |
+| reflow_history/ascii | 509.517 | 512.506 | — | 1.024× / 0.983× | — |
+| reflow_history/chinese | 342.776 | 342.028 | — | 0.993× / 1.001× | — |
+| reflow_history/combining | 4525.317 | 4558.625 | — | 1.012× / 1.007× | — |
+| reflow_history/emoji | 2939.354 | 2933.768 | — | 0.996× / 1.002× | — |
+| stream_memory_capped/ascii | 6.490 | 6.514 | — | 1.011× / 0.998× | — |
+| stream_memory_capped/chinese | 10.165 | 10.189 | — | 0.983× / 1.011× | — |
+| stream_memory_capped/combining | 441.832 | 443.547 | — | 1.002× / 1.008× | — |
+| stream_memory_capped/emoji | 467.127 | 296.269 | — | 0.632× / 0.634× | — |
+| stream_styled_memory_capped/ascii | 10.063 | 10.172 | — | 1.023× / 1.007× | — |
+| stream_styled_memory_capped/chinese | 13.934 | 13.990 | — | 1.004× / 1.007× | — |
+| stream_styled_memory_capped/combining | 528.457 | 522.950 | — | 0.989× / 0.991× | — |
+| stream_styled_memory_capped/emoji | 586.054 | 415.743 | — | 0.713× / 0.706× | — |
+
+Emoji feed improves 41.0%, from 33.138 to 19.548 µs, and is now 11.5%
+behind the adjacent Ghostty measurement of 17.537 µs. Emoji scrolling improves
+36.1%, styled emoji scrolling 27.5%, and their memory-capped counterparts
+36.6% and 29.1%. Mixed whole-buffer and 4 KiB feeds/streams improve 10–13%;
+seven-byte delivery remains roughly unchanged because fewer pairs arrive
+together. The earlier focused comparison independently finds 0.586×/0.588×
+for emoji feed.
+
+Ordinary ASCII feed remains at parity with Ghostty. ASCII and Chinese
+scrolling remain 9–10% slower, styled ASCII scrolling is 23% slower, and
+non-combining text reads remain 32–46% slower. Direct emoji `print` calls
+remain about twice as slow: this change batches input already available in
+a complete feed. Native Chinese-feed and combining-overwrite resource cliffs
+remain workload-specific and do not establish general Unicode superiority.
+
+All six original flags were repeated, then measured with the exact same
+baseline and candidate executables under both labels. These also have 50
+samples per direction; none of the original results is replaced.
+
+| Workload | Original after / before | Repeat after / before | Identical baseline | Identical candidate |
+| --- | ---: | ---: | ---: | ---: |
+| width/emoji | 0.986× / 1.036× | 1.011× / 1.011× | 1.006× / 1.039× | 0.999× / 0.964× |
+| print/ascii | 1.056× / 0.990× | 1.109× / 1.008× | 1.112× / 0.996× | 1.082× / 1.106× |
+| print/combining | 1.005× / 1.048× | 1.003× / 1.010× | 0.956× / 1.008× | 1.010× / 1.001× |
+| scalar/ascii | 0.962× / 1.112× | 0.951× / 0.875× | 0.860× / 0.879× | 1.014× / 1.150× |
+| scalar/combining | 1.408× / 1.060× | 0.856× / 0.806× | 1.024× / 1.274× | 1.021× / 0.826× |
+| reflow/emoji | 0.995× / 1.082× | 0.976× / 0.982× | 0.993× / 1.009× | 1.007× / 0.992× |
+
+The scalar/combining slowdown reverses in the repeat, while identical binaries
+vary by up to 27% in this check. The adverse ASCII-print repeat in the forward
+order (1.109×) is matched by its identical-baseline control (1.112×); the
+identical candidate also produces 1.082×/1.106×. The earlier focused ASCII
+result was 1.068×/1.067×, its first repeat 1.032×/1.013×, and its earlier
+identical controls 1.051×/1.007× and 0.915×/0.992×. These signals do not confirm
+a regression beyond the observed control variability, but do not establish
+3% equivalence for short scans or direct ASCII printing. Disassembly also
+finds the same ordinary-print, cell-write and outer grapheme-append instruction
+sequences apart from relocations and diagnostic addresses; it cannot exclude
+layout or runtime effects. No complete-feed or scrolling regression above 3%
+is observed in either direction.
+
+The existing allocation probe now includes four ZWJ pressure cases. All 14
+original observations match exactly. Each new case feeds the same 4,096
+lines before and after:
+
+| History policy | Heap allocations, before → after | Requested bytes, before → after |
+| --- | ---: | ---: |
+| unlimited | 787,940 → 394,724 | 94,134,571 → 84,697,387 |
+| zero history | 786,486 → 393,270 | 22,561,667 → 13,124,483 |
+| 512 KiB | 787,979 → 394,763 | 94,221,595 → 84,784,411 |
+| 2 MiB | 787,977 → 394,761 | 94,215,659 → 84,778,475 |
+
+Each policy avoids exactly 393,216 host allocations and 9 MiB of requested
+bytes. Across all 18 observations, native admission counts, rebuilds,
+page-buffer allocations, retained rows, final live bytes and conservative
+charges remain unchanged. No additional history eviction hides the savings.
+Ordinary writes and row exposure remain allocation-free within capacity.
+
+Validation passes 327 VT tests with each kernel configuration, 504 workspace
+tests with two opt-in platform tests ignored, workspace/all-target checks,
+x86_64 core checks, formatting and both benchmark self-checks. New regressions
+cover both screens, one-row wrapping, native chunk boundaries, maximum cluster
+length, fragmentation, full snapshots, accounting, generation overflow, one
+allocation per pair and detached text. The configured differential suite
+passes all 61,587 comparisons with zero failures; the separate `--thorough`
+coverage gate remains incomplete. Application-wide timing and the native
+scheduling smoke retain the limitations documented after step 42. Frozen
+source, binaries, all original samples and controls, allocation observations
+and validation are under `target/packed-simplify/step44/`.

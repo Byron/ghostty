@@ -14,6 +14,8 @@ The newer [step 26 comparison](#step-26-expose-initialized-rows-without-clearing
 covers printing, feed, scrolling and reflow after removing redundant row resets.
 The [step 35 renderer comparison](#step-35-index-glyph-anchors-directly-during-frame-preparation)
 uses the supplied scrolling profile to remove per-run glyph-anchor hashing.
+The [step 36 GPU comparison](#step-36-submit-terminal-rectangles-as-gpu-instances)
+measures instanced rectangle uploads and analyzes the static-looking Codex trace.
 
 ```sh
 cargo bench --offline -p rustty-vt --bench primitives
@@ -3733,3 +3735,102 @@ checks. The measured renderer source matches the validated working source.
 The core VT code is unchanged by this step. This establishes renderer and
 application improvements; it is not an application performance ratio to Ghostty.
 Artifacts are under `target/packed-simplify/step35/`.
+
+
+### Step 36: submit terminal rectangles as GPU instances
+
+The renderer previously expanded every rectangle into six 36-byte vertices on
+the CPU. Ghostty instead draws text with a four-vertex instanced triangle strip
+(`src/renderer/generic.zig`). Rustty now sends one 52-byte instance per rectangle;
+the vertex shader selects the same corners, UVs and triangle diagonal.
+Atlas order, alpha blending, coordinate validation and retained-frame behavior
+are unchanged. This reduces geometry upload bytes from 216 to 52 per rectangle.
+
+Clean source snapshots start at `0154bb4c7`; only the GPU renderer and its shader
+differ. The verified stage-35 application is reused as the baseline. Local Cargo
+packages are cleaned between snapshot builds, and executable hashes differ.
+Rust 1.95.0 and native CPU flags are fixed. The temporary upload probe uses the
+existing six frame workloads, Menlo 13 pt, 120×40 cells, and 1200×850 pixels.
+It measures GPU preparation and Rust allocator requests separately from terminal
+feed and CPU text preparation; submission and completion waits occur outside
+that interval. Every case has 50 warmup frames and 50 samples in each order.
+
+| Workload | GPU prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocation bytes/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 58.0 → 24.6 | 65.3 → 31.0 | 0.435× / 0.416× | 430,524 → 104,164 |
+| scroll_ascii | 67.4 → 27.1 | 77.8 → 32.6 | 0.393× / 0.409× | 531,612 → 128,500 |
+| scroll_styled | 58.2 → 25.3 | 68.7 → 29.9 | 0.441× / 0.437× | 430,524 → 104,164 |
+| mixed_unicode | 56.1 → 25.1 | 68.8 → 30.1 | 0.437× / 0.446× | 430,524 → 104,164 |
+| alternate_repaint | 57.7 → 25.3 | 67.1 → 31.7 | 0.438× / 0.438× | 430,524 → 104,164 |
+| resize_reflow | 60.6 → 26.6 | 69.6 → 33.3 | 0.447× / 0.435× | 430,524 → 104,164 |
+
+GPU preparation improves by 55–61% in both orders across all six cases. The
+number of measured Rust allocation calls stays at five per upload; the large
+rectangle allocation shrinks. These counts exclude native driver allocations.
+
+The application comparison uses the same stage-35 replay settings: scale 2,
+74×24 cells, 1200×850 pixels, a sleeping PTY, and at least 50 ms between frames.
+Frame CPU includes preparation, encoding and submission. GPU completion and
+visible presentation are not measured.
+
+| Application workload | Frame CPU median ms, before → after | p95 ms, before → after | Forward / reverse | Process CPU %, before → after | Median RSS MiB, before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cached_redraw | 0.972 → 0.904 | 1.727 → 1.264 | 0.983× / 0.812× | 3.3 → 2.9 | 115.5 → 115.3 |
+| scroll_ascii | 1.779 → 1.739 | 2.635 → 2.435 | 0.897× / 1.052× | 4.7 → 4.7 | 113.7 → 112.7 |
+| scroll_styled | 1.666 → 1.862 | 2.653 → 2.617 | 1.016× / 1.218× | 4.2 → 4.9 | 113.7 → 112.8 |
+| mixed_unicode | 1.728 → 1.620 | 2.471 → 2.381 | 1.011× / 0.914× | 4.8 → 4.3 | 115.9 → 115.8 |
+| alternate_repaint | 1.699 → 1.465 | 2.500 → 2.342 | 0.624× / 0.915× | 4.7 → 3.9 | 117.2 → 115.5 |
+| resize_reflow | 1.073 → 1.498 | 1.986 → 1.903 | 1.402× / 1.275× | 7.7 → 9.7 | 121.3 → 121.1 |
+
+The initial application ASCII and styled-scrolling comparisons flag one order.
+Their repeats improve in both orders: ASCII 0.949×/0.796×, styled
+0.863×/0.992×, with lower pooled p95 CPU time. Mixed Unicode and alternate
+repaint do not exceed the 3% median flag in either initial order.
+
+Resize/reflow remains noisy. Initial CPU ratios are 1.402×/1.275×; the first
+repeat is 1.220×/0.590×. An identical-baseline control is 0.999×/1.129×, and the
+adjacent second repeat is 0.936×/1.061×. That last comparison has essentially
+unchanged pooled median CPU time (1.396 → 1.394 ms) and lower p95
+(1.863 → 1.791 ms). These data do not establish 3% equivalence or a resize
+speedup. The repeatable gain is GPU preparation; full application timing must
+not be presented as a uniform percentage improvement. All samples, including
+the flags and controls, are retained. A competing `codex-tui` build interrupted
+the first resize repeat; the guard discarded that unfinished comparison and
+reran it after the compiler exited.
+
+The Metal pixel test verifies alpha, color, fractional tiled-glyph coverage,
+and returning to an earlier atlas batch after skipping an empty rectangle.
+The disposable native smoke passes retained GPU content, synchronized output,
+resizing, both screens and idle scheduling (one settling redraw). Its first
+candidate attempt timed out waiting for test-shell input; the unchanged
+baseline and repeated candidate both pass. CPU frame timing measures encoding
+and submission, not GPU completion or visible presentation. Raw medians,
+p95/p99, frame intervals, process CPU and RSS are in the application reports.
+Full workspace validation passes 481 tests, with 2 opt-in platform tests
+ignored; workspace/all-target and formatting checks also pass. Feed and CPU
+preparation allocation counts and bytes match in every upload-probe sample.
+The validated source matches the frozen candidate. Artifacts are under
+`target/packed-simplify/step36/`.
+
+#### Supplied static-looking Codex trace
+
+`static-looking-codex-15%-cpu.trace` spans 9.560 seconds and contains 1,327
+one-millisecond CPU samples: approximately 13.9% of one core. Main-thread work
+accounts for 1,107 samples; drawing appears in 946, terminal frame preparation
+in 568, accessibility text construction in 61, and GPU preparation in 48.
+PTY readers account for six samples. About 99% of samples run on efficiency
+cores. Grouping drawing samples separated by more than 20 ms produces 91
+bursts with a median start interval of 102 ms. These are sampled bursts, not
+instrumented frame counts or presentation timestamps.
+
+The user confirmed Codex was working even though its pane looked static. The
+trace does not record redraw-request events, so it cannot prove which update
+triggered each burst. It does show repeated full terminal preparation, including
+203 samples in glyph-anchor hashing/map growth already removed by step 35.
+A small status update is expensive because Rustty invalidates preparation for
+the whole pane on a terminal generation change. Ghostty's `rebuildCells` in
+`src/renderer/generic.zig` skips clean rows, and its shaper run iterator trims
+trailing empty cells. Those are concrete remaining differences to investigate.
+The recorded executable's source revision is unknown; this trace does not
+measure the newer optimizations. Exports, sample stacks and analysis are under
+`target/packed-simplify/static-trace/`.

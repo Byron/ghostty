@@ -3834,3 +3834,96 @@ trailing empty cells. Those are concrete remaining differences to investigate.
 The recorded executable's source revision is unknown; this trace does not
 measure the newer optimizations. Exports, sample stacks and analysis are under
 `target/packed-simplify/static-trace/`.
+
+### Step 37: stop shaping empty row tails
+
+Ghostty's `src/font/shaper/run.zig` trims trailing empty cells before constructing
+shaping runs. Rustty previously converted those cells to spaces, built source
+and anchor arrays, and looked up their glyphs on every prepared frame. Seven
+production lines now limit text preparation to the last nonzero packed cell.
+The raw-bit check conservatively retains styles, backgrounds and wide spacers.
+Backgrounds, selections, decorations and cursors still visit the full row.
+
+Clean snapshots start at `9c596d6f3`; only `prepare.rs` differs. Both receive the
+same seventh workload, `status_update`, which changes one cell in a populated
+Unicode pane. It represents small visible updates during active work, rather
+than an idle application. All probes use Rust 1.95.0, native CPU flags, Menlo
+13 pt, 50 warmup frames and 50 samples in each measurement order. Local Cargo
+packages are cleaned between snapshot builds; source and binary hashes are
+recorded. The preparation probe always prepares a frame, including its
+`cached_redraw` case; the application's corresponding case reuses a whole frame.
+
+At the standard 120×40-cell, 1200×850-pixel size:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 228.8 → 171.2 | 256.7 → 172.4 | 0.748× / 0.758× | 572 → 482 |
+| status_update | 226.8 → 171.0 | 243.8 → 175.7 | 0.745× / 0.767× | 572 → 482 |
+| scroll_ascii | 224.8 → 178.6 | 241.9 → 203.5 | 0.812× / 0.764× | 534 → 522 |
+| scroll_styled | 228.4 → 146.2 | 255.9 → 158.9 | 0.648× / 0.634× | 1,477 → 997 |
+| mixed_unicode | 224.3 → 171.4 | 246.0 → 191.3 | 0.762× / 0.785× | 572 → 482 |
+| alternate_repaint | 225.2 → 170.8 | 231.5 → 173.3 | 0.757× / 0.765× | 572 → 482 |
+| resize_reflow | 216.5 → 171.1 | 238.2 → 186.3 | 0.767× / 0.840× | 572 → 482 |
+
+At scale 2, 3456×2234 pixels and 215×71 cells:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 670.8 → 398.4 | 717.9 → 412.1 | 0.598× / 0.590× | 1,079 → 855 |
+| status_update | 656.4 → 399.8 | 706.5 → 418.0 | 0.598× / 0.617× | 1,079 → 855 |
+| scroll_ascii | 660.4 → 421.6 | 706.5 → 472.2 | 0.683× / 0.640× | 1,080 → 926 |
+| scroll_styled | 665.2 → 348.1 | 727.9 → 368.8 | 0.515× / 0.526× | 2,768 → 1,774 |
+| mixed_unicode | 671.5 → 400.1 | 703.5 → 405.2 | 0.592× / 0.602× | 1,079 → 855 |
+| alternate_repaint | 663.2 → 399.1 | 721.8 → 428.8 | 0.595× / 0.605× | 1,079 → 855 |
+| resize_reflow | 632.7 → 396.0 | 671.2 → 422.3 | 0.634× / 0.607× | 1,079 → 855 |
+
+Preparation improves 16–37% at standard size and 32–49% at Retina size in both
+orders. Retina status updates request 1,190,944 rather than 1,731,056 Rust heap
+bytes per frame; styled scrolling requests 1,442,888 rather than 2,157,160.
+Feed allocation counts and requested bytes match exactly in every paired sample
+at both sizes. Native font/driver allocations are outside these allocator counts.
+
+The application replay retains the earlier settings: 1200×850 pixels, scale 2,
+74×24 cells, a sleeping PTY and a minimum 50 ms pause. Frame CPU covers host
+preparation and GPU command submission, excluding GPU completion and visible
+presentation. These ordinary-scheduling results remain much noisier:
+
+| Workload | Frame CPU median ms, before → after | p95 ms, before → after | Forward / reverse | Process CPU %, before → after | Median RSS MiB, before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cached_redraw | 0.877 → 0.711 | 2.035 → 1.138 | 0.779× / 0.906× | 3.5 → 2.7 | 113.0 → 110.7 |
+| status_update | 1.749 → 1.889 | 2.447 → 2.394 | 1.031× / 1.128× | 4.4 → 5.0 | 116.1 → 116.0 |
+| scroll_ascii | 1.673 → 1.840 | 2.636 → 2.615 | 1.298× / 0.604× | 5.5 → 5.5 | 114.1 → 112.7 |
+| scroll_styled | 2.060 → 1.874 | 2.523 → 2.392 | 0.923× / 0.888× | 5.1 → 4.8 | 113.9 → 113.1 |
+| mixed_unicode | 1.908 → 1.887 | 2.396 → 2.408 | 1.101× / 0.939× | 4.9 → 4.9 | 115.7 → 115.9 |
+| alternate_repaint | 1.859 → 1.793 | 2.341 → 2.192 | 0.905× / 1.004× | 5.2 → 5.0 | 116.4 → 116.4 |
+| resize_reflow | 1.410 → 1.593 | 1.878 → 2.511 | 1.357× / 0.975× | 10.7 → 12.3 | 120.6 → 120.7 |
+
+Fresh Instruments profiles of both status-update replays find 98 drawing
+samples in the approximate measured baseline interval, all on efficiency cores,
+and 82 in the candidate, eight on performance cores. Preparation appears in
+27 versus 17 samples. Their profiled CPU medians are 2.085 versus 1.775 ms.
+This establishes different core placement as a confound, not a controlled
+speedup: only one profiled order was recorded, and profiling affects execution.
+
+A diagnostic run used `/usr/sbin/taskpolicy -b` for both frozen applications.
+Even cached redraws, which bypass the changed code, varied 1.128×/1.426×
+(0.883 → 1.096 ms pooled CPU median). Background policy therefore did not
+establish stable application timing. The guard detected an independent Cargo
+build during the following case; that incomplete case was discarded and the
+diagnostic stopped. Its first launch attempt used a nonexistent tool path and
+produced no measurements. Production scheduling is unchanged.
+
+The accepted gain is preparation time and allocation reduction. The application
+data do not establish a general speedup or 3% equivalence; status updates and
+resize remain unresolved. All initial results, profiles and diagnostic samples
+are retained, including unfavorable measurements and p99/frame-interval data.
+
+The regression test compares sparse rows with explicit space padding for Latin
+ligatures, combining marks, wide cells, Arabic, Hebrew, mixed direction and emoji,
+including cursor and selection geometry. All 482 workspace tests pass, with
+two opt-in platform tests ignored; workspace/all-target and formatting checks
+pass. Native smoke passes on repeat, including retained content, resize,
+synchronized output and idle scheduling. The first candidate and unchanged
+baseline both exceeded the smoke redraw limit with focus/pointer events; the
+test was not weakened. Validated source matches the frozen candidate. Artifacts
+are in `target/packed-simplify/step37/`.

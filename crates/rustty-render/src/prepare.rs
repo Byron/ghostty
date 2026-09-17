@@ -337,6 +337,13 @@ impl Renderer {
         frame: &mut Frame,
     ) -> Result<(), RenderError> {
         let metrics = self.metrics();
+        // Empty row tails have no glyphs. Paints for their backgrounds,
+        // selection, decorations and cursor are handled separately.
+        let end = row.cells()[..paints.len()]
+            .iter()
+            .rposition(|cell| cell.bits() != 0)
+            .map_or(0, |col| col + 1);
+        let paints = &paints[..end];
         let mut col = 0;
         while col < paints.len() {
             let cell = &row.cells()[col];
@@ -705,6 +712,54 @@ fn decorations(
 mod tests {
     use super::*;
     use rustty_vt::{GridPoint, Selection, Terminal};
+
+    #[test]
+    fn empty_tails_skip_shaping_without_moving_unicode_cursor_or_selection() {
+        let mut renderer = Renderer::new(FontConfig::default()).unwrap();
+        for text in [
+            "ffi",
+            "e\u{301}界",
+            "العربية",
+            "עברית 123",
+            "abc العربية 123",
+            "👩🏽‍💻",
+        ] {
+            renderer.clear_cache();
+            let mut terminal = Terminal::new(40, 2, 0);
+            terminal.feed(format!("\x1b[?2027h{text}").as_bytes());
+            let col = terminal.screen().cursor.col;
+            terminal.screen_mut().selection = Some(Selection {
+                start: GridPoint {
+                    row: terminal.screen().row(0).id,
+                    col: 24,
+                },
+                end: GridPoint {
+                    row: terminal.screen().row(1).id,
+                    col: 16,
+                },
+                rectangular: false,
+            });
+            let options = RenderOptions::default();
+            let sparse = renderer.prepare(terminal.screen(), &options).unwrap();
+            assert!(
+                renderer
+                    .shaped
+                    .iter()
+                    .flat_map(HashMap::keys)
+                    .all(|text| !text.trim().is_empty()),
+                "empty row tails were shaped for {text:?}"
+            );
+            // Explicit spaces used to share the same shaping path as empty
+            // cells. They must still produce identical glyph positions.
+            terminal.feed(b"\x1b7");
+            terminal.feed(" ".repeat(40 - col).as_bytes());
+            terminal.feed(b"\x1b[2;1H");
+            terminal.feed(" ".repeat(40).as_bytes());
+            terminal.feed(b"\x1b8");
+            let padded = renderer.prepare(terminal.screen(), &options).unwrap();
+            assert_eq!(sparse.quads, padded.quads, "{text:?}");
+        }
+    }
 
     #[test]
     fn glyph_anchors_preserve_marks_wide_cells_and_unordered_clusters() {

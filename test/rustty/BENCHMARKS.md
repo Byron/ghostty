@@ -9,7 +9,7 @@ and `stream` workloads include UTF-8 decoding and VT parsing.
 The latest [complete Ghostty comparison](#step-10-checkpoint-against-ghostty-2026-09-17)
 covers all 54 workloads. Later focused measurements include the
 [reflow improvement](#step-12-copy-unmanaged-reflow-cells-directly) and the
-[current feed/scrolling comparison](#step-15-find-unicode-control-boundaries-without-decoding-ordinary-groups).
+[current printing/feed/scrolling comparison](#step-16-release-resources-without-blanking-ordinary-replacement-cells).
 Each table identifies its measured source; stage ratios are not multiplied.
 
 ```sh
@@ -2964,3 +2964,48 @@ comparison. The native Chinese-feed cliff still prevents generalizing its
 favorable ratio; Chinese scrolling is the useful complete-stream comparison.
 This stage leaves ordinary printing, cell reading and renderer/application
 measurements to their separately recorded source checkpoints.
+
+
+### Step 16: release resources without blanking ordinary replacement cells
+
+The general cell writer already updates style references explicitly. It now
+calls the clearing helper only for cells with grapheme or hyperlink payloads.
+Ordinary wide cells are replaced directly, avoiding a blank write and repeated
+resource checks immediately before the replacement. Boundary repair, style
+reference changes, payload release and charge refresh retain their existing
+ordering and behavior.
+
+All 312 VT tests pass with both kernels, along with 57 benchmark checks,
+workspace all-target checking, x86 VT core checking and formatting. All 2,509
+page-lifecycle and generated native comparisons pass. All 14 allocation observations exactly
+match step 15, including allocation-free ordinary writes and row exposure.
+
+The four printing and 26 feed/stream workloads use 50 samples per direction.
+None exceeds the 3% regression threshold in either order. Chinese scalar
+printing improves 11%; its feed and stream cases gain only about 1–2% because
+most of their ordinary writes already use the batched path. The other scalar
+printing cases remain within 2%, including the small emoji-printing increase
+shown below. Sources, frozen binaries, validation and all measurements are in
+`target/packed-simplify/step16/`.
+
+Times are pooled medians in microseconds, with adjacent native comparisons.
+Forward/reverse ratios compare step 16 with step 15.
+
+| Workload | Step 15 µs | Step 16 µs | Forward / reverse | Ghostty µs | Step 16 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 10.347 | 10.372 | 1.005× / 1.002× | 6.078 | 1.71× |
+| print/chinese | 20.624 | 18.292 | 0.886× / 0.888× | 11.974 | 1.53× |
+| print/combining | 31.917 | 32.139 | 1.005× / 1.011× | 383.856 | 0.08× |
+| print/emoji | 33.705 | 34.130 | 1.008× / 1.016× | 14.806 | 2.31× |
+| feed/ascii | 0.493 | 0.490 | 0.998× / 0.987× | 0.485 | 1.01× |
+| feed/chinese | 2.670 | 2.630 | 0.986× / 0.983× | 434.015 | 0.01× |
+| feed/emoji | 36.086 | 35.800 | 0.997× / 0.974× | 17.075 | 2.10× |
+| stream/ascii | 7.124 | 7.112 | 1.004× / 1.003× | 5.215 | 1.36× |
+| stream/chinese | 12.631 | 12.495 | 0.996× / 0.981× | 8.542 | 1.46× |
+| stream/combining | 464.745 | 461.461 | 0.996× / 0.989× | 479.780 | 0.96× |
+| stream/emoji | 500.599 | 502.141 | 0.991× / 1.021× | 726.945 | 0.69× |
+| stream_styled/chinese | 16.651 | 16.453 | 0.989× / 0.990× | 34.111 | 0.48× |
+
+Chinese scalar printing reaches 1.53× Ghostty. Ordinary ASCII printing and
+emoji overwrites still have larger gaps. The latest full 54-case checkpoint
+remains step 10; these later tables report their own freshly measured sources.

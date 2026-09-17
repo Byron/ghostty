@@ -1228,7 +1228,8 @@ impl Screen {
         let mut released_payload = false;
         for x in clear_start..clear_end {
             let slot = offset + x;
-            released_payload |= page.cells[slot].has_grapheme() || page.cells[slot].has_hyperlink();
+            let has_payload = page.cells[slot].has_grapheme() || page.cells[slot].has_hyperlink();
+            released_payload |= has_payload;
             let old_style = page.cells[slot].style_id();
             let replacement = if x < col || x >= end {
                 Cell::blank(self.cursor.style.background)
@@ -1241,8 +1242,10 @@ impl Screen {
                 tail
             };
             // Preserve a homogeneous style's references without a release/retain pair.
-            page.cells[slot].set_style_id(0);
-            page.clear_cell(slot, Color::Default);
+            if has_payload {
+                page.cells[slot].set_style_id(0);
+                page.clear_cell(slot, Color::Default);
+            }
             if old_style != replacement.style_id() {
                 page.styles.release(old_style);
                 page.styles.retain(replacement.style_id());

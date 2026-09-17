@@ -12,7 +12,8 @@ controls and remaining gaps. Each table identifies its measured source;
 stage ratios are not multiplied.
 The [step 39 renderer comparison](#step-39-reuse-the-empty-tail-boundary-for-painting)
 measures preparation at standard and Retina sizes;
-[step 40](#step-40-reuse-exact-srgb-channel-conversions) removes repeated color conversions. The
+[step 40](#step-40-reuse-exact-srgb-channel-conversions) removes repeated color conversions,
+and [step 41](#step-41-reuse-row-and-shaping-scratch) reuses row and shaping buffers. The
 [step 38 parity comparison](#step-38-execute-the-differential-runner-in-rust)
 measures the Rust runner with preserved fixture data.
 The [step 35 renderer comparison](#step-35-index-glyph-anchors-directly-during-frame-preparation)
@@ -4214,3 +4215,60 @@ remain applicable. The disposable offscreen Metal smoke passes resizing, both
 screens, retained content and idle scheduling with one settling redraw. Frozen
 source, binaries, profiles, samples and validation are under
 `target/packed-simplify/step40/`.
+
+
+### Step 41: reuse row and shaping scratch
+
+Ghostty's CoreText `RunState.reset` retains its buffer capacity between runs.
+Rustty instead allocated paint, text, source-offset and glyph-anchor buffers
+for each row or shaping run, including cache hits. These four buffers now
+live for one preparation call and are cleared between rows/runs. Shaping
+borrows the text and owns a cache key only on a miss. No cross-frame state
+or public interface is added. Exact geometry checks cover scratch reuse with
+combining marks, wide cells and unordered glyph clusters.
+
+The clean candidate starts at `3a3502175` and changes only `prepare.rs`.
+The baseline binaries are the verified step-40 candidates. Both sizes use
+Rust 1.95.0, native CPU flags, Menlo 13 pt, 50 warmup frames and 50 samples
+in each order, serially without competing builds or profiles.
+
+At 120×40 cells and 1200×850 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 124.2 → 108.2 | 131.6 → 115.0 | 0.872× / 0.868× | 481 → 25 |
+| status_update | 123.9 → 106.1 | 130.9 → 112.8 | 0.855× / 0.860× | 481 → 25 |
+| scroll_ascii | 139.8 → 119.6 | 150.4 → 126.0 | 0.864× / 0.844× | 521 → 27 |
+| scroll_styled | 90.0 → 68.3 | 100.2 → 74.2 | 0.741× / 0.760× | 996 → 32 |
+| mixed_unicode | 125.3 → 108.4 | 130.0 → 117.5 | 0.870× / 0.865× | 481 → 25 |
+| alternate_repaint | 124.5 → 107.4 | 129.0 → 109.4 | 0.855× / 0.889× | 481 → 25 |
+| resize_reflow | 128.3 → 111.1 | 132.5 → 116.4 | 0.861× / 0.873× | 481 → 25 |
+
+At scale 2, 215×71 cells and 3456×2234 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 226.0 → 196.0 | 240.2 → 206.2 | 0.870× / 0.872× | 854 → 26 |
+| status_update | 226.7 → 196.5 | 245.0 → 210.6 | 0.870× / 0.865× | 854 → 26 |
+| scroll_ascii | 254.0 → 220.1 | 271.3 → 238.7 | 0.859× / 0.876× | 925 → 28 |
+| scroll_styled | 163.0 → 124.1 | 174.9 → 137.3 | 0.756× / 0.780× | 1,773 → 34 |
+| mixed_unicode | 226.0 → 198.1 | 242.0 → 206.1 | 0.885× / 0.866× | 854 → 26 |
+| alternate_repaint | 226.7 → 195.8 | 252.5 → 212.3 | 0.866× / 0.851× | 854 → 26 |
+| resize_reflow | 231.4 → 200.2 | 248.7 → 213.8 | 0.869× / 0.862× | 854 → 26 |
+
+All preparation medians improve in both orders: 11–26% at standard size and
+11–24% at Retina size. Every measured preparation allocation count and byte
+request decreases; every feed allocation count and byte request matches its
+paired baseline. Retina status updates request 758,472 rather than 1,023,984
+Rust heap bytes per frame; styled scrolling requests 1,051,688 rather than
+1,240,088. Native font/driver allocations are outside these counts. These
+measure CPU preparation, not GPU completion or visible presentation.
+
+All 23 renderer tests and 121 GPU/application/session tests pass, with two
+opt-in platform tests ignored. Workspace/all-target checks and formatting pass.
+The first offscreen native smoke failed its idle threshold with six redraws
+amid focus/input events. Repeating the unchanged binary passes all checks,
+including resizing, both screens, retained content and one settling idle
+redraw. Both logs are retained. The unchanged core keeps the complete Ghostty
+table and 61,587-comparison parity result above applicable. Frozen source,
+binaries, samples and validation are in `target/packed-simplify/step41/`.

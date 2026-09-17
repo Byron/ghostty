@@ -107,6 +107,14 @@ struct Page {
     image: bool,
 }
 
+#[derive(Default)]
+struct RowScratch {
+    paints: Vec<Color>,
+    text: String,
+    sources: Vec<(usize, usize)>,
+    anchors: Vec<Option<f32>>,
+}
+
 /// Builds frames on the host thread. Frame values themselves contain no native
 /// handles and can be sent to another thread or retained by a UI paint callback.
 pub struct Renderer {
@@ -193,6 +201,9 @@ impl Renderer {
             self.prepare_graphics(screen, options, omit_excess_images)?;
         frame.quads.extend(below_background);
         let mut foreground = Frame::empty(options.size);
+        // ponytail: reuse scratch within the frame; retain it across frames
+        // if these remaining allocations become measurable.
+        let mut scratch = RowScratch::default();
         let viewport_start = screen.history_len().saturating_sub(screen.viewport_offset);
         let selection = screen.selection.and_then(|selection| {
             let start = screen
@@ -231,7 +242,8 @@ impl Renderer {
             } else {
                 text_cols
             };
-            let mut paints = Vec::with_capacity(paint_cols);
+            scratch.paints.clear();
+            scratch.paints.reserve(paint_cols);
             for (col, cell) in row.cells().iter().take(paint_cols).enumerate() {
                 frame.blinking_text |= row.style(col).blink
                     && !row.style(col).invisible
@@ -281,9 +293,11 @@ impl Renderer {
                     ));
                 }
                 let fg = Color::rgb(fg).opacity(if row.style(col).faint { 0.5 } else { 1.0 });
-                paints.push(fg);
+                scratch.paints.push(fg);
             }
-            self.row_text(row, &paints[..text_cols], top, options, &mut foreground)?;
+            scratch.paints.truncate(text_cols);
+            self.row_text(row, &mut scratch, top, options, &mut foreground)?;
+            let paints = &scratch.paints;
             for (col, cell) in row.cells().iter().take(text_cols).enumerate() {
                 if cell.width() == 0 {
                     continue;
@@ -344,12 +358,18 @@ impl Renderer {
     fn row_text(
         &mut self,
         row: RowView<'_>,
-        paints: &[Color],
+        scratch: &mut RowScratch,
         top: f32,
         options: &RenderOptions,
         frame: &mut Frame,
     ) -> Result<(), RenderError> {
         let metrics = self.metrics();
+        let RowScratch {
+            paints,
+            text,
+            sources,
+            anchors,
+        } = scratch;
         let mut col = 0;
         while col < paints.len() {
             let cell = &row.cells()[col];
@@ -380,8 +400,8 @@ impl Renderer {
                 col += 1;
                 continue;
             }
-            let mut text = String::new();
-            let mut sources = Vec::new();
+            text.clear();
+            sources.clear();
             while col < paints.len()
                 && row.style(col) == style
                 && paints[col] == color
@@ -412,7 +432,8 @@ impl Renderer {
                     .saturating_sub(1)
             };
             // Source indices are dense within this run, including wide cells.
-            let mut anchors = vec![None; sources.len()];
+            anchors.clear();
+            anchors.resize(sources.len(), None);
             for glyph in glyphs.iter() {
                 if glyph.advance > 0.0 {
                     anchors[source(glyph)].get_or_insert(glyph.x);
@@ -448,12 +469,12 @@ impl Renderer {
         Ok(())
     }
 
-    fn shape(&mut self, text: String, style: FontStyle) -> Result<Arc<[ShapedGlyph]>, FontError> {
-        if let Some(glyphs) = self.shaped[style as usize].get(text.as_str()) {
+    fn shape(&mut self, text: &str, style: FontStyle) -> Result<Arc<[ShapedGlyph]>, FontError> {
+        if let Some(glyphs) = self.shaped[style as usize].get(text) {
             return Ok(glyphs.clone());
         }
-        let glyphs: Arc<[ShapedGlyph]> = self.fonts.shape(&text, style)?.into();
-        let bytes = text.capacity()
+        let glyphs: Arc<[ShapedGlyph]> = self.fonts.shape(text, style)?.into();
+        let bytes = text.len()
             + std::mem::size_of_val(&*glyphs)
             + std::mem::size_of::<(String, Arc<[ShapedGlyph]>)>();
         if bytes <= MAX_SHAPED_BYTES {
@@ -466,7 +487,7 @@ impl Renderer {
                 self.shaped_bytes = 0;
             }
             self.shaped_bytes += bytes;
-            self.shaped[style as usize].insert(text, glyphs.clone());
+            self.shaped[style as usize].insert(text.to_owned(), glyphs.clone());
         }
         Ok(glyphs)
     }
@@ -850,11 +871,15 @@ mod tests {
         let mut terminal = Terminal::new(4, 1, 0);
         terminal.feed("\x1b[?2027ha\u{301}界b".as_bytes());
         let options = RenderOptions::default();
+        let mut scratch = RowScratch {
+            paints: vec![Color::rgb([255; 3]); 4],
+            ..RowScratch::default()
+        };
         let mut frame = Frame::empty(options.size);
         renderer
             .row_text(
                 terminal.screen().row(0),
-                &[Color::rgb([255; 3]); 4],
+                &mut scratch,
                 0.0,
                 &options,
                 &mut frame,
@@ -877,6 +902,26 @@ mod tests {
                 3.0 * width + 1.0
             ]
         );
+        // Reused scratch must not retain text, source offsets or glyph anchors.
+        // Shifting native run positions leaves their cell-relative geometry fixed.
+        for glyph in Arc::make_mut(
+            renderer.shaped[FontStyle::Regular as usize]
+                .get_mut("a\u{301}界b")
+                .unwrap(),
+        ) {
+            glyph.x += 100.0;
+        }
+        let mut repeated = Frame::empty(options.size);
+        renderer
+            .row_text(
+                terminal.screen().row(0),
+                &mut scratch,
+                0.0,
+                &options,
+                &mut repeated,
+            )
+            .unwrap();
+        assert_eq!(frame.quads, repeated.quads);
     }
 
     #[test]
@@ -975,12 +1020,12 @@ mod tests {
             renderer.prepare(terminal.screen(), &options).unwrap().quads,
             updated.quads
         );
-        let regular = renderer.shape("style".into(), FontStyle::Regular).unwrap();
-        let bold = renderer.shape("style".into(), FontStyle::Bold).unwrap();
+        let regular = renderer.shape("style", FontStyle::Regular).unwrap();
+        let bold = renderer.shape("style", FontStyle::Bold).unwrap();
         assert!(!Arc::ptr_eq(&regular, &bold));
         // Exercise eviction without allocating a huge CoreText run in a unit test.
         renderer.shaped_bytes = MAX_SHAPED_BYTES;
-        renderer.shape("new".into(), FontStyle::Regular).unwrap();
+        renderer.shape("new", FontStyle::Regular).unwrap();
         assert!(renderer.shaped_bytes < MAX_SHAPED_BYTES);
         assert_eq!(renderer.shaped.iter().map(HashMap::len).sum::<usize>(), 1);
     }

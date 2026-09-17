@@ -61,6 +61,44 @@ fn valid_utf8_prefix(bytes: &[u8]) -> &str {
     bytes.utf8_chunks().next().map_or("", |chunk| chunk.valid())
 }
 
+#[inline]
+fn printable_utf8_prefix(text: &str) -> usize {
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    ))]
+    let prefix = {
+        use wide::u8x16;
+        16 * text
+            .as_bytes()
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .take_while(|&&chunk| {
+                let bytes = u8x16::new(chunk);
+                // C0 and DEL are single bytes; encoded C1 controls start with C2.
+                !(bytes.simd_lt(u8x16::splat(0x20))
+                    | bytes.simd_eq(u8x16::splat(0x7f))
+                    | bytes.simd_eq(u8x16::splat(0xc2)))
+                .any()
+            })
+            .count()
+    };
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    )))]
+    let prefix = 0;
+    // A byte group may end within a scalar. Keep the mixed group and tail scalar.
+    let prefix = text.floor_char_boundary(prefix);
+    prefix
+        + text[prefix..]
+            .find(char::is_control)
+            .unwrap_or(text.len() - prefix)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContinuationError {
     LimitExceeded,
@@ -374,7 +412,7 @@ impl Parser {
                 // Raw VT parsing can reach ground inside a UTF-8 codepoint.
                 && let Some(remaining) = text.get(offset..)
             {
-                let len = remaining.find(char::is_control).unwrap_or(remaining.len());
+                let len = printable_utf8_prefix(remaining);
                 if len > 0 {
                     handler(BatchEvent::PrintUtf8(&remaining[..len]));
                     offset += len;
@@ -694,6 +732,33 @@ mod tests {
         }
         for len in 0..=bytes.len() {
             assert_eq!(printable_ascii_prefix(&bytes[..len]), len);
+        }
+    }
+
+    #[test]
+    fn printable_utf8_prefix_matches_controls_boundaries_and_tails() {
+        for offset in 0..48 {
+            for cp in (0..=255).filter_map(char::from_u32).chain([
+                '界',
+                '💻',
+                '\u{200d}',
+                '\u{2028}',
+                '\u{2029}',
+                '\u{feff}',
+                '\u{10ffff}',
+            ]) {
+                let mut text = "x".repeat(offset);
+                text.push(cp);
+                text.push_str("a界💻a界💻a界💻a界💻a界💻a界💻");
+                for end in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
+                    let input = &text[..end];
+                    assert_eq!(
+                        printable_utf8_prefix(input),
+                        input.find(char::is_control).unwrap_or(input.len()),
+                        "offset={offset}, cp={cp:?}, end={end}",
+                    );
+                }
+            }
         }
     }
 

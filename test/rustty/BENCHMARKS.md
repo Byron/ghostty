@@ -6,9 +6,11 @@ window. Criterion is a development dependency only. No application build is
 needed. Timing excludes terminal construction and input generation; the `feed`
 and `stream` workloads include UTF-8 decoding and VT parsing.
 
-The latest [complete Ghostty comparison](#final-bookkeeping-comparison-with-ghostty)
-includes all four page-bookkeeping simplifications. Per-step measurements and
-validation precede that table; the remaining profile costs follow it.
+The latest [complete Ghostty comparison](#step-10-checkpoint-against-ghostty-2026-09-17)
+covers all 54 workloads. Later focused measurements include the
+[reflow improvement](#step-12-copy-unmanaged-reflow-cells-directly) and the
+[current feed/scrolling comparison](#step-15-find-unicode-control-boundaries-without-decoding-ordinary-groups).
+Each table identifies its measured source; stage ratios are not multiplied.
 
 ```sh
 cargo bench --offline -p rustty-vt --bench primitives
@@ -2912,3 +2914,53 @@ wide-cell replacement loop clears resource-free cells immediately before
 replacing them. These remain separate experiments. The latest complete
 54-workload comparison still describes step 10, and renderer/application
 measurements retain their separately recorded sources.
+
+
+### Step 15: find Unicode control boundaries without decoding ordinary groups
+
+The parser's control search previously decoded every validated scalar before
+printing decoded the same input again. Complete 16-byte groups now skip that
+search when they contain neither C0/DEL nor a possible encoded C1 control.
+The first mixed group and the tail use the original scalar search, starting at
+a character boundary. The implementation reuses `wide`, adds no unsafe code,
+and retains the scalar implementation on unsupported targets and with
+`scalar-kernels`. Borrowed event boundaries and control handling are unchanged.
+
+A new equivalence test covers every Latin-1 scalar, multibyte characters and
+Unicode separators at all offsets around vector boundaries and every valid
+tail. All 15 parser tests pass with both kernels, including malformed input,
+partial sequences, raw string transitions and the inherited parser corpus.
+All 312 VT tests also pass with both kernels, together with 57 benchmark checks,
+workspace all-target checking, x86 VT core checking and formatting. The parser,
+inherited terminal corpus, snapshot and 100 generated cases pass 12,697 native
+comparisons. All 14 allocation observations exactly match step 14.
+
+The 26 feed/stream cases and 12 native counterparts use 50 samples in each
+order. No case exceeds the 3% regression threshold in either direction. Chinese
+feed improves 24–25%, scrolling 17–18% and styled scrolling 14–15%. Both Chinese
+memory-capped cases improve similarly. Mixed seven-byte input stays within 1%.
+The following pooled medians are microseconds, with adjacent native values.
+Sources, frozen binaries, validation and all samples are retained in
+`target/packed-simplify/step15/`.
+
+| Workload | Step 14 µs | Step 15 µs | Forward / reverse | Ghostty µs | Step 15 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| feed/ascii | 0.493 | 0.491 | 0.995× / 0.997× | 0.485 | 1.01× |
+| feed/chinese | 3.530 | 2.669 | 0.758× / 0.755× | 433.978 | 0.01× |
+| feed/combining | 36.347 | 35.512 | 0.977× / 0.977× | 389.911 | 0.09× |
+| feed/emoji | 36.649 | 35.690 | 0.953× / 0.973× | 17.146 | 2.08× |
+| stream/ascii | 7.120 | 7.145 | 1.002× / 0.999× | 5.278 | 1.35× |
+| stream/chinese | 15.394 | 12.655 | 0.828× / 0.820× | 8.598 | 1.47× |
+| stream/combining | 472.202 | 463.886 | 0.983× / 0.983× | 481.339 | 0.96× |
+| stream/emoji | 517.376 | 509.014 | 0.994× / 0.977× | 726.933 | 0.70× |
+| stream_styled/chinese | 19.416 | 16.643 | 0.855× / 0.861× | 34.100 | 0.49× |
+| chunked_stream_mixed/7_bytes | 282.929 | 281.670 | 0.994× / 1.006× | — | — |
+| stream_memory_capped/chinese | 16.050 | 13.233 | 0.826× / 0.824× | — | — |
+| stream_styled_memory_capped/chinese | 20.165 | 17.191 | 0.848× / 0.859× | — | — |
+
+Chinese scrolling reaches 1.47× Ghostty, down from 1.79× at the previous focused
+checkpoint. Combining and emoji scrolling remain faster than Ghostty in this
+comparison. The native Chinese-feed cliff still prevents generalizing its
+favorable ratio; Chinese scrolling is the useful complete-stream comparison.
+This stage leaves ordinary printing, cell reading and renderer/application
+measurements to their separately recorded source checkpoints.

@@ -440,17 +440,16 @@ impl Renderer {
                 }
             }
             for glyph in glyphs.iter() {
-                anchors[source(glyph)].get_or_insert(glyph.x);
-            }
-            for glyph in glyphs.iter() {
+                let source = source(glyph);
+                // Mark-only clusters anchor at their first glyph, even an empty bitmap.
+                let anchor = *anchors[source].get_or_insert(glyph.x);
                 let cached = self.glyph(glyph)?;
                 if cached.size.contains(&0) {
                     continue;
                 }
-                let source = source(glyph);
                 let col = sources[source].1;
                 let x = options.padding[0] + col as f32 * metrics.cell_width as f32 + glyph.x
-                    - anchors[source].unwrap()
+                    - anchor
                     + cached.bearing[0] as f32;
                 let y = top + metrics.baseline - glyph.y - cached.bearing[1] as f32;
                 frame.quads.push(Quad {
@@ -850,8 +849,8 @@ mod tests {
         let glyph = renderer.fonts.shape("a", FontStyle::Regular).unwrap()[0].clone();
         let bearing = renderer.glyph(&glyph).unwrap().bearing[0] as f32;
         // The first cluster-3 glyph is a mark before its advancing base.
-        // Cluster 6 has only marks and therefore anchors at its first glyph.
-        let glyphs: Vec<_> = [
+        // Cluster 6 has only marks and anchors at its first glyph, even if empty.
+        let mut glyphs: Vec<_> = [
             (3, 20.0, 0.0),
             (0, 80.0, 8.0),
             (3, 24.0, 8.0),
@@ -867,6 +866,17 @@ mod tests {
             ..glyph.clone()
         })
         .collect();
+        let empty = renderer.fonts.shape(" ", FontStyle::Regular).unwrap()[0].clone();
+        assert!(renderer.glyph(&empty).unwrap().size.contains(&0));
+        glyphs.insert(
+            4,
+            ShapedGlyph {
+                cluster: 6,
+                x: 9.0,
+                advance: 0.0,
+                ..empty
+            },
+        );
         renderer.shaped[FontStyle::Regular as usize].insert("a\u{301}界b".into(), glyphs.into());
         let mut terminal = Terminal::new(4, 1, 0);
         terminal.feed("\x1b[?2027ha\u{301}界b".as_bytes());
@@ -898,8 +908,8 @@ mod tests {
                 0.0,
                 width,
                 width + 3.0,
-                3.0 * width,
-                3.0 * width + 1.0
+                3.0 * width + 2.0,
+                3.0 * width + 3.0
             ]
         );
         // Reused scratch must not retain text, source offsets or glyph anchors.

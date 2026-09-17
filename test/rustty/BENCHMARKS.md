@@ -13,7 +13,8 @@ stage ratios are not multiplied.
 The [step 39 renderer comparison](#step-39-reuse-the-empty-tail-boundary-for-painting)
 measures preparation at standard and Retina sizes;
 [step 40](#step-40-reuse-exact-srgb-channel-conversions) removes repeated color conversions,
-and [step 41](#step-41-reuse-row-and-shaping-scratch) reuses row and shaping buffers. The
+[step 41](#step-41-reuse-row-and-shaping-scratch) reuses row and shaping buffers,
+and [step 42](#step-42-assign-fallback-glyph-anchors-during-emission) removes a glyph pass. The
 [step 38 parity comparison](#step-38-execute-the-differential-runner-in-rust)
 measures the Rust runner with preserved fixture data.
 The [step 35 renderer comparison](#step-35-index-glyph-anchors-directly-during-frame-preparation)
@@ -4272,3 +4273,61 @@ including resizing, both screens, retained content and one settling idle
 redraw. Both logs are retained. The unchanged core keeps the complete Ghostty
 table and 61,587-comparison parity result above applicable. Frozen source,
 binaries, samples and validation are in `target/packed-simplify/step41/`.
+
+
+### Step 42: assign fallback glyph anchors during emission
+
+Fresh six-second profiles of the committed renderer resolve the same binary
+search from glyph byte offsets to terminal cells in both anchor passes and
+quad emission. Ghostty applies cell offsets while emitting shaped cells in
+its CoreText shaper. Rustty now assigns fallback anchors during emission,
+deleting one pass and its repeated searches. The initial advancing-glyph pass
+still handles marks that precede their base and unordered clusters. A regression
+check also preserves anchors from glyphs with empty bitmaps.
+
+The candidate changes only `prepare.rs` from `bfdd0530b`; baseline timings use
+the frozen step-41 candidates. Measurements use the same seven cases, Menlo
+13 pt, Rust 1.95.0, native CPU flags, 50 warmup frames and 50 samples in each
+order, without competing builds or profiles. The separate profiling build adds
+line tables; timing binaries use the normal release settings.
+
+At 120×40 cells and 1200×850 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse |
+| --- | ---: | ---: | ---: |
+| cached_redraw | 108.6 → 97.3 | 116.8 → 99.8 | 0.896× / 0.897× |
+| status_update | 109.2 → 98.1 | 126.1 → 104.8 | 0.924× / 0.848× |
+| scroll_ascii | 119.3 → 103.6 | 123.0 → 107.0 | 0.866× / 0.865× |
+| scroll_styled | 69.7 → 64.4 | 71.2 → 65.3 | 0.917× / 0.924× |
+| mixed_unicode | 110.4 → 97.1 | 126.9 → 99.2 | 0.885× / 0.857× |
+| alternate_repaint | 110.5 → 98.6 | 115.6 → 109.8 | 0.899× / 0.891× |
+| resize_reflow | 110.3 → 100.1 | 117.6 → 104.7 | 0.906× / 0.920× |
+
+At scale 2, 215×71 cells and 3456×2234 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse |
+| --- | ---: | ---: | ---: |
+| cached_redraw | 194.2 → 174.8 | 202.8 → 184.7 | 0.908× / 0.891× |
+| status_update | 197.9 → 174.6 | 212.5 → 180.6 | 0.892× / 0.894× |
+| scroll_ascii | 224.4 → 198.8 | 263.1 → 225.2 | 0.865× / 0.897× |
+| scroll_styled | 124.2 → 118.8 | 133.0 → 125.0 | 0.957× / 0.957× |
+| mixed_unicode | 196.0 → 177.2 | 200.1 → 182.3 | 0.901× / 0.905× |
+| alternate_repaint | 196.9 → 176.0 | 201.9 → 193.3 | 0.892× / 0.901× |
+| resize_reflow | 199.6 → 180.6 | 208.0 → 201.3 | 0.902× / 0.915× |
+
+All preparation cases improve in both directions: 8–15% at standard size
+and 4–14% at Retina size. Every preparation and feed allocation count and byte
+request matches its paired baseline. These are CPU preparation measurements;
+GPU completion and visible presentation are not measured.
+
+All 23 renderer tests and 121 GPU/application/session tests pass, with two
+opt-in platform tests ignored. Workspace/all-target checks and formatting pass.
+Native smoke attempts pass rendering, resizing, both screens and synchronized
+output, but the complete scheduling check is inconclusive: the candidate and
+the previously validated step-41 binary exceed the hidden-title redraw guard
+while recording focus/occlusion events. Another candidate attempt stalls while
+inactive; launching through macOS also encounters the redraw guard. All logs
+are retained, rather than reporting the full smoke as passed. Core sources
+remain unchanged, so the complete Ghostty table and configured parity result
+still apply. Frozen source, binaries, profiles, samples and validation are under
+`target/packed-simplify/step42/`.

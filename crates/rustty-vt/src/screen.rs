@@ -816,7 +816,7 @@ impl Screen {
     }
 
     #[inline]
-    fn cursor_location(&self) -> (usize, usize) {
+    pub(crate) fn cursor_location(&self) -> (usize, usize) {
         self.pages
             .locate_from_end(self.height - 1 - self.cursor.row)
     }
@@ -1197,8 +1197,15 @@ impl Screen {
         codepoint: Option<char>,
         width: u8,
         spacer_head: bool,
+        location: (usize, usize),
     ) {
-        let (index, row) = self.sync_cursor_resources();
+        debug_assert_eq!(location, self.cursor_location());
+        let (index, row) = if self.cursor_resources_match(location.0) {
+            location
+        } else {
+            self.sync_cursor_resources_slow();
+            self.cursor_location()
+        };
         let y = self.cursor.row;
         let col = self.cursor.col;
         let page = &self.pages.pages[index];
@@ -2029,20 +2036,24 @@ impl Screen {
     #[inline]
     pub(crate) fn sync_cursor_resources(&mut self) -> (usize, usize) {
         let location = self.cursor_location();
-        if self.cursor_link.is_none() && self.cursor.hyperlink.is_none() {
-            let page = &self.pages.pages[location.0];
-            let style_matches = match self.cursor_style {
-                None => self.cursor.style == Style::default(),
-                Some((owner, id)) => {
-                    owner == page.serial && *page.styles.get(id) == self.cursor.style
-                }
-            };
-            if style_matches {
-                return location;
-            }
+        if self.cursor_resources_match(location.0) {
+            return location;
         }
         self.sync_cursor_resources_slow();
         self.cursor_location()
+    }
+
+    #[inline(always)]
+    fn cursor_resources_match(&self, index: usize) -> bool {
+        self.cursor_link.is_none()
+            && self.cursor.hyperlink.is_none()
+            && match self.cursor_style {
+                None => self.cursor.style == Style::default(),
+                Some((owner, id)) => {
+                    let page = &self.pages.pages[index];
+                    owner == page.serial && *page.styles.get(id) == self.cursor.style
+                }
+            }
     }
 
     fn sync_cursor_resources_slow(&mut self) {

@@ -410,7 +410,7 @@ fn wrapped_transfers_share_unchanged_text_and_preserve_detached_snapshots() {
         screen.cell_mut(0, 2).set_codepoint(None);
         screen.cursor.row = 1;
         screen.cursor.col = 0;
-        screen.write_cursor_cell(Some(base), 2, false);
+        screen.write_cursor_cell(Some(base), 2, false, screen.cursor_location());
         screen.move_wrapped_grapheme(2, "\u{200d}");
         let (moved, len) = screen.row(1).copy_cell(0).text.unwrap();
         assert_eq!(len, 1);

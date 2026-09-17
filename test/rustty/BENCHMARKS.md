@@ -3342,3 +3342,96 @@ printing still spends time in append bookkeeping (10.4%), memory copying
 view helper is gone. Emoji reflow spends 15.8% in cell installation and 8.6%
 in cell copying. These profiles support removing repeated caller work and
 resource lookups before adding another storage representation.
+
+
+### Step 20 experiment: inlining the scalar cell writer (rejected)
+
+Fresh profiles identified `put_cell` as 45.7% of ASCII-print self samples.
+Forcing this private wrapper to inline did not improve any of the four
+printing workloads by 5% in both orders. ASCII printing worsened from
+10.415 to 10.841 µs (1.029×/1.043×); Chinese printing was 0.961×/1.004×,
+and combining and emoji printing were effectively unchanged. The annotation
+is reverted. The 312 VT tests and 57 benchmark checks passed, but no broader
+performance sweep was needed to reject a candidate with no qualifying gain.
+Frozen source, binaries and all 50 samples per direction remain under
+`target/packed-simplify/step20/`.
+
+
+### Step 21 experiment: explicit text-enum discriminant (rejected)
+
+An explicit `repr(u8)` on private `CellTextStorage` did not produce a repeatable
+5% improvement. ASCII text reading changed from 2.663 to 2.628 µs
+(0.986×/0.988×); Chinese, combining and emoji reads were flat or up to 1.5%
+slower. All six clean-source frame-preparation cases also missed the 5%
+threshold in at least one order. Their allocation samples are unchanged.
+The annotation is reverted; the representation and public interfaces remain
+as before. All 312 VT tests, exhaustive scalar/text equivalence and 57
+benchmark checks passed. Frozen code and read measurements are in `step21/`;
+renderer sources and measurements are in `frame-checkpoint/step21/` and
+`frame-checkpoint/prepare-step21/`. Both use 50 samples in each order.
+
+
+### Step 22 experiment: reverse active-row header lookup (deferred)
+
+Replacing the forward history walk in `row_header_mut` with the existing
+reverse lookup improves standard ASCII scrolling by 2–3% in both orders.
+On the existing multi-page viewport cases, plain scrolling improves
+4.1%/4.4% and styled scrolling 4.2%/3.3%; printing is unchanged. An inlined
+variation reduces these gains to roughly 1–3%. Neither version reaches 5%
+in both orders, so neither is retained at this checkpoint. Both pass 312
+VT tests and 57 benchmark checks. The original and revised patches, frozen
+binaries, and standard/multi-page 50-sample comparisons are preserved in
+`target/packed-simplify/step22/` and `step22b/`.
+
+
+### Step 23: reuse the validated row through an ordinary write
+
+Width validation and scalar writing previously located the same cursor row
+independently. Validation now returns its location to the writer. Wrapping
+and insertion refresh it, and resource growth keeps its existing relocation
+path. The public cursor value is still checked against its admitted style
+and link; the location lives only within the current operation. A debug
+assertion checks that the supplied location still matches the cursor.
+
+The first version shared an out-of-line synchronization wrapper. Although
+ASCII printing improved 7.5–8.8%, most feed/stream cases took 1–2% longer and
+one memory-capped ASCII direction reached 3.4% (not subsequently confirmed).
+The retained version shares only the readonly resource-match predicate and
+keeps the existing synchronization entry point for other callers. Both full
+datasets remain in `step23/` and `step23b/`.
+
+The retained version passes all 30 printing/feed/stream comparisons and all
+three existing multi-page cases, using 50 samples per direction. No case
+exceeds the 3% regression threshold in either order. ASCII printing improves
+6.5%/11.4%, and multi-page printing 11.1%/10.7%. Combining and emoji complete
+feed improve about 3%; ordinary scrolling is effectively unchanged. Times
+below are pooled microsecond medians, with freshly adjacent native timings.
+
+| Workload | Step 19 µs | Step 23 µs | Forward / reverse | Ghostty µs | Step 23 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 10.324 | 9.387 | 0.935× / 0.886× | 6.013 | 1.56× |
+| print/chinese | 17.334 | 16.564 | 0.950× / 0.960× | 11.911 | 1.39× |
+| print/combining | 29.929 | 29.352 | 1.002× / 0.959× | 383.232 | 0.08× |
+| print/emoji | 31.150 | 30.369 | 0.990× / 0.969× | 14.820 | 2.05× |
+| feed/ascii | 0.489 | 0.493 | 1.011× / 1.006× | 0.476 | 1.04× |
+| feed/combining | 32.946 | 32.018 | 0.973× / 0.972× | 384.408 | 0.08× |
+| feed/emoji | 32.675 | 31.876 | 0.978× / 0.973× | 16.999 | 1.88× |
+| stream/ascii | 7.056 | 7.051 | 1.002× / 0.998× | 5.158 | 1.37× |
+| stream/chinese | 10.648 | 10.647 | 1.000× / 1.000× | 8.464 | 1.26× |
+| stream_styled/ascii | 10.738 | 10.687 | 0.991× / 1.002× | 7.566 | 1.41× |
+| stream_styled/combining | 528.490 | 522.825 | 0.992× / 0.986× | 482.230 | 1.08× |
+| chunked_feed_mixed/7_bytes | 82.349 | 82.373 | 0.999× / 1.002× | — | — |
+| chunked_stream_mixed/4_KiB | 180.835 | 182.452 | 1.005× / 1.014× | — | — |
+| stream_memory_capped/ascii | 7.714 | 7.701 | 1.024× / 0.987× | — | — |
+| page_spans/print | 32.453 | 28.906 | 0.889× / 0.893× | — | — |
+| page_spans/stream | 7.894 | 7.853 | 0.995× / 0.994× | — | — |
+| page_spans/styled | 8.506 | 8.498 | 1.001× / 1.000× | — | — |
+
+Validation passes 312 VT tests with each kernel, 57 benchmark checks,
+workspace/all-target checks, x86 core checks, formatting, and 2,509 native
+page/generated comparisons with zero failures or coverage gaps. All 14
+allocation observations match step 19, including allocation-free ordinary
+writes and row exposure within capacity. The validated source matches the
+frozen measured binaries. This focused parity run does not replace the
+61,587-comparison configured suite recorded at step 19 or establish the
+separate `--thorough` feature gate.

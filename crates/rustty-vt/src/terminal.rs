@@ -460,13 +460,19 @@ impl Terminal {
     }
 
     #[inline(always)]
-    fn ensure_row_cells(&mut self, row: usize, end: usize) {
+    fn ensure_row_cells(&mut self, row: usize, end: usize) -> (usize, usize) {
         let columns = usize::from(self.cols);
-        if self.screen().row_columns(row) < end.min(columns) {
+        let screen = self.screen();
+        let location = screen.pages.locate_from_end(screen.height() - 1 - row);
+        if usize::from(screen.pages.pages[location.0].columns) < end.min(columns) {
             // A partial reflow can leave a physical row narrower than the
             // logical screen. Extend its actual page when an edit reaches
             // past it, so subsequent snapshots keep valid PAGE dimensions.
             self.screen_mut().extend_physical_row(row, columns);
+            let screen = self.screen();
+            screen.pages.locate_from_end(screen.height() - 1 - row)
+        } else {
+            location
         }
     }
 
@@ -1044,7 +1050,7 @@ impl Terminal {
         if self.status_display {
             return;
         }
-        self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
+        let mut location = self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
         // The row now spans the logical screen, so clamping needs no page lookup.
         let col = self.screen().cursor.col.min(usize::from(self.cols) - 1);
         self.screen_mut().cursor.col = col;
@@ -1144,23 +1150,26 @@ impl Terminal {
         self.previous_char = Some(cp);
         if pending_wrap && self.modes.dec(7) {
             self.print_wrap();
+            location = self.screen().cursor_location();
         }
         if self.modes.get(false, 4)
             && self.screen().cursor.col + usize::from(width) < self.cols as usize
         {
             self.insert_blanks(width.into());
+            location = self.screen().cursor_location();
         }
         if width == 2 && right.saturating_sub(self.margins.left) < 1 {
-            self.put_cell(None, 1, false);
+            self.put_cell(None, 1, false, location);
         } else {
             if width == 2 && self.screen().cursor.col == right {
                 if !self.modes.dec(7) {
                     return;
                 }
-                self.put_cell(None, 1, right == self.cols as usize - 1);
+                self.put_cell(None, 1, right == self.cols as usize - 1, location);
                 self.print_wrap();
+                location = self.screen().cursor_location();
             }
-            self.put_cell(Some(cp), width, false);
+            self.put_cell(Some(cp), width, false, location);
         }
         let x = self.screen().cursor.col;
         self.screen_mut().cursor.pending_wrap = x + width as usize > right;
@@ -1206,12 +1215,22 @@ impl Terminal {
                 cell.set_spacer_head(spacer_head);
                 cell.set_grapheme(true);
             } else {
-                self.put_cell(None, 1, right == self.cols as usize - 1);
+                self.put_cell(
+                    None,
+                    1,
+                    right == self.cols as usize - 1,
+                    self.screen().cursor_location(),
+                );
             }
             self.print_wrap();
             let source_col = col;
             col = self.screen().cursor.col;
-            self.put_cell(cell.codepoint(), width, false);
+            self.put_cell(
+                cell.codepoint(),
+                width,
+                false,
+                self.screen().cursor_location(),
+            );
             if let Some(text) = text {
                 let base_len = cell.codepoint().map_or(0, char::len_utf8);
                 self.screen_mut()
@@ -1235,7 +1254,13 @@ impl Terminal {
         self.changed();
     }
 
-    fn put_cell(&mut self, codepoint: Option<char>, width: u8, spacer_head: bool) {
+    fn put_cell(
+        &mut self,
+        codepoint: Option<char>,
+        width: u8,
+        spacer_head: bool,
+        location: (usize, usize),
+    ) {
         // Map only when writing a cell. Width, combining behavior, and REP
         // use the original scalar; even an empty spacer consumes one shift.
         let charset = &mut self.screen_mut().charset;
@@ -1247,7 +1272,7 @@ impl Terminal {
         // print and append_grapheme extend the source row; print_wrap extends
         // the destination row before any wrapped write reaches this helper.
         self.screen_mut()
-            .write_cursor_cell(codepoint, width, spacer_head);
+            .write_cursor_cell(codepoint, width, spacer_head, location);
     }
 
     fn print_wrap(&mut self) {

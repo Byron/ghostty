@@ -4645,3 +4645,43 @@ coverage gate remains incomplete. Application-wide timing and the native
 scheduling smoke retain the limitations documented after step 42. Frozen
 source, binaries, all original samples and controls, allocation observations
 and validation are under `target/packed-simplify/step44/`.
+
+
+### Step 45 experiment: use a bounded scratch string (not retained)
+
+Fresh matched profiles of the step-44 core still show host allocation and
+text copying in emoji printing and feed. The payload builders clear all
+260 scratch bytes before writing their valid prefix. Replacing that array
+and manual byte length with the existing `arrayvec::ArrayString` removes
+the unchecked UTF-8 conversion and six net lines, including its direct
+dependency declaration. Disassembly confirms that the scratch-buffer zero
+stores disappear. The final payload remains an immutable `Arc<str>`.
+
+The change does not produce a qualifying complete-workload gain. These
+serial comparisons use Rust 1.95.0, native CPU flags and 50 samples in each
+order against the committed step-44 executable:
+
+| Workload | Median µs, before → after | Forward / reverse |
+| --- | ---: | ---: |
+| print/ascii | 9.158 → 8.983 | 1.181× / 0.923× |
+| print/combining | 28.987 → 29.055 | 0.997× / 1.008× |
+| print/emoji | 29.662 → 30.154 | 1.016× / 1.016× |
+| feed/ascii | 0.503 → 0.498 | 1.002× / 0.981× |
+| feed/combining | 32.390 → 32.480 | 1.004× / 1.004× |
+| feed/emoji | 19.367 → 19.141 | 0.986× / 0.991× |
+| stream/combining | 444.249 → 437.744 | 0.988× / 0.982× |
+| stream/emoji | 294.375 → 296.091 | 1.004× / 1.008× |
+| stream_styled/emoji | 419.266 → 410.107 | 0.979× / 0.976× |
+| chunked_feed_mixed/7_bytes | 82.910 → 81.928 | 0.990× / 0.986× |
+| chunked_feed_mixed/4_KiB | 51.780 → 50.977 | 0.987× / 0.984× |
+
+The largest gain is 2.1%/2.4% in styled emoji scrolling; emoji feed improves
+0.9–1.4%, while direct emoji printing slows 1.6% in both orders. ASCII
+printing remains variable. No complete feed/stream improves by 5% in both
+orders, so the candidate is not retained and no broader timing sweep or
+regression controls are needed for acceptance. All 327 VT tests and both
+benchmark self-checks pass, including the existing maximum 260-byte cluster
+and detached-snapshot checks. Formatting passes. The dependency declaration
+and source changes are restored to step 44, whose complete Ghostty table and
+validation remain current. Source, binaries, six matched profiles, assembly
+and all 11 comparisons are under `target/packed-simplify/step45/`.

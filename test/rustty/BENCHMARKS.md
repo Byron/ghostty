@@ -4429,3 +4429,62 @@ observations and 5,200 samples, including controls, are retained under
 `target/packed-simplify/app-checkpoint-42/`. The step-42 native scheduling
 smoke remains inconclusive as documented above. Core sources are unchanged,
 so the complete Ghostty comparison and configured parity result still apply.
+
+
+### Step 43: use one sprite membership match
+
+The step-42 profiles attribute 227/5,025 status-update samples and 184 styled
+scrolling samples to sprite membership. Rustty combined separate legacy and
+ordinary range matches for every character. One match now handles all ranges,
+including the adjacent legacy ranges; the redundant helper is removed.
+Ghostty caches codepoint-to-font resolution in `SharedGrid.getIndex`, so it
+does not repeatedly resolve sprite membership on a cache hit. This change
+reduces Rustty's existing lookup without adding another cache.
+
+The frozen baseline is `c4b833085`; only the two sprite source files differ.
+The independent application edits are excluded. Both sizes use Rust 1.95.0,
+native CPU flags, Menlo 13 pt, 50 warmup frames and 50 samples per direction,
+serially with the process guard. Because the improvement is small, all seven
+cases were repeated at both sizes. Original medians and tails are retained
+below, alongside the confirmation ratios.
+
+At 120×40 cells and 1200×850 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Confirmation forward / reverse |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 100.0 → 96.1 | 112.1 → 107.2 | 0.968× / 0.965× | 0.984× / 1.000× |
+| status_update | 98.2 → 96.2 | 103.6 → 99.1 | 0.970× / 0.985× | 0.995× / 0.978× |
+| scroll_ascii | 104.5 → 102.7 | 109.4 → 112.2 | 0.993× / 0.981× | 1.059× / 0.977× |
+| scroll_styled | 64.7 → 64.5 | 68.9 → 81.0 | 0.997× / 0.995× | 0.979× / 0.994× |
+| mixed_unicode | 97.9 → 95.7 | 105.9 → 99.5 | 0.987× / 0.968× | 0.970× / 0.976× |
+| alternate_repaint | 99.1 → 96.7 | 101.9 → 101.5 | 0.978× / 0.971× | 0.969× / 0.925× |
+| resize_reflow | 101.3 → 98.0 | 106.0 → 103.9 | 0.975× / 0.961× | 0.968× / 0.981× |
+
+At scale 2, 215×71 cells and 3456×2234 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Confirmation forward / reverse |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 177.3 → 174.6 | 188.2 → 187.7 | 0.976× / 0.996× | 1.001× / 0.967× |
+| status_update | 176.4 → 175.0 | 184.6 → 185.8 | 0.973× / 1.000× | 0.983× / 0.966× |
+| scroll_ascii | 189.1 → 185.4 | 199.2 → 192.3 | 0.983× / 0.975× | 0.985× / 0.988× |
+| scroll_styled | 119.1 → 116.7 | 128.2 → 123.3 | 0.981× / 0.980× | 0.955× / 0.995× |
+| mixed_unicode | 179.6 → 175.0 | 196.8 → 180.0 | 0.965× / 0.975× | 0.971× / 0.984× |
+| alternate_repaint | 176.7 → 174.4 | 187.0 → 190.0 | 0.983× / 0.995× | 0.991× / 0.972× |
+| resize_reflow | 179.4 → 175.8 | 190.2 → 183.6 | 0.985× / 0.977× | 0.986× / 0.996× |
+
+This is a small gain, generally 1–3%, with several directions effectively
+unchanged. The adverse standard ASCII-scrolling confirmation did not repeat:
+a further pair gives 0.958×/1.008×, while the identical-baseline control gives
+1.050×/1.010×. The initial styled-scrolling p95 increase also does not repeat
+(70.8 → 64.7 µs). No median regression above 3% is confirmed; these data do
+not establish uniform tail-latency improvement.
+
+All 1,112,064 Unicode scalar values match the original membership function.
+All 502 workspace tests pass, with two opt-in tests ignored, including native
+sprite pixel comparisons, font overrides, renderer geometry, GPU and session
+checks. Workspace/all-target checks and formatting pass. Every preparation
+and feed allocation count and requested-byte sample is unchanged. The core
+and application scheduling are unchanged; the Ghostty table still applies,
+and application-wide performance remains unresolved. Source, binaries,
+exhaustive check, all samples and validation are under
+`target/packed-simplify/step43/`.

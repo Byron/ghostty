@@ -3992,3 +3992,59 @@ latest core/Ghostty ratios are those documented at step 26 until a new complete
 comparison is recorded. Frozen runners, original source, fixture verification,
 all accepted and interrupted timing data, and `validation.json` are retained
 under `target/parity-driver/`.
+
+### Step 39: reuse the empty-tail boundary for painting
+
+The step-37 boundary now limits color resolution and decoration work as well
+as shaping. A raw-zero cell has none of those attributes. Cursor and selection
+rows retain the full painting range; styled empty cells remain inside the
+boundary. The existing scan moves to the caller instead of adding another
+scan or cache.
+
+The candidate is built from a clean `c4720d2a8` source snapshot with only
+`prepare.rs` changed. The verified step-37 baseline has identical renderer,
+font, VT and parser sources. Both use the same seven workloads, Rust 1.95.0,
+native CPU flags, Menlo 13 pt, 50 warmup frames and 50 samples in each order.
+Builds, tests and profiling are excluded from these measurements.
+
+At 120×40 cells and 1200×850 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 173.6 → 143.8 | 185.3 → 152.7 | 0.836× / 0.817× | 482 → 481 |
+| status_update | 175.4 → 146.4 | 192.3 → 147.2 | 0.850× / 0.818× | 482 → 481 |
+| scroll_ascii | 184.4 → 155.9 | 185.5 → 158.8 | 0.842× / 0.853× | 522 → 521 |
+| scroll_styled | 144.3 → 96.1 | 148.9 → 98.1 | 0.650× / 0.673× | 997 → 996 |
+| mixed_unicode | 172.3 → 144.0 | 184.5 → 150.0 | 0.815× / 0.846× | 482 → 481 |
+| alternate_repaint | 170.9 → 148.1 | 178.0 → 149.5 | 0.859× / 0.870× | 482 → 481 |
+| resize_reflow | 167.8 → 145.8 | 174.2 → 151.0 | 0.875× / 0.866× | 482 → 481 |
+
+At scale 2, 215×71 cells and 3456×2234 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 403.1 → 265.5 | 416.2 → 271.3 | 0.649× / 0.652× | 855 → 854 |
+| status_update | 396.0 → 258.6 | 403.8 → 261.2 | 0.648× / 0.653× | 855 → 854 |
+| scroll_ascii | 417.4 → 283.2 | 436.8 → 294.5 | 0.677× / 0.654× | 926 → 925 |
+| scroll_styled | 348.7 → 174.3 | 352.6 → 178.5 | 0.501× / 0.500× | 1,774 → 1,773 |
+| mixed_unicode | 398.7 → 259.8 | 413.8 → 266.6 | 0.646× / 0.655× | 855 → 854 |
+| alternate_repaint | 401.2 → 260.0 | 418.8 → 262.2 | 0.649× / 0.648× | 855 → 854 |
+| resize_reflow | 397.0 → 266.1 | 405.2 → 286.0 | 0.667× / 0.675× | 855 → 854 |
+
+Every preparation case improves in both orders: 13–35% at standard size and
+32–50% at Retina size. Retina status updates request 1,023,984 rather than
+1,190,944 Rust heap bytes per frame; styled scrolling requests 1,240,088 rather
+than 1,442,888. Feed allocation counts and requested bytes match in every paired
+sample. Native font and driver allocations are outside these counts. These
+are CPU preparation measurements; they do not measure GPU completion, visible
+presentation or establish a new application-wide speedup.
+
+The regression test compares exact geometry for sparse and space-filled rows,
+including cursor focus/blink, selections in blank tails and erased colored
+cells. All 495 workspace tests pass, with two opt-in platform tests ignored;
+workspace/all-target checks and formatting pass. The disposable native smoke
+passes Metal rendering, resizing, both screens, synchronized output and idle
+scheduling with one settling redraw. It uses offscreen capture. The VT/parser
+sources are unchanged, so the 61,587-comparison result at step 38 still applies.
+Source and binary hashes, all samples and validation are retained under
+`target/packed-simplify/step39/`.

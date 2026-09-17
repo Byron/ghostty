@@ -215,11 +215,24 @@ impl Renderer {
                     && options.preedit.as_ref().is_some_and(|p| !p.text.is_empty()))
                 && screen.viewport_offset == 0
                 && screen.cursor.row == row_index;
-            let mut paints = Vec::with_capacity(row.cells().len());
             let visible_cols = ((options.size[0] as f32 - options.padding[0]).max(0.0)
                 / metrics.cell_width as f32)
                 .ceil() as usize;
-            for (col, cell) in row.cells().iter().take(visible_cols).enumerate() {
+            let visible_cols = visible_cols.min(row.cells().len());
+            // Raw-zero tails have no text, background, blink or decorations.
+            let text_cols = row.cells()[..visible_cols]
+                .iter()
+                .rposition(|cell| cell.bits() != 0)
+                .map_or(0, |col| col + 1);
+            // ponytail: keep full rows for cursor/selection painting; bound
+            // their ranges if those redraws become a bottleneck.
+            let paint_cols = if cursor || selection.is_some() {
+                visible_cols
+            } else {
+                text_cols
+            };
+            let mut paints = Vec::with_capacity(paint_cols);
+            for (col, cell) in row.cells().iter().take(paint_cols).enumerate() {
                 frame.blinking_text |= row.style(col).blink
                     && !row.style(col).invisible
                     && cell.width() != 0
@@ -270,8 +283,8 @@ impl Renderer {
                 let fg = Color::rgb(fg).opacity(if row.style(col).faint { 0.5 } else { 1.0 });
                 paints.push(fg);
             }
-            self.row_text(row, &paints, top, options, &mut foreground)?;
-            for (col, cell) in row.cells().iter().take(visible_cols).enumerate() {
+            self.row_text(row, &paints[..text_cols], top, options, &mut foreground)?;
+            for (col, cell) in row.cells().iter().take(text_cols).enumerate() {
                 if cell.width() == 0 {
                     continue;
                 }
@@ -337,13 +350,6 @@ impl Renderer {
         frame: &mut Frame,
     ) -> Result<(), RenderError> {
         let metrics = self.metrics();
-        // Empty row tails have no glyphs. Paints for their backgrounds,
-        // selection, decorations and cursor are handled separately.
-        let end = row.cells()[..paints.len()]
-            .iter()
-            .rposition(|cell| cell.bits() != 0)
-            .map_or(0, |col| col + 1);
-        let paints = &paints[..end];
         let mut col = 0;
         while col < paints.len() {
             let cell = &row.cells()[col];
@@ -712,6 +718,62 @@ fn decorations(
 mod tests {
     use super::*;
     use rustty_vt::{GridPoint, Selection, Terminal};
+
+    #[test]
+    fn blank_tail_paint_matches_explicit_spaces() {
+        let mut renderer = Renderer::new(FontConfig::default()).unwrap();
+        for (cursor_visible, focused, blink_visible) in [
+            (false, true, true),
+            (true, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            for selected in [false, true] {
+                for colored in [false, true] {
+                    let options = RenderOptions {
+                        cursor_visible,
+                        focused,
+                        blink_visible,
+                        ..RenderOptions::default()
+                    };
+                    let frames = [false, true].map(|padded| {
+                        let mut terminal = Terminal::new(8, 2, 0);
+                        terminal.feed(if padded {
+                            b"A       \r\n        \x1b[H"
+                        } else {
+                            b"A"
+                        });
+                        if colored {
+                            // Erased colored cells have no codepoint, but
+                            // their background must remain visible.
+                            terminal.feed(b"\x1b[2;5H\x1b[44m\x1b[X\x1b[0m");
+                        }
+                        terminal.feed(b"\x1b[2;8H");
+                        terminal.screen_mut().cursor.blink = true;
+                        if selected {
+                            terminal.screen_mut().selection = Some(Selection {
+                                start: GridPoint {
+                                    row: terminal.screen().row(0).id,
+                                    col: 6,
+                                },
+                                end: GridPoint {
+                                    row: terminal.screen().row(1).id,
+                                    col: 7,
+                                },
+                                rectangular: false,
+                            });
+                        }
+                        renderer.prepare(terminal.screen(), &options).unwrap()
+                    });
+                    assert_eq!(
+                        frames[0].quads, frames[1].quads,
+                        "cursor={cursor_visible} focused={focused} blink={blink_visible} selection={selected} background={colored}"
+                    );
+                    assert_eq!(frames[0].blinking_text, frames[1].blinking_text);
+                }
+            }
+        }
+    }
 
     #[test]
     fn empty_tails_skip_shaping_without_moving_unicode_cursor_or_selection() {

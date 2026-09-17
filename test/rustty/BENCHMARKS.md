@@ -2847,3 +2847,68 @@ scrolling and emoji overwrites still have substantial gaps. The native Chinese
 feed and combining overwrite cliffs remain specific to those workloads. This
 focused table does not replace the full step-10 checkpoint or the separately
 recorded renderer/application measurements.
+
+
+### Step 14: inline the cursor-row adapter at its two callers
+
+Fresh six-second CPU profiles of step 13 and Ghostty cover ASCII printing,
+ASCII/Chinese scrolling, emoji printing, ASCII reading and emoji reflow. The
+Rustty emoji-print profile spends 8.5% of its samples in the cursor-row adapter.
+Forcing this small private adapter to inline lets the compiler omit row metadata
+that the two printing callers do not use. The standalone symbol disappears;
+page lookup and resource access still happen at the callers. The source change
+is one annotation, with no new state or storage.
+
+The 12-case print/feed/stream comparison uses 50 samples per direction with
+adjacent native measurements. Chinese printing initially measures
+0.950299×/0.928119×: the first order narrowly misses the 5% gate. Its confirmation
+is 0.947×/0.929×, meeting the gate in both orders. Combining printing/feed improve
+3–4%. Emoji scrolling initially flags 0.996×/1.040×, then repeats at
+0.980×/0.980×. Additional styled combining and seven-byte mixed scrolling checks
+improve 2–3% and 1–2%. No regression above 3% is confirmed. All initial values
+are retained below rather than replaced by the repeats.
+
+All 312 VT tests pass with both kernels, along with 57 benchmark checks,
+workspace all-target checking, x86 VT core checking, formatting and 448
+smoke/generated native comparisons. All 14 allocation observations exactly
+match step 13. Frozen sources, binaries, validation and the 14 distinct measured
+workloads are in `target/packed-simplify/step14/`.
+
+Times are pooled medians in microseconds. Forward/reverse ratios compare step
+14 with step 13; native values come from this stage's focused comparison.
+
+| Workload | Step 13 µs | Step 14 µs | Forward / reverse | Ghostty µs | Step 14 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 10.622 | 10.498 | 0.997× / 0.980× | 6.127 | 1.71× |
+| print/chinese | 21.924 | 20.430 | 0.950× / 0.928× | 11.949 | 1.71× |
+| print/combining | 33.201 | 32.005 | 0.967× / 0.961× | 385.933 | 0.08× |
+| print/emoji | 34.116 | 34.022 | 0.999× / 0.995× | 14.902 | 2.28× |
+| feed/ascii | 0.497 | 0.494 | 0.991× / 0.996× | 0.495 | 1.00× |
+| feed/chinese | 3.574 | 3.547 | 0.997× / 0.991× | 434.858 | 0.01× |
+| feed/combining | 37.574 | 36.231 | 0.965× / 0.966× | 400.956 | 0.09× |
+| feed/emoji | 36.635 | 36.456 | 0.993× / 1.000× | 17.131 | 2.13× |
+| stream/ascii | 7.147 | 7.119 | 0.995× / 0.999× | 5.283 | 1.35× |
+| stream/chinese | 15.485 | 15.371 | 0.993× / 0.992× | 8.578 | 1.79× |
+| stream/combining | 485.595 | 471.634 | 0.976× / 0.968× | 478.717 | 0.99× |
+| stream/emoji | 523.258 | 534.836 | 0.996× / 1.040× | 736.392 | 0.73× |
+
+The matched step-13 profiles and hashes are in `step13/profiles/`, under the
+same artifact root. These are physical-symbol self-sample shares, normalized
+independently for each engine; they identify candidates rather than establishing
+speedups. The runtime measurements above establish this step's gain.
+
+| Workload | Rustty shares | Ghostty shares |
+| --- | --- | --- |
+| print/ascii | Cell printing 41.6%; print dispatch/validation 35.6%; resource synchronization 17.0% | Printing 75.3%; page-width checks 20.4% |
+| stream/ascii | ASCII printing 32.8%; resource synchronization 8.7%; pruning 6.4% | Batched printing 29.6%; `madvise` 28.4%; decoding 7.5% |
+| stream/chinese | UTF-8 printing 23.1%; feed 22.1%; destination scan/store 10.1%; validation 4.7% | Batched printing 45.4%; `madvise` 18.3%; conversion 13.1% |
+| print/emoji | Print dispatch 15.5%; grapheme append 9.8%; cursor-row adapter 8.5% | Grapheme release 27.0%; cell printing 20.0%; print dispatch 13.3% |
+| read/ascii | Cell-text scan 97.3%; row iterator 2.7% | Cell-text scan 99.5% |
+| reflow/emoji | Resize 23.7%; cell installation 15.0%; cell copying 9.1% | `madvise` 60.1%; column resize 24.8% |
+
+Source and assembly inspection identify further repeated work: Unicode control
+search decodes already-validated UTF-8 before printing decodes it again, and the
+wide-cell replacement loop clears resource-free cells immediately before
+replacing them. These remain separate experiments. The latest complete
+54-workload comparison still describes step 10, and renderer/application
+measurements retain their separately recorded sources.

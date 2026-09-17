@@ -743,7 +743,7 @@ impl Screen {
         let (index, _) = self.pages.locate_from_end(self.height - 1 - y);
         usize::from(self.pages.pages[index].columns)
     }
-    #[inline]
+    #[inline(always)]
     pub(crate) fn cursor_row(&self) -> Row<'_> {
         let (index, row) = self.cursor_location();
         self.pages.pages[index].row(row)

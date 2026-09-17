@@ -4331,3 +4331,101 @@ are retained, rather than reporting the full smoke as passed. Core sources
 remain unchanged, so the complete Ghostty table and configured parity result
 still apply. Frozen source, binaries, profiles, samples and validation are under
 `target/packed-simplify/step42/`.
+
+
+### Application checkpoint after step 42
+
+This fresh comparison measures the aggregate effect of steps 39–42, from
+`c4720d2a8` to `c4b833085`. Only the renderer's `lib.rs` and `prepare.rs`
+change between the frozen production sources. Application, GPU renderer,
+fonts, core, dependencies and workloads match; the independent pane-Find
+change is excluded. Source archives and executable hashes were verified.
+Rust 1.95.0, native CPU flags, Menlo 13 pt, 50 warmup frames and 50 samples
+per direction are fixed. Preparation and application runs are serial and
+separate, with the existing build/profile process guard.
+
+At 120×40 cells and 1200×850 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse |
+| --- | ---: | ---: | ---: |
+| cached_redraw | 170.1 → 98.4 | 178.0 → 107.5 | 0.579× / 0.578× |
+| status_update | 170.4 → 97.8 | 175.0 → 107.4 | 0.574× / 0.568× |
+| scroll_ascii | 182.8 → 103.6 | 192.4 → 106.8 | 0.571× / 0.561× |
+| scroll_styled | 144.7 → 65.0 | 164.5 → 71.3 | 0.447× / 0.454× |
+| mixed_unicode | 171.6 → 97.8 | 189.8 → 101.4 | 0.576× / 0.567× |
+| alternate_repaint | 171.4 → 100.9 | 188.3 → 120.8 | 0.592× / 0.585× |
+| resize_reflow | 173.1 → 100.6 | 198.8 → 118.9 | 0.587× / 0.578× |
+
+At scale 2, 215×71 cells and 3456×2234 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse | Rust allocations/frame, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 398.6 → 174.6 | 437.3 → 189.7 | 0.432× / 0.442× | 855 → 26 |
+| status_update | 398.6 → 175.9 | 415.6 → 189.2 | 0.439× / 0.444× | 855 → 26 |
+| scroll_ascii | 422.2 → 187.6 | 445.7 → 208.9 | 0.447× / 0.440× | 926 → 28 |
+| scroll_styled | 354.5 → 118.0 | 401.2 → 124.3 | 0.335× / 0.326× | 1,774 → 34 |
+| mixed_unicode | 410.6 → 178.7 | 441.2 → 199.4 | 0.452× / 0.431× | 855 → 26 |
+| alternate_repaint | 399.7 → 177.4 | 415.3 → 187.4 | 0.446× / 0.441× | 855 → 26 |
+| resize_reflow | 398.0 → 180.5 | 426.1 → 194.8 | 0.449× / 0.456× | 855 → 26 |
+
+Preparation improves 41–55% at standard size and 54–67% at Retina size in
+both orders. These are directly measured aggregate gains, not multiplied
+stage ratios. Retina status updates request 758,472 rather than 1,190,944
+Rust heap bytes per frame; styled scrolling requests 1,051,688 rather than
+1,442,888. Every paired feed allocation count and requested-byte sample
+matches. Native font and driver allocations are outside these counts.
+
+The disposable application replay uses scale 2, a 1200×850 pixel target
+and 74×24 cells, with offscreen Metal submission. Its frame CPU results are
+mixed despite the preparation gains:
+
+| Workload | Frame CPU median ms, before → after | p95 ms, before → after | p99 ms, before → after | Forward / reverse |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 0.480 → 0.322 | 1.126 → 1.157 | 1.830 → 1.237 | 0.693× / 0.627× |
+| status_update | 1.637 → 1.935 | 2.294 → 2.371 | 2.456 → 2.442 | 1.013× / 2.027× |
+| scroll_ascii | 0.939 → 0.959 | 1.808 → 2.281 | 1.845 → 2.405 | 0.914× / 1.362× |
+| scroll_styled | 0.923 → 0.886 | 1.843 → 1.687 | 1.899 → 1.768 | 1.279× / 0.775× |
+| mixed_unicode | 0.936 → 0.992 | 1.868 → 1.764 | 2.042 → 1.893 | 1.091× / 1.057× |
+| alternate_repaint | 0.851 → 0.718 | 1.778 → 1.698 | 1.815 → 1.876 | 0.804× / 0.842× |
+| resize_reflow | 0.775 → 0.735 | 1.478 → 1.523 | 1.863 → 1.727 | 0.749× / 1.093× |
+
+The following resources belong to those same application samples. Process
+CPU percentages are ranges across the two complete measured replays, as a
+percentage of one core. RSS and intervals are pooled per-frame statistics.
+
+| Workload | Interval median ms, before → after | Interval p95 ms, before → after | Process CPU %, before → after | RSS median MiB, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| cached_redraw | 51.8 → 51.4 | 74.3 → 52.7 | 2.74–3.05 → 2.00–2.11 | 117.5 → 116.0 |
+| status_update | 52.6 → 53.0 | 53.6 → 53.6 | 3.12–5.41 → 5.36–5.57 | 121.4 → 116.6 |
+| scroll_ascii | 52.1 → 52.0 | 55.3 → 53.7 | 3.07–3.89 → 3.06–4.41 | 112.8 → 113.3 |
+| scroll_styled | 52.0 → 52.0 | 53.0 → 52.9 | 3.12–3.47 → 3.08–3.29 | 113.2 → 113.2 |
+| mixed_unicode | 52.0 → 52.1 | 53.1 → 53.0 | 3.21–3.47 → 3.22–3.37 | 115.8 → 115.9 |
+| alternate_repaint | 52.0 → 51.8 | 53.0 → 52.9 | 2.83–3.36 → 2.47–3.02 | 121.0 → 116.6 |
+| resize_reflow | 53.6 → 53.6 | 55.6 → 55.3 | 5.67–6.30 → 5.25–6.49 | 124.2 → 119.8 |
+
+Status updates and mixed Unicode were repeated, followed by controls running
+the exact same current executable under both labels. Each again has 50
+samples per direction. These are frame CPU median ratios, forward / reverse:
+
+| Workload | Original after / before | Repeat after / before | Identical-current control |
+| --- | ---: | ---: | ---: |
+| cached_redraw | 0.693× / 0.627× | — | 0.543× / 0.686× |
+| status_update | 1.013× / 2.027× | 0.904× / 2.291× | 0.453× / 1.812× |
+| mixed_unicode | 1.091× / 1.057× | 1.134× / 1.077× | 1.201× / 1.002× |
+
+Application effects remain unresolved. The adverse mixed-Unicode medians
+repeat in both orders, and status updates remain adverse in one order.
+Identical binaries also vary substantially, including a false apparent
+cached-redraw improvement. These controls neither erase the original results
+nor establish 3% equivalence. No application-wide speedup is claimed. Recorded
+focus/occlusion traffic is a measurement concern; CPU frequency and core
+placement have not been established as causes.
+
+The replay inserts a minimum 50 ms pause, so its frame intervals do not
+measure maximum throughput or typing latency. Frame wall and thread CPU
+times cover CPU preparation/submission; GPU completion and visible
+presentation are not measured. All wall-time statistics, tails, allocation
+observations and 5,200 samples, including controls, are retained under
+`target/packed-simplify/app-checkpoint-42/`. The step-42 native scheduling
+smoke remains inconclusive as documented above. Core sources are unchanged,
+so the complete Ghostty comparison and configured parity result still apply.

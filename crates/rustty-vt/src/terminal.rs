@@ -1008,15 +1008,6 @@ impl Terminal {
             }
             let mut offset = 0;
             while offset < len {
-                // The scalar anchor resolves wrapping, joins and resource growth.
-                self.print_with_properties(
-                    codepoints[offset],
-                    unicode::Properties::from_bits(properties[offset]),
-                );
-                offset += 1;
-                if offset == len || self.screen().cursor.pending_wrap {
-                    continue;
-                }
                 let mut state = self.grapheme_state;
                 let count = self.screen_mut().write_cursor_codepoints(
                     &codepoints[offset..len],
@@ -1030,6 +1021,13 @@ impl Terminal {
                     self.previous_char = Some(codepoints[offset + count - 1]);
                     self.generation = self.generation.wrapping_add(count as u64);
                     offset += count;
+                } else {
+                    // Scalar printing resolves wrapping, joins and resource growth.
+                    self.print_with_properties(
+                        codepoints[offset],
+                        unicode::Properties::from_bits(properties[offset]),
+                    );
+                    offset += 1;
                 }
             }
         }

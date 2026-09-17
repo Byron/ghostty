@@ -1300,6 +1300,9 @@ impl Screen {
         state: &mut u8,
     ) -> usize {
         use crate::{printing, unicode};
+        if self.cursor.pending_wrap || self.cursor.col > right {
+            return 0;
+        }
         let Some(&first) = codepoints.first() else {
             return 0;
         };
@@ -1314,7 +1317,8 @@ impl Screen {
         }
         let (index, row) = self.cursor_location();
         let page = &self.pages.pages[index];
-        if self.cursor_link.is_some() {
+        // The scalar fallback extends partial-reflow rows before any write.
+        if usize::from(page.columns) <= right || self.cursor_link.is_some() {
             return 0;
         }
         match self.cursor_style {

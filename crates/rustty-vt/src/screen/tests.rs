@@ -189,6 +189,20 @@ fn printing_widens_before_clamping_public_cursor_edits() {
                 screen.pages.pages[0].row_ids[..2].copy_from_slice(&[0, 1]);
                 screen.cursor.col = col;
                 if batched {
+                    for text in ["éé", "界界"] {
+                        let mut reference = terminal.clone();
+                        for cp in text.chars() {
+                            reference.print(cp);
+                        }
+                        let mut actual = terminal.clone();
+                        actual.feed(text.as_bytes());
+                        assert_eq!(actual.generation, reference.generation);
+                        assert!(
+                            snapshot::encode_to_vec(&actual).unwrap()
+                                == snapshot::encode_to_vec(&reference).unwrap()
+                        );
+                        assert_references(actual.screen());
+                    }
                     terminal.feed(b"X");
                 } else {
                     terminal.print('X');

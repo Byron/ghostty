@@ -9,7 +9,8 @@ and `stream` workloads include UTF-8 decoding and VT parsing.
 The latest [complete Ghostty comparison](#step-10-checkpoint-against-ghostty-2026-09-17)
 covers all 54 workloads. Later focused measurements include the
 [reflow improvement](#step-12-copy-unmanaged-reflow-cells-directly) and the
-[current printing/feed/scrolling comparison](#step-16-release-resources-without-blanking-ordinary-replacement-cells).
+[printing comparison](#step-16-release-resources-without-blanking-ordinary-replacement-cells) and
+[current feed/scrolling comparison](#step-17-try-validated-unicode-runs-before-scalar-fallback).
 Each table identifies its measured source; stage ratios are not multiplied.
 
 ```sh
@@ -3009,3 +3010,43 @@ Forward/reverse ratios compare step 16 with step 15.
 Chinese scalar printing reaches 1.53× Ghostty. Ordinary ASCII printing and
 emoji overwrites still have larger gaps. The latest full 54-case checkpoint
 remains step 10; these later tables report their own freshly measured sources.
+
+
+### Step 17: try validated Unicode runs before scalar fallback
+
+UTF-8 printing previously printed one scalar before every batch attempt, even
+when the existing batch checks could admit the whole run. It now tries that
+run first and uses scalar printing when the checks reject it. Pending wraps,
+public cursor columns beyond the logical edge and partial-width physical rows
+explicitly take the scalar path, preserving extension, clamping and repair.
+
+All 312 VT tests pass with both kernels, together with 57 benchmark checks,
+workspace all-target checking, the x86 VT core check and formatting. The parser,
+terminal corpus, snapshots, page lifecycle and 100 generated cases pass 14,758
+native comparisons. All 14 allocation observations match step 16. The expanded
+partial-row test compares batched Latin-1 and Chinese writes against scalar
+snapshots on both screens, including a public cursor column of `usize::MAX`.
+
+The first candidate also rejected singleton batches. Although mixed feed
+improved 6–7%, styled combining scrolling regressed 3.5%/4.3%, and its
+memory-capped counterpart regressed 3.6%/3.2%. Restoring singleton batches
+keeps ASCII bases between combining marks on their existing path. Both
+candidates' complete measurements remain in `target/packed-simplify/step17/`
+and `step17b/`; only the revised candidate is retained.
+
+The revised 26-case feed/stream sweep uses 50 samples in each order. No case
+exceeds the 3% regression threshold in either order. Mixed scrolling delivered
+in 4-KiB chunks improves 6.4%/5.5%, meeting the acceptance threshold. Mixed
+feed improves about 4–5%; its seven-byte delivery is effectively unchanged.
+Combining scrolling takes about 1% longer, as shown below. Times are pooled
+medians in microseconds; native values were measured adjacently.
+
+| Workload | Step 16 µs | Step 17 µs | Forward / reverse | Ghostty µs | Step 17 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| feed/emoji | 36.029 | 36.091 | 1.007× / 0.995× | 17.213 | 2.10× |
+| stream/chinese | 12.464 | 12.144 | 0.975× / 0.970× | 8.665 | 1.40× |
+| stream/combining | 462.932 | 468.159 | 1.008× / 1.010× | 485.900 | 0.96× |
+| stream_styled/combining | 547.958 | 553.655 | 1.013× / 1.009× | 483.678 | 1.14× |
+| chunked_feed_mixed/whole | 65.517 | 62.395 | 0.957× / 0.951× | — | — |
+| chunked_stream_mixed/7_bytes | 279.495 | 278.980 | 0.996× / 1.000× | — | — |
+| chunked_stream_mixed/4_KiB | 202.637 | 190.523 | 0.936× / 0.945× | — | — |

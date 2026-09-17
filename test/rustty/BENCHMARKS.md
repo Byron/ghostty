@@ -4842,3 +4842,34 @@ validation are under `target/packed-simplify/step47/`. The interrupted timing
 run resumed from complete workloads; the process guard also repeated a case
 that overlapped an unrelated compiler. Application-wide timing and the native
 scheduling smoke retain their previously documented limitations.
+
+
+### Step 48 experiment: scan four destination cells (not retained)
+
+Fresh matched profiles of step 47 still locate substantial work in the ASCII
+fill path: 1,290 of 4,547 ordinary-scrolling self samples and 801 of 4,572
+styled-scrolling samples are in `print_ascii`. Ghostty scans four destination
+cells per reduction. A small Rustty candidate uses the existing `wide::u32x8`
+to compare four cells instead of two, retaining the scalar tail and exact
+first-mismatch behavior. It adds no unsafe code or dependency.
+
+The candidate does not reach the 5% complete-feed/stream threshold. The frozen
+Rust 1.95.0 binaries use native CPU flags and 50 samples in each direction.
+The process guard waits for independent builds and repeats interrupted cases.
+
+| Workload | Median µs, before → after | Forward / reverse |
+| --- | ---: | ---: |
+| print/ascii | 9.116 → 9.953 | 1.075× / 1.101× |
+| feed/ascii | 0.419 → 0.407 | 0.982× / 0.972× |
+| stream/ascii | 5.830 → 5.725 | 0.989× / 0.975× |
+| stream_styled/ascii | 9.502 → 9.370 | 0.995× / 0.979× |
+
+ASCII feed improves only 1.8%/2.8%, ordinary scrolling 1.1%/2.5%, and styled
+scrolling 0.5%/2.1%. Direct ASCII printing also flags a slowdown in both orders.
+No candidate workload qualifies for acceptance, so no broader timing sweep or
+regression controls are needed to reject it. All 327 VT tests, including the
+existing bit-field, mismatch, alignment and tail equivalence checks, both
+benchmark self-checks and formatting pass. The source change is restored to
+step 47. Its full Ghostty table and validation remain current. Frozen source,
+binaries, four matched profiles and all four comparisons are preserved under
+`target/packed-simplify/step48/`.

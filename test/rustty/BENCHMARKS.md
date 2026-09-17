@@ -3927,3 +3927,68 @@ synchronized output and idle scheduling. The first candidate and unchanged
 baseline both exceeded the smoke redraw limit with focus/pointer events; the
 test was not weakened. Validated source matches the frozen candidate. Artifacts
 are in `target/packed-simplify/step37/`.
+
+
+### Step 38: execute the differential runner in Rust
+
+The preserved Python driver spends most of its profiled comparison time in
+recursive `difference` calls, constructing diagnostic paths even when every
+field agrees. The 72-case inherited stream sample records 8,761,216 calls to
+that function and 4.994 of 7.526 instrumented seconds there. These profiling
+times identify the cost; the unprofiled timings below measure the improvement.
+
+The Rust runner owns process transport, bounded requests/responses, deadlines,
+delivery variants, strict comparison, snapshot cross-decoding and uninterrupted
+state checks, coverage, replay, artifacts and minimization. Equality checks
+avoid diagnostic-path construction for matching subtrees. The transport deadline
+also covers a blocked input pipe. Failure directories retain previous evidence.
+It uses existing dependencies and keeps the terminal implementations in separate
+processes.
+
+The generators remain available for offline regeneration. Their 21,844 base
+fixtures occupy 4.8 MiB of compressed data, including the extra thorough-only
+search cases. Every preserved request and coverage label was compared with the
+original pre-rewrite collector. Source checksums, corpus membership and native
+reference queries are checked when loading a group. Python-compatible MT19937
+keeps arbitrary `--seed`/`--generated` runs available in Rust. `parity.py` is now
+an exec launcher; `parity_reference.py` retains the original execution logic
+for offline verification.
+
+Both runners use the same frozen Ghostty and Rustty oracle executables. Each
+case has 50 adjacent pairs per order, then the order is reversed. Completed
+pairs survive pauses; a pair overlapping a detected Cargo, Clippy or profiling
+job is discarded and retried. The table pools the 100 samples per runner and
+uses the nearest-rank p95. These measurements isolate runner overhead.
+
+| Suite | Python median / p95 (ms) | Rust median / p95 (ms) | Rust / Python, forward / reverse | Peak RSS, Python → Rust (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Smoke (148 comparisons) | 388.3 / 406.0 | 270.8 / 285.1 | 0.705× / 0.696× | 31.1 → 11.1 |
+| Inherited stream-initial corpus (72) | 3563.9 / 3645.3 | 2056.7 / 2128.4 | 0.576× / 0.578× | 79.0 → 87.2 |
+| Snapshot CSI continuations (51) | 955.8 / 966.0 | 645.4 / 650.2 | 0.675× / 0.676× | 32.9 → 12.0 |
+
+All three cases improve in both orders. The corpus case uses about 8 MiB more
+peak RSS; smoke and snapshot continuations use about 20 MiB less. RSS is the
+median of the peaks reported by `wait4`; simultaneous aggregate memory across
+the runner and both oracle processes was not sampled. The broader snapshot
+pilot is retained separately and excluded from these timing results.
+
+The configured suite passes **61,587 comparisons with zero mismatches** in
+576.45 seconds, including all snapshot groups and native resource cases.
+`--thorough` remains a separate, incomplete coverage gate. The timing wrapper
+could not read `kern.clockrate` in the sandbox and returned an error after the
+successful runner result; its additional resource statistics are unavailable.
+The earlier interrupted step-37 suite is not counted as a completed run.
+
+Validation also passes 494 workspace tests (two opt-in tests ignored), all-target
+workspace checks, formatting, 12 Rust harness tests, and the 10 preserved Python
+reference tests. The compatibility launcher passes from outside the checkout.
+The harness tests cover strict number/boolean distinctions, nested metadata,
+missing fields, malformed-byte delivery, live-versus-restored state, rejection
+expectations, stale or truncated fixtures, deadlines, child cleanup, coverage,
+external artifacts and minimization's original mismatch category/attempt bound.
+
+This change leaves the VT and parser sources identical to `20bf494e9`; the
+latest core/Ghostty ratios are those documented at step 26 until a new complete
+comparison is recorded. Frozen runners, original source, fixture verification,
+all accepted and interrupted timing data, and `validation.json` are retained
+under `target/parity-driver/`.

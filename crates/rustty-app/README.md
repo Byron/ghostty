@@ -77,7 +77,7 @@ Validation:
 ```sh
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-python3 test/rustty/parity.py
+cargo +1.95.0 run --release --offline -p rustty-vt --example parity-runner
 RUSTTY_SMOKE_DIR=/tmp/rustty-native-smoke target/debug/Rustty.app/Contents/MacOS/rustty
 ```
 

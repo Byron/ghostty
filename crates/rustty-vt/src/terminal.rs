@@ -935,11 +935,14 @@ impl Terminal {
             self.ensure_row_cells(self.screen().cursor.row, usize::from(self.cols));
             let col = self.screen().cursor.col.min(usize::from(self.cols) - 1);
             self.screen_mut().cursor.col = col;
-            // Reuse scalar wrapping, including margins, scrolling and prompt state.
             if self.screen().cursor.pending_wrap {
-                self.print(char::from(bytes[0]));
-                bytes = &bytes[1..];
-                continue;
+                // A cursor beyond the margin uses its old right limit for one print.
+                if col > self.margins.right {
+                    self.print(char::from(bytes[0]));
+                    bytes = &bytes[1..];
+                    continue;
+                }
+                self.print_wrap();
             }
             let col = self.screen().cursor.col;
             let right = if col > self.margins.right {

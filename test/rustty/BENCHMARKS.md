@@ -2807,3 +2807,43 @@ Plain ASCII and Chinese reflow now match or beat Ghostty in this comparison.
 This stage does not close the remaining ordinary-printing, Chinese-scrolling
 or emoji-overwrite gaps. The complete 54-workload checkpoint above still
 identifies its step-10 source; these are the later focused reflow measurements.
+
+
+### Step 13: keep ASCII batching across row wraps
+
+Pending ASCII wraps now use the existing wrap helper before batching the next
+row. Previously the first byte of each wrapped row went through scalar printing.
+The out-of-margin cursor case retains that scalar call because its first print
+uses the old right limit. No additional state or storage is introduced.
+
+All 312 VT tests pass with both kernels, including the batched-input comparisons
+for margins, both screens, wide/grapheme overwrites, charsets, chunk boundaries
+and generation counts. Workspace all-target checking, x86 VT core checking,
+formatting, 57 benchmark checks and 448 smoke/generated native comparisons pass.
+All 14 allocation observations exactly match step 12.
+
+The 26 feed/stream workloads and 12 native counterparts use 50 samples per
+direction. None exceeds the 3% regression threshold in either order. ASCII
+feed improves 14% in both orders; ordinary and memory-capped ASCII scrolling
+also improve by 3–5%. Times below are pooled medians in microseconds, with
+adjacently measured native values. Sources, frozen binaries, validation and
+all measurements are retained in `target/packed-simplify/step13/`.
+
+| Workload | Step 12 µs | Step 13 µs | Forward / reverse | Ghostty µs | Step 13 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| feed/ascii | 0.572 | 0.493 | 0.862× / 0.862× | 0.477 | 1.03× |
+| feed/chinese | 3.492 | 3.498 | 1.000× / 1.000× | 429.575 | 0.01× |
+| feed/combining | 37.048 | 37.398 | 1.008× / 1.020× | 382.207 | 0.10× |
+| feed/emoji | 36.808 | 36.392 | 0.989× / 0.987× | 16.962 | 2.15× |
+| stream/ascii | 7.373 | 7.080 | 0.954× / 0.965× | 5.328 | 1.33× |
+| stream/chinese | 15.421 | 15.273 | 0.998× / 0.992× | 8.673 | 1.76× |
+| stream/combining | 483.269 | 482.909 | 1.005× / 0.995× | 477.584 | 1.01× |
+| stream/emoji | 525.831 | 523.504 | 0.993× / 0.998× | 730.320 | 0.72× |
+| stream_styled/ascii | 11.195 | 10.938 | 0.983× / 0.968× | 7.946 | 1.38× |
+| stream_memory_capped/ascii | 8.228 | 7.888 | 0.961× / 0.952× | — | — |
+
+ASCII feed reaches 1.03× Ghostty and combining scrolling stays at 1.01×. Chinese
+scrolling and emoji overwrites still have substantial gaps. The native Chinese
+feed and combining overwrite cliffs remain specific to those workloads. This
+focused table does not replace the full step-10 checkpoint or the separately
+recorded renderer/application measurements.

@@ -2756,3 +2756,54 @@ Combining scrolling reaches 1.01× Ghostty, and ASCII feed reaches 1.18×. Ordin
 printing, Chinese scrolling and emoji overwrites still have material gaps.
 The complete 54-workload table remains the preceding step-10 checkpoint;
 this stage refreshes the affected workloads and their native counterparts.
+
+
+### Step 12: copy unmanaged reflow cells directly
+
+Rows whose existing headers contain no managed resources now copy their packed
+cells directly into fresh reflow destinations. This removes temporary resource
+copies, empty-cell clearing and admission dispatch for these rows. Wide tails
+and width-one conversion keep the existing behavior; resource-bearing rows
+continue through the general copy path.
+
+A new test forces conservative managed-row hints to compare the direct path
+with the existing resource-copy implementation. Snapshots match through five
+target widths and resizing back, including wide characters, inline backgrounds,
+styled and grapheme rows, and retained history. All 312 VT tests pass with both
+kernels, along with 57 benchmark checks, workspace all-target checking, x86 VT
+core checking, 39 selected native reflow comparisons and 448 smoke/generated
+comparisons. All 14 allocation observations match step 11 exactly.
+
+The twelve focused cases use 50 samples per direction. Plain ASCII reflow
+improves 38%, Chinese reflow 61%, and their retained-history cases 56%/68%.
+Printing and scrolling controls stay within 2%. The cost is a small slowdown
+in grapheme reflow: emoji reflow initially flags 1.031×/1.001×, then repeats at
+1.019×/1.026×. Emoji history initially measures 1.030×/1.040×, then repeats at
+1.027×/1.026×. Combining history repeats at 1.015×/1.007×. The repeat does not
+confirm a slowdown above 3%; the remaining 2–3% emoji cost is retained as a
+measured tradeoff. The table preserves the original results.
+
+Times are pooled medians in microseconds; forward/reverse ratios compare
+step 12 with step 11. Native measurements are adjacent comparisons from this
+stage. Sources, frozen binaries, validation, the focused sweep and confirmations
+are in `target/packed-simplify/step12/`.
+
+| Workload | Step 11 µs | Step 12 µs | Forward / reverse | Ghostty µs | Step 12 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 10.443 | 10.416 | 1.003× / 0.993× | 6.031 | 1.73× |
+| print/chinese | 21.370 | 21.539 | 1.004× / 1.002× | 11.763 | 1.83× |
+| reflow/ascii | 31.277 | 19.380 | 0.614× / 0.620× | 20.078 | 0.97× |
+| reflow/chinese | 51.369 | 20.098 | 0.392× / 0.393× | 20.960 | 0.96× |
+| reflow/combining | 47.574 | 48.026 | 1.007× / 1.012× | 45.762 | 1.05× |
+| reflow/emoji | 36.438 | 37.132 | 1.031× / 1.001× | 28.788 | 1.29× |
+| stream/ascii | 7.436 | 7.404 | 0.995× / 0.993× | 5.214 | 1.42× |
+| stream/chinese | 15.226 | 15.381 | 1.017× / 1.006× | 8.548 | 1.80× |
+| reflow_history/ascii | 1121.921 | 494.988 | 0.447× / 0.434× | — | — |
+| reflow_history/chinese | 1109.289 | 353.745 | 0.318× / 0.319× | — | — |
+| reflow_history/combining | 4442.121 | 4477.717 | 1.007× / 1.010× | — | — |
+| reflow_history/emoji | 2845.209 | 2940.434 | 1.030× / 1.040× | — | — |
+
+Plain ASCII and Chinese reflow now match or beat Ghostty in this comparison.
+This stage does not close the remaining ordinary-printing, Chinese-scrolling
+or emoji-overwrite gaps. The complete 54-workload checkpoint above still
+identifies its step-10 source; these are the later focused reflow measurements.

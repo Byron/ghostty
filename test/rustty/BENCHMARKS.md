@@ -4685,3 +4685,37 @@ and detached-snapshot checks. Formatting passes. The dependency declaration
 and source changes are restored to step 44, whose complete Ghostty table and
 validation remain current. Source, binaries, six matched profiles, assembly
 and all 11 comparisons are under `target/packed-simplify/step45/`.
+
+
+### Step 46 experiment: pass the validated location to ASCII writes (not retained)
+
+Matched ordinary and styled ASCII scrolling profiles show repeated cursor
+and page resolution around the fill loop. Ghostty's `printSliceFill` uses
+its cursor's resident row and cell pointers. A small Rustty candidate passes
+the row location already returned by width validation into `write_cursor_ascii`,
+using the existing scalar writer's resource checks and refreshing after wraps.
+It adds no persistent cache or resource-admission shortcut.
+
+Rust 1.95.0, native CPU flags, serial process guards and 50 samples per
+direction remain fixed. The committed step-44 core is the baseline.
+
+| Workload | Median µs, before → after | Forward / reverse |
+| --- | ---: | ---: |
+| print/ascii | 9.293 → 9.396 | 0.925× / 1.026× |
+| feed/ascii | 0.496 → 0.496 | 0.997× / 1.001× |
+| feed/combining | 32.537 → 32.532 | 1.005× / 0.997× |
+| feed/emoji | 19.349 → 19.380 | 1.000× / 1.002× |
+| stream/ascii | 6.267 → 6.263 | 0.983× / 1.004× |
+| stream/chinese | 9.955 → 9.924 | 1.007× / 0.974× |
+| stream_styled/ascii | 9.909 → 9.696 | 0.977× / 0.982× |
+| chunked_feed_mixed/4_KiB | 51.118 → 50.993 | 1.001× / 0.995× |
+
+Styled ASCII scrolling improves 1.8–2.3%, but the other feeds and streams
+remain effectively unchanged. The candidate does not reach 5% in both orders
+and is not retained. All 327 VT tests and both benchmark self-checks pass,
+including a debug assertion validating the supplied location. Formatting
+passes after correcting the function signature layout; no measurements use
+the unformatted build. Both modified source files are restored to step 44.
+The complete Ghostty table and validation above remain current. Frozen source,
+binaries, four matched profiles, assembly and the eight comparisons are under
+`target/packed-simplify/step46/`.

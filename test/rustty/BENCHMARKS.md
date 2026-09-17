@@ -4719,3 +4719,126 @@ the unformatted build. Both modified source files are restored to step 44.
 The complete Ghostty table and validation above remain current. Frozen source,
 binaries, four matched profiles, assembly and the eight comparisons are under
 `target/packed-simplify/step46/`.
+
+
+### Step 47: let LLVM widen ASCII stores
+
+Matched scrolling profiles and disassembly identified a manual ASCII store
+loop that constructed only two cells at a time, unpacking bytes through scalar
+registers. Reusing the existing reference loop removes that duplicate store
+implementation: two lines are added and twelve removed. With Rust 1.95.0 and
+native ARM CPU flags, LLVM emits sixteen-cell NEON groups and smaller tails.
+Packed cells, resource admission and the other explicit SIMD kernels are unchanged.
+
+The baseline is the committed step-44 core, also used by the report-only steps
+45 and 46. Frozen executables run serially with 50 samples per direction and
+adjacent reversed-order confirmation. The table retains all 54 workloads;
+36 have an adjacent Ghostty measurement. Ratios below one favor the new Rustty.
+
+| Workload | Before µs | After µs | Ghostty µs | After / before, forward / reverse | After / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.348 | 0.349 | 0.349 | 1.016× / 0.997× | 1.000× |
+| width/chinese | 0.343 | 0.347 | 0.350 | 1.009× / 1.006× | 0.991× |
+| width/combining | 0.350 | 0.345 | 0.433 | 0.990× / 0.983× | 0.796× |
+| width/emoji | 0.304 | 0.307 | 0.324 | 0.967× / 1.030× | 0.947× |
+| print/ascii | 9.843 | 10.049 | 6.295 | 1.081× / 0.938× | 1.596× |
+| print/chinese | 16.829 | 16.570 | 12.246 | 0.982× / 0.992× | 1.353× |
+| print/combining | 29.405 | 29.602 | 410.267 | 1.011× / 1.003× | 0.072× |
+| print/emoji | 30.484 | 31.161 | 15.217 | 1.013× / 1.034× | 2.048× |
+| scalar/ascii | 2.013 | 1.887 | 1.317 | 0.916× / 1.124× | 1.433× |
+| scalar/chinese | 1.653 | 1.792 | 1.320 | 1.258× / 0.927× | 1.358× |
+| scalar/combining | 1.702 | 1.695 | 1.311 | 0.995× / 0.992× | 1.293× |
+| scalar/emoji | 1.447 | 1.636 | 1.315 | 1.269× / 0.999× | 1.244× |
+| read/ascii | 2.861 | 2.861 | 1.956 | 1.005× / 0.992× | 1.463× |
+| read/chinese | 2.871 | 2.852 | 1.960 | 0.986× / 1.006× | 1.455× |
+| read/combining | 3.336 | 3.322 | 5.991 | 0.996× / 0.996× | 0.555× |
+| read/emoji | 3.251 | 3.253 | 2.476 | 0.999× / 1.005× | 1.314× |
+| clone/ascii | 4.854 | 4.846 | 5.619 | 1.005× / 0.996× | 0.862× |
+| clone/chinese | 4.862 | 4.862 | 5.610 | 0.996× / 1.005× | 0.867× |
+| clone/combining | 6.171 | 6.180 | 17.005 | 1.004× / 0.999× | 0.363× |
+| clone/emoji | 5.638 | 5.598 | 9.699 | 1.000× / 0.990× | 0.577× |
+| reflow/ascii | 19.003 | 19.170 | 24.936 | 1.007× / 1.010× | 0.769× |
+| reflow/chinese | 20.501 | 20.417 | 26.752 | 0.989× / 1.009× | 0.763× |
+| reflow/combining | 49.049 | 48.330 | 53.848 | 0.982× / 0.986× | 0.898× |
+| reflow/emoji | 37.519 | 37.643 | 35.402 | 1.009× / 0.997× | 1.063× |
+| feed/ascii | 0.504 | 0.425 | 0.502 | 0.825× / 0.853× | 0.845× |
+| feed/chinese | 2.264 | 2.261 | 441.350 | 0.998× / 0.998× | 0.005× |
+| feed/combining | 32.722 | 33.017 | 411.906 | 1.003× / 1.013× | 0.080× |
+| feed/emoji | 19.484 | 19.686 | 17.325 | 1.003× / 1.014× | 1.136× |
+| stream/ascii | 6.340 | 5.922 | 5.884 | 0.920× / 0.939× | 1.006× |
+| stream/chinese | 10.083 | 10.114 | 9.228 | 1.000× / 1.009× | 1.096× |
+| stream/combining | 447.988 | 457.200 | 480.609 | 1.017× / 0.988× | 0.951× |
+| stream/emoji | 296.677 | 297.033 | 749.976 | 0.997× / 1.005× | 0.396× |
+| stream_styled/ascii | 9.951 | 9.522 | 7.985 | 0.962× / 0.950× | 1.193× |
+| stream_styled/chinese | 13.908 | 13.848 | 35.649 | 1.011× / 0.985× | 0.388× |
+| stream_styled/combining | 531.136 | 522.832 | 493.281 | 0.991× / 0.972× | 1.060× |
+| stream_styled/emoji | 418.826 | 418.475 | 780.191 | 1.002× / 1.003× | 0.536× |
+| chunked_feed_mixed/whole | 51.718 | 51.654 | — | 0.993× / 1.003× | — |
+| chunked_feed_mixed/7_bytes | 82.755 | 83.344 | — | 1.011× / 1.005× | — |
+| chunked_feed_mixed/4_KiB | 51.346 | 51.457 | — | 1.005× / 1.001× | — |
+| chunked_stream_mixed/whole | 159.635 | 160.388 | — | 1.006× / 1.001× | — |
+| chunked_stream_mixed/7_bytes | 266.623 | 273.722 | — | 1.036× / 1.010× | — |
+| chunked_stream_mixed/4_KiB | 162.375 | 163.190 | — | 1.001× / 1.008× | — |
+| reflow_history/ascii | 477.728 | 481.719 | — | 1.024× / 0.994× | — |
+| reflow_history/chinese | 349.116 | 345.748 | — | 0.979× / 0.992× | — |
+| reflow_history/combining | 4640.113 | 4639.450 | — | 1.000× / 0.998× | — |
+| reflow_history/emoji | 2992.950 | 2980.717 | — | 1.004× / 0.991× | — |
+| stream_memory_capped/ascii | 6.517 | 5.965 | — | 0.914× / 0.917× | — |
+| stream_memory_capped/chinese | 10.255 | 10.245 | — | 1.001× / 0.999× | — |
+| stream_memory_capped/combining | 449.978 | 447.293 | — | 0.995× / 0.989× | — |
+| stream_memory_capped/emoji | 298.991 | 298.901 | — | 0.999× / 0.999× | — |
+| stream_styled_memory_capped/ascii | 10.408 | 9.733 | — | 0.927× / 0.939× | — |
+| stream_styled_memory_capped/chinese | 14.150 | 14.351 | — | 1.009× / 1.018× | — |
+| stream_styled_memory_capped/combining | 528.512 | 529.440 | — | 1.027× / 0.993× | — |
+| stream_styled_memory_capped/emoji | 416.029 | 414.449 | — | 0.994× / 0.999× | — |
+
+ASCII feed improves 15.8%, ordinary ASCII scrolling 6.6%, and styled ASCII
+scrolling 4.3%. Their memory-capped scrolling counterparts improve 8.5% and
+6.5%. The earlier focused run independently finds 0.831×/0.834× for ASCII feed
+and 0.922×/0.911× for scrolling. No allocation or native admission is removed
+to obtain these gains; all 18 instrumented allocation observations exactly
+match step 44, including ordinary writes and row exposure within capacity.
+
+In this full sweep, ASCII feed is 15.5% faster than Ghostty and ASCII scrolling
+is within 1%. The focused native scrolling measurement was faster, leaving
+Rustty 9% behind in that run; the two measurements do not establish universal
+parity. Styled ASCII scrolling remains 19% slower, Chinese scrolling 10%
+slower, emoji feed 14% slower, and ordinary text reads 31–46% slower. Direct
+emoji printing remains about twice as slow. The native Chinese-feed and
+combining-overwrite cliffs retain the workload-specific limitations described
+above. Application timing remains separate from these core measurements.
+
+All seven flags above 3% in either order were repeated, followed by identical
+baseline and identical candidate controls, each with 50 samples per direction.
+The original measurements remain in the full table and artifacts.
+
+| Workload | Original after / before | Repeat after / before | Identical baseline | Identical candidate |
+| --- | ---: | ---: | ---: | ---: |
+| width/emoji | 0.967× / 1.030× | 1.000× / 1.001× | 0.975× / 0.993× | 1.040× / 0.964× |
+| print/ascii | 1.081× / 0.938× | 0.910× / 0.950× | 0.955× / 1.023× | 0.992× / 1.050× |
+| print/emoji | 1.013× / 1.034× | 1.024× / 1.029× | 0.992× / 0.982× | 1.002× / 0.995× |
+| scalar/ascii | 0.916× / 1.124× | 0.807× / 1.126× | 1.073× / 0.842× | 0.818× / 0.858× |
+| scalar/chinese | 1.258× / 0.927× | 1.175× / 1.075× | 0.980× / 0.785× | 0.995× / 0.779× |
+| scalar/emoji | 1.269× / 0.999× | 1.001× / 1.003× | 0.800× / 1.270× | 0.996× / 1.303× |
+| chunked_stream_mixed/7_bytes | 1.036× / 1.010× | 0.999× / 1.010× | 0.999× / 1.003× | 1.001× / 1.006× |
+
+The mixed seven-byte scrolling flag does not repeat (0.999×/1.010×), and its
+identical controls stay within 1%. The direct emoji-print repeat is 2.4–2.9%
+slower, below the 3% rejection threshold. Chinese scalar scanning is slower
+in the repeat, but the exact same baseline and candidate executables vary by
+21–22% on that scan; identical emoji scans vary by 27–30%. ASCII-print and
+scalar-scan controls also remain variable. These checks do not confirm a
+regression beyond the observed control variability, and do not establish 3%
+equivalence for the short scalar scans or direct ASCII printing. The original
+adverse results and both controls are retained rather than replaced.
+
+Validation passes 327 VT tests per kernel configuration, 504 workspace tests
+with two opt-in platform tests ignored, workspace/all-target checks, generic
+x86_64 checks with both kernel configurations, formatting and both benchmark
+self-checks. All 61,587 configured differential comparisons pass with zero
+failures; the separate thorough coverage gate remains incomplete. Source,
+binaries, all samples and controls, assembly, allocation observations and
+validation are under `target/packed-simplify/step47/`. The interrupted timing
+run resumed from complete workloads; the process guard also repeated a case
+that overlapped an unrelated compiler. Application-wide timing and the native
+scheduling smoke retain their previously documented limitations.

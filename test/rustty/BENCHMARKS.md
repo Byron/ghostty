@@ -10,6 +10,8 @@ The latest [complete Ghostty comparison](#step-19-checkpoint-against-ghostty-202
 covers all 54 workloads after the printing, parsing, reflow and Unicode-table
 changes. Each table identifies its measured source; stage ratios are not
 multiplied.
+The newer [step 26 comparison](#step-26-expose-initialized-rows-without-clearing-them-again)
+covers printing, feed, scrolling and reflow after removing redundant row resets.
 
 ```sh
 cargo bench --offline -p rustty-vt --bench primitives
@@ -3435,3 +3437,95 @@ writes and row exposure within capacity. The validated source matches the
 frozen measured binaries. This focused parity run does not replace the
 61,587-comparison configured suite recorded at step 19 or establish the
 separate `--thorough` feature gate.
+
+### Step 24 experiment: construct appended text in its final Arc (rejected)
+
+Two versions removed the 260-byte scratch buffer and copied the prefix and
+suffix directly into the existing `Arc<str>` representation, after native
+admission. Neither reaches a 5% improvement in both orders. The safe slice
+initialization version adds an atomic uniqueness check; emoji feed measures
+0.997×/0.977× and combining feed 1.025×/1.029×. Initializing the uniquely owned
+allocation directly removes that check but still gives only 0.990×/0.988× for
+emoji feed, with combining feed at 1.008×/1.022×.
+
+The second version also produces an ASCII-print regression despite unchanged
+instruction counts in both printing helpers. Its initial 0.975×/1.134× result
+repeats at 1.174×/1.186×; identical-baseline controls in that repeat are
+1.001×/1.004×. Instruction count alone does not establish equivalent runtime
+behavior. Both versions are reverted. Each passed 313 default VT tests and
+57 benchmark checks, including the added 1–4-byte append/snapshot checks up
+to the 64-suffix limit. Frozen patches, binaries, all six primary cases, and
+the ASCII control are retained under `step24/` and `step24b/`.
+
+### Step 25 experiment: skip empty discard bookkeeping (rejected)
+
+Returning early when no row IDs were removed and the viewport was already
+at the bottom improves the four ordinary/styled ASCII scrolling cases by
+only 1–3%. Existing multi-page scrolling worsens 14.1%/14.9%, and styled
+scrolling 12.3%/13.0%. The guard is reverted. All 313 default VT tests and
+57 benchmark checks passed, including public viewport clamping with an
+empty removal list. All seven measured cases, source and binaries are
+preserved in `target/packed-simplify/step25/`.
+
+### Step 26: expose initialized rows without clearing them again
+
+Unused page capacity already contains blank cells and reset, dirty row
+headers. Page creation, truncation, prefix removal and recycling maintain
+that invariant. Exposing a row with the default background now assigns its
+identity and advances the row count. Other backgrounds reuse `reset_row`.
+Debug assertions check blank cells and dirty headers; the new test exercises
+new, truncated, rotated and recycled rows containing styles, links and
+graphemes, with default, indexed and RGB backgrounds.
+
+The first version removed cell clearing but retained header resetting and
+separate background filling. Its 41-case sweep improved scrolling but slowed
+ASCII feed 18.5–18.8%. Reusing the background reset path fixed feed; that
+second version still slowed ASCII printing 3.8%/8.3% on confirmation. The
+final version also reuses the initialized header. All three frozen patches,
+binaries and datasets remain in `step26/`, `step26b/` and `step26c/`.
+
+The final version measures all 38 printing/feed/scroll/reflow cases plus the
+three existing multi-page cases, with 50 samples in each order. Ordinary
+ASCII scrolling improves 12.3% in both orders, Chinese scrolling 7.6–7.9%,
+and multi-page scrolling about 15%. Memory-capped ASCII scrolling improves
+14–18%. ASCII feed is unchanged. Emoji print/feed measures 1–3% slower; the
+Unicode overwrite gap remains. Times below are pooled microsecond medians,
+with native timings measured adjacently for each applicable case.
+
+| Workload | Step 23 µs | Step 26 µs | Forward / reverse | Ghostty µs | Step 26 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 9.802 | 9.145 | 0.960× / 0.924× | 6.238 | 1.47× |
+| print/chinese | 16.887 | 16.502 | 0.986× / 0.974× | 12.113 | 1.36× |
+| print/emoji | 30.701 | 31.320 | 1.019× / 1.024× | 14.935 | 2.10× |
+| feed/ascii | 0.501 | 0.501 | 0.999× / 0.997× | 0.498 | 1.01× |
+| feed/emoji | 32.152 | 33.026 | 1.024× / 1.026× | 17.299 | 1.91× |
+| stream/ascii | 7.164 | 6.296 | 0.877× / 0.877× | 5.842 | 1.08× |
+| stream/chinese | 10.807 | 9.970 | 0.921× / 0.924× | 8.632 | 1.15× |
+| stream/combining | 440.765 | 439.640 | 0.991× / 1.004× | 471.279 | 0.93× |
+| stream/emoji | 467.497 | 465.225 | 0.990× / 1.002× | 736.960 | 0.63× |
+| stream_styled/ascii | 10.739 | 9.822 | 0.904× / 0.931× | 7.690 | 1.28× |
+| reflow/ascii | 19.548 | 18.897 | 0.968× / 0.983× | 21.067 | 0.90× |
+| reflow/combining | 48.925 | 48.053 | 0.984× / 0.982× | 47.875 | 1.00× |
+| reflow/emoji | 37.620 | 37.187 | 0.983× / 0.997× | 30.295 | 1.23× |
+| reflow_history/emoji | 2964.625 | 2933.158 | 0.989× / 0.989× | — | — |
+| stream_memory_capped/ascii | 7.774 | 6.586 | 0.860× / 0.823× | — | — |
+| stream_styled_memory_capped/ascii | 11.320 | 10.042 | 0.866× / 0.900× | — | — |
+| page_spans/print | 28.705 | 29.287 | 1.003× / 1.016× | — | — |
+| page_spans/stream | 7.849 | 6.672 | 0.850× / 0.850× | — | — |
+| page_spans/styled | 8.474 | 7.308 | 0.853× / 0.868× | — | — |
+
+Combining-text printing initially flagged at 1.063×/0.979×. Its confirmation
+measures 1.002×/0.930×, with identical-baseline controls at 1.007×/0.938×.
+The slowdown does not reproduce, but that control variation does not establish
+3% timing equivalence. The original samples are retained alongside the
+confirmation, and no stage ratios are multiplied to produce Ghostty ratios.
+
+Validation passes 313 VT tests with each kernel, 57 benchmark checks,
+workspace/all-target and x86 core checks, formatting, and 2,509 native
+page/generated comparisons with zero failures or coverage gaps. All 14
+allocation observations exactly match step 23, including allocation-free
+ordinary writes and row exposure within capacity. The full workspace run
+passes 480 tests with two opt-in platform tests ignored; it runs outside the
+sandbox because the retained-GPU-frame test needs a Metal adapter. Validated
+Rust source matches the frozen measured patch. The focused parity run does
+not replace the complete configured suite recorded at step 19.

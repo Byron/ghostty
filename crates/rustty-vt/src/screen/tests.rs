@@ -427,3 +427,46 @@ fn wrapped_transfers_share_unchanged_text_and_preserve_detached_snapshots() {
         assert_references(&detached);
     }
 }
+
+#[test]
+fn exposed_rows_are_blank_after_truncation_rotation_and_recycling() {
+    let mut terminal = Terminal::new(8, 4, 0);
+    for row in 1..=4 {
+        terminal.feed(format!("\x1b[{row};1H\x1b[31m\x1b]8;id=test;https://example.org\x07a\u{301}界\x1b]8;;\x07\x1b[0m").as_bytes());
+    }
+    let original = &terminal.screen().pages.pages[0];
+    for background in [Color::Default, Color::Indexed(4), Color::Rgb(12, 34, 56)] {
+        for operation in 0..4 {
+            let mut page = original.clone();
+            match operation {
+                0 => {}
+                1 => page.truncate(2),
+                2 => {
+                    page.rotate_rows(0..4, true);
+                    page.remove_prefix(2);
+                }
+                _ => page.recycle(page.capacity, page.serial + 1),
+            }
+            let row = usize::from(page.rows);
+            page.expose(100, background);
+            assert_eq!(page.row_ids[row], 100);
+            assert!(page.headers[row].has(RowHeader::DIRTY));
+            assert!(!page.headers[row].has(
+                RowHeader::MANAGED
+                    | RowHeader::WRAPPED
+                    | RowHeader::CONTINUATION
+                    | RowHeader::PLACEHOLDER
+            ));
+            assert_eq!(page.headers[row].semantic(), SemanticContent::Output);
+            assert!(
+                page.row_cells(row)
+                    .iter()
+                    .all(|cell| *cell == Cell::blank(background))
+            );
+            page.graphemes
+                .assert_allocations(page.grapheme_map.values().copied());
+            page.links
+                .assert_references(page.link_map.values().copied(), None);
+        }
+    }
+}

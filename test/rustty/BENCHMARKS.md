@@ -4873,3 +4873,154 @@ benchmark self-checks and formatting pass. The source change is restored to
 step 47. Its full Ghostty table and validation remain current. Frozen source,
 binaries, four matched profiles and all four comparisons are preserved under
 `target/packed-simplify/step48/`.
+
+
+### Step 49: reuse cursor preparation after scrolling
+
+Matched profiles locate repeated cursor-resource checks in styled scrolling:
+`sync_cursor_resources` accounts for 9.76% of the step-47 self samples, with
+another 4.07% in `Color::eq`. Ghostty's index path returns after its row operation
+prepares the cursor. Rustty's `shift_rows`, `scroll_up` and `index` instead repeat
+resource synchronization and cursor clamping. Carrying the completed preparation
+through those helpers removes the duplicate work without adding persistent state.
+Generation increments, non-scrolling movement, one-row resets and horizontal
+margins retain their previous behavior.
+
+Hyperlinks keep the existing synchronization path. A public hyperlink without
+an ID is re-admitted on each synchronization, consuming native string reservations.
+The new regression verifies the original counts on a clean build of the committed
+baseline, along with public pen edits, opaque link bytes, generation wraparound,
+history and both screens. The earlier unguarded candidates are superseded and
+remain preserved in `step49/` and `step49b/`.
+
+The baseline is the committed step-47 core. Frozen Rust 1.95.0 executables use
+native ARM CPU flags, 50 samples per direction and adjacent reversed-order
+comparisons. All 54 workloads are retained below; 36 include Ghostty. Ratios
+below one favor the new Rustty.
+
+| Workload | Before µs | After µs | Ghostty µs | After / before, forward / reverse | After / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.341 | 0.343 | 0.346 | 1.013× / 0.999× | 0.991× |
+| width/chinese | 0.344 | 0.340 | 0.343 | 0.985× / 0.993× | 0.991× |
+| width/combining | 0.342 | 0.340 | 0.428 | 0.995× / 0.984× | 0.794× |
+| width/emoji | 0.310 | 0.312 | 0.320 | 1.009× / 1.016× | 0.977× |
+| print/ascii | 9.169 | 9.411 | 6.248 | 1.028× / 1.008× | 1.506× |
+| print/chinese | 16.531 | 16.556 | 12.121 | 0.997× / 1.002× | 1.366× |
+| print/combining | 29.244 | 29.364 | 403.852 | 0.992× / 1.006× | 0.073× |
+| print/emoji | 30.477 | 30.321 | 14.961 | 1.002× / 0.984× | 2.027× |
+| scalar/ascii | 1.756 | 1.884 | 1.290 | 1.161× / 1.126× | 1.460× |
+| scalar/chinese | 1.860 | 1.892 | 1.310 | 1.103× / 1.168× | 1.444× |
+| scalar/combining | 1.741 | 1.690 | 1.329 | 0.769× / 1.004× | 1.272× |
+| scalar/emoji | 1.929 | 1.753 | 1.307 | 1.008× / 1.223× | 1.340× |
+| read/ascii | 2.874 | 2.860 | 1.960 | 0.996× / 0.995× | 1.459× |
+| read/chinese | 2.857 | 2.848 | 1.951 | 0.987× / 1.013× | 1.460× |
+| read/combining | 3.341 | 3.292 | 5.950 | 0.986× / 0.987× | 0.553× |
+| read/emoji | 3.238 | 3.207 | 2.448 | 0.992× / 0.993× | 1.310× |
+| clone/ascii | 4.936 | 4.914 | 6.127 | 0.997× / 0.996× | 0.802× |
+| clone/chinese | 4.888 | 4.942 | 6.258 | 1.011× / 1.010× | 0.790× |
+| clone/combining | 6.257 | 6.276 | 18.109 | 0.988× / 1.017× | 0.347× |
+| clone/emoji | 5.605 | 5.653 | 10.133 | 1.000× / 1.016× | 0.558× |
+| reflow/ascii | 19.119 | 19.532 | 26.027 | 1.025× / 1.032× | 0.750× |
+| reflow/chinese | 20.028 | 20.088 | 26.875 | 1.032× / 0.971× | 0.747× |
+| reflow/combining | 48.403 | 48.710 | 53.232 | 0.992× / 1.003× | 0.915× |
+| reflow/emoji | 36.937 | 37.087 | 35.185 | 0.999× / 1.006× | 1.054× |
+| feed/ascii | 0.427 | 0.420 | 0.501 | 0.983× / 0.990× | 0.839× |
+| feed/chinese | 2.252 | 2.252 | 438.768 | 1.005× / 0.997× | 0.005× |
+| feed/combining | 32.845 | 32.819 | 412.692 | 0.997× / 1.001× | 0.080× |
+| feed/emoji | 19.676 | 19.441 | 17.396 | 0.987× / 0.988× | 1.118× |
+| stream/ascii | 5.781 | 5.548 | 5.744 | 0.960× / 0.964× | 0.966× |
+| stream/chinese | 10.035 | 9.760 | 9.112 | 0.976× / 0.953× | 1.071× |
+| stream/combining | 445.142 | 448.043 | 487.866 | 0.999× / 1.019× | 0.918× |
+| stream/emoji | 299.588 | 299.255 | 771.064 | 0.988× / 1.003× | 0.388× |
+| stream_styled/ascii | 9.468 | 8.925 | 7.958 | 0.951× / 0.931× | 1.121× |
+| stream_styled/chinese | 13.808 | 13.490 | 36.044 | 0.969× / 0.972× | 0.374× |
+| stream_styled/combining | 524.641 | 524.030 | 494.250 | 0.999× / 0.997× | 1.060× |
+| stream_styled/emoji | 423.209 | 419.500 | 779.526 | 0.992× / 0.998× | 0.538× |
+| chunked_feed_mixed/whole | 51.895 | 51.483 | — | 0.992× / 0.991× | — |
+| chunked_feed_mixed/7_bytes | 82.954 | 82.865 | — | 1.003× / 0.993× | — |
+| chunked_feed_mixed/4_KiB | 51.873 | 51.591 | — | 1.005× / 0.989× | — |
+| chunked_stream_mixed/whole | 159.174 | 159.602 | — | 0.998× / 1.006× | — |
+| chunked_stream_mixed/7_bytes | 266.435 | 265.915 | — | 1.001× / 0.996× | — |
+| chunked_stream_mixed/4_KiB | 159.738 | 165.866 | — | 1.054× / 1.000× | — |
+| reflow_history/ascii | 479.084 | 480.277 | — | 0.991× / 1.028× | — |
+| reflow_history/chinese | 341.359 | 343.763 | — | 0.997× / 1.018× | — |
+| reflow_history/combining | 4591.533 | 4582.958 | — | 0.999× / 0.999× | — |
+| reflow_history/emoji | 2961.559 | 2947.217 | — | 0.999× / 0.992× | — |
+| stream_memory_capped/ascii | 5.957 | 5.715 | — | 0.951× / 0.959× | — |
+| stream_memory_capped/chinese | 10.178 | 9.974 | — | 0.976× / 0.987× | — |
+| stream_memory_capped/combining | 442.022 | 446.049 | — | 1.014× / 1.005× | — |
+| stream_memory_capped/emoji | 296.767 | 296.204 | — | 0.997× / 0.999× | — |
+| stream_styled_memory_capped/ascii | 9.602 | 9.111 | — | 0.958× / 0.946× | — |
+| stream_styled_memory_capped/chinese | 14.123 | 13.462 | — | 0.956× / 0.949× | — |
+| stream_styled_memory_capped/combining | 521.550 | 545.048 | — | 1.033× / 1.055× | — |
+| stream_styled_memory_capped/emoji | 419.461 | 415.388 | — | 0.990× / 0.996× | — |
+
+The full sweep finds ordinary ASCII scrolling 4.0% faster, styled ASCII
+scrolling 5.7% faster, and their memory-capped counterparts 4.5% and 5.1% faster
+using pooled medians. Ordinary Chinese scrolling improves 2.7%; styled Chinese
+scrolling improves 2.3%, or 4.7% with the memory cap. The focused gains repeat,
+but their magnitude varies:
+
+| Workload | Focused forward / reverse | Full sweep | Confirmation |
+| --- | ---: | ---: | ---: |
+| stream/ascii | 0.962× / 0.972× | 0.960× / 0.964× | — |
+| stream/chinese | 0.970× / 0.966× | 0.976× / 0.953× | — |
+| stream_styled/ascii | 0.946× / 0.933× | 0.951× / 0.931× | 0.957× / 0.971× |
+| stream_styled/chinese | 0.949× / 0.945× | 0.969× / 0.972× | 0.991× / 0.985× |
+
+Styled ASCII scrolling improves in all six measured orders, by 2.9–6.9%.
+The first focused run clears 5% in both orders for both styled workloads;
+the later full sweep and confirmation do not consistently sustain a 5% minimum.
+The retained result is a modest, repeatable scrolling improvement. Complete feed
+and mixed-delivery workloads otherwise remain close to the baseline.
+
+In this sweep ordinary ASCII scrolling is 3.4% faster than Ghostty, while styled
+ASCII scrolling remains 12.2% slower and Chinese scrolling 7.1% slower. Emoji
+feed remains 11.8% slower, ordinary text reads about 30–46% slower, and direct
+emoji printing about twice as slow. Focused native timings differ from the full
+sweep, so these ratios do not establish universal parity. The native Chinese-feed
+and combining-overwrite cliffs retain the workload-specific limitations above.
+
+All eight cases flagged above 3% in either the focused or full run were repeated,
+then measured with the exact same baseline under both labels and the exact same
+candidate under both labels. Each control again has 50 samples per direction.
+
+| Workload | Flagged run, forward / reverse | Repeat | Identical baseline | Identical candidate |
+| --- | ---: | ---: | ---: | ---: |
+| scalar/ascii | 1.161× / 1.126× | 1.183× / 1.097× | 0.943× / 1.004× | 1.019× / 1.181× |
+| scalar/chinese | 1.103× / 1.168× | 0.786× / 1.391× | 1.476× / 1.183× | 1.002× / 1.005× |
+| scalar/emoji | 1.008× / 1.223× | 1.173× / 1.015× | 1.163× / 0.996× | 1.004× / 1.004× |
+| reflow/ascii | 1.025× / 1.032× | 0.994× / 0.996× | 0.966× / 1.020× | 0.979× / 1.006× |
+| reflow/chinese | 1.032× / 0.971× | 0.991× / 0.998× | 0.996× / 1.032× | 1.006× / 1.009× |
+| chunked_stream_mixed/4_KiB | 1.054× / 1.000× | 0.991× / 0.998× | 0.989× / 0.998× | 0.984× / 0.994× |
+| stream_styled_memory_capped/combining | 1.033× / 1.055× | 1.017× / 1.007× | 1.002× / 1.006× | 1.007× / 1.000× |
+| print/ascii (focused) | 1.080× / 1.004× | 1.171× / 0.958× | 0.977× / 1.053× | 1.118× / 1.020× |
+
+The reflow and mixed-stream flags do not repeat. Memory-capped combining scrolling
+repeats at 1.017×/1.007×, with both identical controls within 1%. The larger scalar
+and direct-ASCII-print variations remain unresolved: identical Chinese scalar
+scans vary by 47.6%, identical candidate ASCII scans by 18.1%, and identical
+candidate ASCII printing by 11.8%. The original adverse results remain in the
+tables and artifacts. These controls do not establish 3% equivalence for scalar
+scans or direct ASCII printing, and are not evidence of speedups in those cases.
+
+All 18 instrumented allocation observations exactly match step 47, including
+zero-allocation ordinary writes and row exposure within capacity. Native admission
+counts, memory charges, retained history and page recycling are unchanged.
+Validation passes 328 VT tests in each kernel configuration, 15 additional parser
+tests with scalar kernels, 505 workspace tests with two opt-in platform tests
+ignored, workspace/all-target checks, generic x86_64 checks in both kernel
+configurations, formatting and both benchmark self-checks. All 61,587 configured
+differential comparisons pass with zero failures; the separate thorough coverage
+gate remains incomplete.
+
+The process guard now also waits for nextest test processes. It preserved complete
+comparisons through independent build waits. A failed stop check during the guard
+update briefly allowed two owned runners to overlap; that entire first partial
+sweep was quarantined and excluded before restarting serially. The first public-link
+baseline check also reused stale shared debug output; its result was invalidated
+and replaced by a clean baseline rebuild. Both discarded attempts remain recorded.
+Frozen source, executables, all accepted samples and controls, assembly, allocation
+observations and validation are under `target/packed-simplify/step49c/`.
+Application-wide timing and the native scheduling smoke retain their previously
+documented limitations.

@@ -9,8 +9,7 @@ and `stream` workloads include UTF-8 decoding and VT parsing.
 The latest [complete Ghostty comparison](#step-10-checkpoint-against-ghostty-2026-09-17)
 covers all 54 workloads. Later focused measurements include the
 [reflow improvement](#step-12-copy-unmanaged-reflow-cells-directly) and the
-[printing comparison](#step-16-release-resources-without-blanking-ordinary-replacement-cells) and
-[current feed/scrolling comparison](#step-17-try-validated-unicode-runs-before-scalar-fallback).
+[current printing/feed/scrolling comparison](#step-18-reuse-the-preceding-cell-when-appending-graphemes).
 Each table identifies its measured source; stage ratios are not multiplied.
 
 ```sh
@@ -3050,3 +3049,55 @@ medians in microseconds; native values were measured adjacently.
 | chunked_feed_mixed/whole | 65.517 | 62.395 | 0.957× / 0.951× | — | — |
 | chunked_stream_mixed/7_bytes | 279.495 | 278.980 | 0.996× / 1.000× | — | — |
 | chunked_stream_mixed/4_KiB | 202.637 | 190.523 | 0.936× / 0.945× | — | — |
+
+
+### Step 18: reuse the preceding cell when appending graphemes
+
+Printing already resolves the preceding cell to decide whether a character
+joins its grapheme. It now carries that cell and the known suffix length into
+append. This removes a second row validation, row lookup, grapheme lookup and
+full cursor clone. The existing allocation supplies both its last scalar and
+length; ordinary cells still need no resource lookup. With segmentation
+disabled, grapheme lookup is limited to characters that can actually append.
+Width changes and wrapping retain their existing resource handling.
+
+All 312 VT tests pass with both kernels, together with 57 benchmark checks,
+workspace all-target checking, x86 VT core checking and formatting. All 2,509
+page-lifecycle and generated native comparisons pass, and all 14 allocation
+observations match step 17. The existing maximum-length snapshot test now
+covers segmentation both enabled and disabled, retaining the detached snapshot
+while the live 260-byte cluster reaches its suffix limit and is later erased.
+
+The first candidate hoisted the grapheme-mode check onto the ASCII path:
+emoji feed improved 7–8%, but ASCII scalar printing regressed 6.7%/7.1%.
+Keeping the check inside the Unicode branch restores ASCII printing to
+1.000×/0.998×. The rejected candidate remains in `target/packed-simplify/step18/`;
+the revised source, binaries and measurements are in `step18b/`.
+
+All 30 printing, feed, scrolling, chunked-input and memory-capped workloads
+use 50 samples per direction. None exceeds the 3% regression threshold in
+either order. Emoji printing/feed improves about 8%, emoji scrolling 7%,
+combining feed 6–7% and combining scrolling 5–6%. Times below are pooled
+medians in microseconds, with adjacent native comparisons.
+
+| Workload | Step 17 µs | Step 18 µs | Forward / reverse | Ghostty µs | Step 18 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 10.370 | 10.359 | 1.000× / 0.998× | 6.060 | 1.71× |
+| print/chinese | 18.381 | 18.009 | 0.967× / 0.997× | 11.950 | 1.51× |
+| print/combining | 32.253 | 30.100 | 0.937× / 0.931× | 390.461 | 0.08× |
+| print/emoji | 34.348 | 31.469 | 0.919× / 0.916× | 14.851 | 2.12× |
+| feed/combining | 35.690 | 33.181 | 0.928× / 0.935× | 397.966 | 0.08× |
+| feed/emoji | 35.984 | 33.034 | 0.921× / 0.918× | 17.181 | 1.92× |
+| stream/ascii | 7.063 | 7.085 | 1.003× / 1.001× | 5.127 | 1.38× |
+| stream/chinese | 11.942 | 11.931 | 1.001× / 1.000× | 8.472 | 1.41× |
+| stream/combining | 466.790 | 440.307 | 0.947× / 0.938× | 478.061 | 0.92× |
+| stream/emoji | 504.997 | 468.120 | 0.923× / 0.929× | 724.582 | 0.65× |
+| stream_styled/combining | 553.559 | 528.222 | 0.953× / 0.956× | 482.462 | 1.09× |
+| stream_styled/emoji | 618.732 | 583.260 | 0.949× / 0.936× | 758.346 | 0.77× |
+| chunked_feed_mixed/7_bytes | 86.411 | 83.509 | 0.965× / 0.969× | — | — |
+| chunked_stream_mixed/4_KiB | 190.611 | 183.425 | 0.962× / 0.963× | — | — |
+
+Emoji feed reaches 1.92× Ghostty and styled combining scrolling 1.09×.
+Ordinary printing and scrolling still have gaps. These are focused headless
+measurements; the complete table and application measurements retain their
+separately identified source checkpoints.

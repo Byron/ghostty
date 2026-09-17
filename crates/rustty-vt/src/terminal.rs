@@ -1058,10 +1058,11 @@ impl Terminal {
         let previous = if cp as u32 <= 255 {
             None
         } else {
+            let graphemes = self.modes.dec(2027);
             let row = self.screen().cursor_row();
             let previous_col = if pending_wrap && self.modes.dec(7) {
                 Some(col)
-            } else if self.modes.dec(2027)
+            } else if graphemes
                 && !self.modes.dec(7)
                 && col == right
                 && row.cells[right].codepoint().is_some()
@@ -1077,19 +1078,26 @@ impl Terminal {
                     previous_col
                 };
                 let cell = row.cells[previous_col];
-                let last = if cell.has_grapheme() && self.modes.dec(2027) && col > 0 {
-                    row.text(previous_col).chars().last()
-                } else {
-                    cell.codepoint()
-                };
-                (previous_col, cell, last)
+                let mut last = cell.codepoint();
+                let mut grapheme_len = 0;
+                if cell.has_grapheme()
+                    && last.is_some()
+                    && if graphemes { col > 0 } else { prop.width == 0 }
+                {
+                    let allocation = row.grapheme(previous_col).unwrap();
+                    grapheme_len = allocation.len;
+                    if graphemes {
+                        last = row.page.graphemes.text(allocation).chars().next_back();
+                    }
+                }
+                (previous_col, cell, last, grapheme_len)
             })
         };
 
         if cp as u32 > 255
             && self.modes.dec(2027)
             && col > 0
-            && let Some((col, previous, Some(last))) = previous
+            && let Some((col, previous, Some(last), grapheme_len)) = previous
         {
             let previous_width = previous.width();
             let old_state = self.grapheme_state;
@@ -1109,7 +1117,7 @@ impl Terminal {
                 } else if !prop.zero_in_grapheme {
                     width = 2;
                 }
-                self.append_grapheme(col, cp, width, right);
+                self.append_grapheme(col, cp, width, right, previous, grapheme_len);
                 return;
             }
         }
@@ -1118,7 +1126,7 @@ impl Terminal {
             if self.modes.dec(2027) {
                 return;
             }
-            if let Some((col, previous, _)) = previous {
+            if let Some((col, previous, _, grapheme_len)) = previous {
                 if previous.codepoint().is_none() {
                     return;
                 }
@@ -1129,7 +1137,7 @@ impl Terminal {
                 {
                     return;
                 }
-                self.append_grapheme(col, cp, previous.width(), right);
+                self.append_grapheme(col, cp, previous.width(), right, previous, grapheme_len);
             }
             return;
         }
@@ -1162,29 +1170,37 @@ impl Terminal {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    fn append_grapheme(&mut self, mut col: usize, cp: char, width: u8, right: usize) {
-        let cursor = self.screen().cursor.clone();
-        self.ensure_row_cells(cursor.row, col + usize::from(width));
-        let row = self.screen().cursor_row();
-        let cell = row.cells[col];
-        let old_width = cell.width();
-        if row
-            .grapheme(col)
-            .is_some_and(|allocation| allocation.len >= 64)
-        {
+    fn append_grapheme(
+        &mut self,
+        mut col: usize,
+        cp: char,
+        width: u8,
+        right: usize,
+        cell: Cell,
+        grapheme_len: u8,
+    ) {
+        // Printing already extended the row and resolved this preceding cell.
+        if grapheme_len >= 64 {
             return;
         }
+        let old_width = cell.width();
+        let y = self.screen().cursor.row;
         if width > old_width && col == right {
             if !self.modes.dec(7) {
                 return;
             }
-            let text = row.copy_cell(col).text.map(|(text, _)| text);
+            let text = self
+                .screen()
+                .cursor_row()
+                .copy_cell(col)
+                .text
+                .map(|(text, _)| text);
             self.screen_mut().cursor.col = col;
             if text.is_some() {
                 // Native moves existing grapheme data without printing a
                 // spacer head, so the pending single shift reaches the base.
                 let spacer_head = right == self.cols as usize - 1;
-                let cell = self.screen_mut().cell_mut(cursor.row, col);
+                let cell = self.screen_mut().cell_mut(y, col);
                 cell.set_codepoint(None);
                 cell.set_width(1);
                 cell.set_spacer_head(spacer_head);
@@ -1206,13 +1222,9 @@ impl Terminal {
                 // Widening writes a spacer tail, which consumes the shift.
                 self.screen_mut().charset.single = None;
             }
-            self.screen_mut().change_grapheme_width(
-                cursor.row,
-                col,
-                width,
-                right,
-                cursor.style.background,
-            );
+            let background = self.screen().cursor.style.background;
+            self.screen_mut()
+                .change_grapheme_width(y, col, width, right, background);
         }
         let _ = self.screen_mut().append_grapheme(col, cp);
         if width != old_width {

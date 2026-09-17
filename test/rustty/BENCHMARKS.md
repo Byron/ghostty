@@ -11,7 +11,8 @@ covers all 54 workloads with the current core, including the scalar-scan
 controls and remaining gaps. Each table identifies its measured source;
 stage ratios are not multiplied.
 The [step 39 renderer comparison](#step-39-reuse-the-empty-tail-boundary-for-painting)
-measures preparation at standard and Retina sizes. The
+measures preparation at standard and Retina sizes;
+[step 40](#step-40-reuse-exact-srgb-channel-conversions) removes repeated color conversions. The
 [step 38 parity comparison](#step-38-execute-the-differential-runner-in-rust)
 measures the Rust runner with preserved fixture data.
 The [step 35 renderer comparison](#step-35-index-glyph-anchors-directly-during-frame-preparation)
@@ -4154,3 +4155,62 @@ replaced with favorable repeat values. All other workloads stay within the
 observations still apply to the unchanged core: all 14 observations match
 step 19, including zero allocations for ordinary writes and row exposure
 within capacity. Renderer allocation reductions are recorded separately above.
+
+
+### Step 40: reuse exact sRGB channel conversions
+
+A fresh six-second sample of the current Retina status-update workload finds
+490 of 4,585 main-thread samples in `powf`; styled scrolling has 243 of 4,607.
+Rustty repeatedly evaluates the same sRGB transfer function while preparing
+colors. Ghostty's Metal renderer passes byte colors to `load_color` in
+`src/renderer/shaders/shaders.metal`, where conversion happens on the GPU.
+Rustty now initializes the existing function's 256 possible channel results
+once in a 1 KiB `LazyLock` table. Its public linear-color representation and
+blending behavior stay unchanged. This smaller fix precedes scratch-buffer reuse.
+
+The clean candidate starts at `a17b8ebc9` and changes only `crates/rustty-render/src/lib.rs`.
+The frozen step-39 baseline has identical inputs and dependencies. Measurements
+use Rust 1.95.0, native CPU flags, Menlo 13 pt, 50 warmup frames and 50 samples
+per direction, serially with process guards. Profiling and validation run
+separately from timing.
+
+At 120×40 cells and 1200×850 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse |
+| --- | ---: | ---: | ---: |
+| cached_redraw | 143.3 → 126.2 | 149.1 → 127.3 | 0.877× / 0.883× |
+| status_update | 144.7 → 129.1 | 147.8 → 130.2 | 0.892× / 0.888× |
+| scroll_ascii | 159.2 → 141.8 | 175.1 → 143.7 | 0.823× / 0.893× |
+| scroll_styled | 97.4 → 94.9 | 100.5 → 98.5 | 1.014× / 0.919× |
+| mixed_unicode | 145.0 → 126.9 | 149.6 → 130.4 | 0.868× / 0.882× |
+| alternate_repaint | 143.3 → 126.8 | 163.5 → 127.5 | 0.888× / 0.877× |
+| resize_reflow | 145.1 → 128.4 | 148.6 → 132.7 | 0.888× / 0.882× |
+
+At scale 2, 215×71 cells and 3456×2234 pixels:
+
+| Workload | Prepare median µs, before → after | p95 µs, before → after | Forward / reverse |
+| --- | ---: | ---: | ---: |
+| cached_redraw | 259.3 → 228.7 | 263.7 → 232.3 | 0.870× / 0.881× |
+| status_update | 259.1 → 227.6 | 268.6 → 247.1 | 0.878× / 0.879× |
+| scroll_ascii | 283.7 → 257.2 | 291.0 → 263.0 | 0.906× / 0.907× |
+| scroll_styled | 176.3 → 160.9 | 178.3 → 166.4 | 0.927× / 0.919× |
+| mixed_unicode | 258.4 → 229.9 | 259.6 → 258.5 | 0.949× / 0.879× |
+| alternate_repaint | 259.8 → 225.8 | 284.9 → 228.7 | 0.847× / 0.887× |
+| resize_reflow | 263.1 → 249.4 | 267.8 → 261.0 | 0.890× / 0.954× |
+
+
+Most preparation medians improve by roughly 9–13%. Standard-size styled
+scrolling is mixed, at 1.014×/0.919×; no workload exceeds a 3% median regression
+in either order. Every feed and preparation allocation count and requested-byte
+sample matches its baseline. The table adds static storage and initializes once;
+it does not add a per-frame payload. These are preparation timings, not GPU
+completion or visible-presentation measurements.
+
+All 256 channel values match the original conversion. The 23 renderer tests
+and 121 GPU/application/session tests pass, with two unrelated opt-in platform
+tests ignored. Workspace/all-target checks and formatting pass. The core is
+unchanged, so the complete Ghostty table and configured parity result above
+remain applicable. The disposable offscreen Metal smoke passes resizing, both
+screens, retained content and idle scheduling with one settling redraw. Frozen
+source, binaries, profiles, samples and validation are under
+`target/packed-simplify/step40/`.

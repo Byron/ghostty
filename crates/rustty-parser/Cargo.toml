@@ -12,3 +12,4 @@ scalar-kernels = []
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 simdutf8 = "0.1.5"
+wide = "1.7"

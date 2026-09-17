@@ -2578,3 +2578,134 @@ do not meet the gain threshold. Chinese feed changes from 3.616 to 3.462 µs
 (0.947×/0.960×), and Chinese scrolling stays at 0.999×/1.002×. No other case
 improves by 5% in both orders. The candidate is reverted; its patch, binaries
 and all 50 samples per direction are preserved in `target/packed-simplify/step9/`.
+
+### Step 10: scan printable ASCII in NEON groups
+
+The parser checks complete 16-byte groups with the already-installed `wide`
+dependency, then uses the original scalar scan for the first mixed group and
+the tail. Unsupported targets and `scalar-kernels` retain the scalar scan.
+Parser events, control boundaries and malformed/partial UTF-8 handling are
+unchanged. The byte/boundary test checks every byte value at aligned and
+unaligned offsets, plus all tail lengths; no unsafe code is added.
+
+All 14 parser tests pass with both kernels, as do 477 workspace tests, 311
+scalar-kernel VT tests, 57 benchmark checks and workspace all-target checking.
+The workspace renderer test requires host Metal access and passes there.
+The changed parser cross-checks for x86 Linux; a broader VT cross-check cannot
+compile its existing `alloca` C dependency without the missing Linux C compiler.
+All 14 allocation/memory observations exactly match step 8.
+The configured parser, inherited stream corpus, snapshot and 100 generated
+cases pass 12,697 differential comparisons with zero failures. This does not
+establish the separate `--thorough` feature-completeness gate.
+
+The focused comparison against step 8 uses 50 samples in each order. ASCII
+feed improves about 26% and scrolling 16–17%; none of the eight workloads
+crosses the 3% regression threshold in either direction. Times are pooled
+medians in microseconds. Frozen binaries, patches, manifests and validation
+logs are retained in `target/packed-simplify/step10/`.
+
+| Workload | Step 8 µs | Step 10 µs | Forward ratio | Reverse ratio |
+| --- | ---: | ---: | ---: | ---: |
+| feed/ascii | 0.858 | 0.630 | 0.738× | 0.731× |
+| stream/ascii | 9.547 | 7.967 | 0.834× | 0.836× |
+| feed/chinese | 3.555 | 3.553 | 1.000× | 0.998× |
+| stream/chinese | 15.973 | 15.831 | 0.994× | 0.987× |
+| feed/combining | 42.029 | 41.788 | 0.999× | 0.989× |
+| feed/emoji | 41.010 | 41.298 | 0.984× | 1.020× |
+| stream/combining | 521.346 | 521.927 | 1.001× | 1.001× |
+| stream/emoji | 575.712 | 566.488 | 0.994× | 0.975× |
+
+
+### Step 10 checkpoint against Ghostty, 2026-09-17
+
+This fresh serial sweep compares the accepted step-8 runtime, step 10 and the
+preserved Ghostty executable on the same Apple M4 Max. Rust builds use 1.95.0
+and `-C target-cpu=native`. Each workload runs adjacent versions and then the
+reverse order, with 50 normalized samples per version per direction: 14,400
+samples across 54 Rust workloads and 36 native counterparts. Compiler/profile
+guards remained enabled; validation finished before timing started.
+
+ASCII feed improves 27–28% in both orders, plain ASCII scrolling 17–18%, and
+styled ASCII scrolling 12–13%. Memory-capped ASCII scrolling improves 15–16%.
+Three workloads cross 3% in at least one order of the complete sweep:
+
+- Styled Chinese scrolling is 1.053×/0.994×; its repeat is 0.999×/0.996×.
+- ASCII scalar reads are 1.033×/1.102×, then 1.035×/1.066×. An identical-binary
+  control varies by 1.053×/0.934×; the next actual comparison changes direction
+  to 0.978×/0.892×.
+- Emoji scalar reads are 1.109×/0.874×, then 0.792×/1.148×. The identical-binary
+  control gives 1.120×/1.017×; the next actual comparison is 0.882×/1.004×.
+
+No slowdown above 3% consistently reproduces, but the controls prevent claiming
+3% equivalence for the short scalar scans. All original samples and flags are
+retained in `comparison/`, `confirmation/`, `scalar-identical-control/` and
+`scalar-confirmation/` under the step-10 artifact directory. The table retains
+the complete sweep, rather than substituting the confirmation values.
+
+Times are pooled medians in microseconds. Ratios below one are faster. This
+replaces the step-4 table as the latest complete native checkpoint; the
+baseline column here is step 8, not the earlier settled baseline.
+
+| Workload | Step 8 µs | Step 10 µs | Ghostty µs | Step 10 / step 8 | Step 10 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.479 | 0.473 | 0.339 | 0.99× | 1.40× |
+| width/chinese | 0.480 | 0.474 | 0.337 | 0.99× | 1.41× |
+| width/combining | 0.434 | 0.432 | 0.417 | 0.99× | 1.03× |
+| width/emoji | 0.326 | 0.325 | 0.314 | 1.00× | 1.03× |
+| print/ascii | 11.986 | 12.195 | 6.176 | 1.02× | 1.97× |
+| print/chinese | 23.675 | 23.776 | 11.988 | 1.00× | 1.98× |
+| print/combining | 38.002 | 37.221 | 387.185 | 0.98× | 0.10× |
+| print/emoji | 39.561 | 38.557 | 14.910 | 0.97× | 2.59× |
+| scalar/ascii | 1.747 | 1.840 | 1.264 | 1.05× | 1.46× |
+| scalar/chinese | 1.873 | 1.838 | 1.248 | 0.98× | 1.47× |
+| scalar/combining | 1.814 | 1.792 | 1.239 | 0.99× | 1.45× |
+| scalar/emoji | 1.623 | 1.535 | 1.254 | 0.95× | 1.22× |
+| read/ascii | 2.646 | 2.640 | 1.881 | 1.00× | 1.40× |
+| read/chinese | 2.705 | 2.698 | 1.905 | 1.00× | 1.42× |
+| read/combining | 3.277 | 3.277 | 5.700 | 1.00× | 0.57× |
+| read/emoji | 3.202 | 3.175 | 2.372 | 0.99× | 1.34× |
+| clone/ascii | 4.804 | 4.819 | 5.232 | 1.00× | 0.92× |
+| clone/chinese | 4.820 | 4.802 | 5.227 | 1.00× | 0.92× |
+| clone/combining | 6.106 | 6.088 | 16.561 | 1.00× | 0.37× |
+| clone/emoji | 5.480 | 5.500 | 9.038 | 1.00× | 0.61× |
+| reflow/ascii | 31.671 | 31.655 | 20.325 | 1.00× | 1.56× |
+| reflow/chinese | 51.533 | 51.585 | 21.733 | 1.00× | 2.37× |
+| reflow/combining | 48.412 | 48.475 | 46.671 | 1.00× | 1.04× |
+| reflow/emoji | 37.199 | 36.488 | 29.462 | 0.98× | 1.24× |
+| feed/ascii | 0.882 | 0.638 | 0.490 | 0.72× | 1.30× |
+| feed/chinese | 3.693 | 3.683 | 435.229 | 1.00× | 0.01× |
+| feed/combining | 42.806 | 42.565 | 390.867 | 0.99× | 0.11× |
+| feed/emoji | 42.122 | 41.440 | 17.131 | 0.98× | 2.42× |
+| stream/ascii | 9.814 | 8.075 | 5.286 | 0.82× | 1.53× |
+| stream/chinese | 16.259 | 16.214 | 8.601 | 1.00× | 1.89× |
+| stream/combining | 527.226 | 530.190 | 480.651 | 1.01× | 1.10× |
+| stream/emoji | 578.414 | 578.717 | 721.412 | 1.00× | 0.80× |
+| stream_styled/ascii | 13.568 | 11.851 | 7.598 | 0.87× | 1.56× |
+| stream_styled/chinese | 20.437 | 20.910 | 33.997 | 1.02× | 0.62× |
+| stream_styled/combining | 614.401 | 613.686 | 476.666 | 1.00× | 1.29× |
+| stream_styled/emoji | 696.356 | 702.026 | 748.752 | 1.01× | 0.94× |
+| chunked_feed_mixed/whole | 73.485 | 73.333 | — | 1.00× | — |
+| chunked_feed_mixed/7_bytes | 95.583 | 95.412 | — | 1.00× | — |
+| chunked_feed_mixed/4_KiB | 73.312 | 73.572 | — | 1.00× | — |
+| chunked_stream_mixed/whole | 226.891 | 228.775 | — | 1.01× | — |
+| chunked_stream_mixed/7_bytes | 307.509 | 305.024 | — | 0.99× | — |
+| chunked_stream_mixed/4_KiB | 231.556 | 227.676 | — | 0.98× | — |
+| reflow_history/ascii | 1140.503 | 1126.547 | — | 0.99× | — |
+| reflow_history/chinese | 1110.002 | 1109.334 | — | 1.00× | — |
+| reflow_history/combining | 4489.083 | 4514.892 | — | 1.01× | — |
+| reflow_history/emoji | 2864.591 | 2852.148 | — | 1.00× | — |
+| stream_memory_capped/ascii | 10.387 | 8.801 | — | 0.85× | — |
+| stream_memory_capped/chinese | 16.721 | 16.751 | — | 1.00× | — |
+| stream_memory_capped/combining | 530.086 | 529.734 | — | 1.00× | — |
+| stream_memory_capped/emoji | 577.235 | 574.145 | — | 0.99× | — |
+| stream_styled_memory_capped/ascii | 14.162 | 12.500 | — | 0.88× | — |
+| stream_styled_memory_capped/chinese | 21.010 | 20.947 | — | 1.00× | — |
+| stream_styled_memory_capped/combining | 618.393 | 619.439 | — | 1.00× | — |
+| stream_styled_memory_capped/emoji | 704.205 | 698.996 | — | 0.99× | — |
+
+ASCII feed and scrolling now take 1.30× and 1.53× Ghostty's time. Plain ASCII
+and Chinese printing remain about 2×, Chinese scrolling 1.88×, and Chinese
+reflow 2.37×. The native Chinese-feed and combining-overwrite cliffs still
+apply; their extreme favorable ratios do not describe general Unicode
+throughput. These are headless VT measurements. Renderer/application timings
+above retain their recorded source snapshots and are not updated by this sweep.

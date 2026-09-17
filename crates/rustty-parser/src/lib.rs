@@ -14,6 +14,38 @@ pub const MAX_INTERMEDIATES: usize = 4;
 pub const MAX_OSC_BYTES: usize = 8 * 1024 * 1024;
 
 #[inline]
+fn printable_ascii_prefix(bytes: &[u8]) -> usize {
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    ))]
+    let prefix = {
+        use wide::u8x16;
+        16 * bytes
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .take_while(|&&chunk| {
+                let offset = u8x16::new(chunk) - u8x16::splat(b' ');
+                !offset.simd_gt(u8x16::splat(b'~' - b' ')).any()
+            })
+            .count()
+    };
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        not(feature = "scalar-kernels")
+    )))]
+    let prefix = 0;
+    prefix
+        + bytes[prefix..]
+            .iter()
+            .position(|byte| !(b' '..=b'~').contains(byte))
+            .unwrap_or(bytes.len() - prefix)
+}
+
+#[inline]
 fn valid_utf8_prefix(bytes: &[u8]) -> &str {
     // The compat validator stops at the first error, so malformed streams do
     // not repeatedly scan their entire remaining suffix. Keep the existing
@@ -314,10 +346,7 @@ impl Parser {
         let mut remaining = bytes;
         while let Some(&byte) = remaining.first() {
             if (b' '..=b'~').contains(&byte) && self.is_ground() {
-                let len = remaining
-                    .iter()
-                    .position(|byte| !(b' '..=b'~').contains(byte))
-                    .unwrap_or(remaining.len());
+                let len = printable_ascii_prefix(remaining);
                 handler(BatchEvent::PrintAscii(&remaining[..len]));
                 remaining = &remaining[len..];
             } else {
@@ -642,6 +671,29 @@ mod tests {
                 }
                 assert!(unicode_runs > 0);
             }
+        }
+    }
+
+    #[test]
+    fn ascii_prefix_matches_all_bytes_and_boundaries() {
+        let mut bytes = [b'x'; 96];
+        for offset in 0..80 {
+            for byte in 0..=u8::MAX {
+                bytes[offset] = byte;
+                for start in 0..=offset.min(15) {
+                    let input = &bytes[start..];
+                    let expected = if (b' '..=b'~').contains(&byte) {
+                        input.len()
+                    } else {
+                        offset - start
+                    };
+                    assert_eq!(printable_ascii_prefix(input), expected);
+                }
+            }
+            bytes[offset] = b'x';
+        }
+        for len in 0..=bytes.len() {
+            assert_eq!(printable_ascii_prefix(&bytes[..len]), len);
         }
     }
 

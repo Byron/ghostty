@@ -2709,3 +2709,50 @@ reflow 2.37×. The native Chinese-feed and combining-overwrite cliffs still
 apply; their extreme favorable ratios do not describe general Unicode
 throughput. These are headless VT measurements. Renderer/application timings
 above retain their recorded source snapshots and are not updated by this sweep.
+
+
+### Step 11: retain indices while walking pages backward
+
+Reverse page lookup now walks logical indices directly. The previous reverse
+`VecDeque` iterator reconstructed its logical index from pointer differences,
+then callers indexed the page again. Keeping the index removes that repeated
+work in six changed lines. The compiled cursor-row helper shrinks from 520 to
+404 bytes; the before/after disassemblies are preserved with the measurements.
+
+All 311 VT tests pass with both kernels, including the existing comparison of
+reverse and forward lookup through page removal, truncation and reuse. Workspace
+all-target checking, the x86 Linux VT core check, 57 benchmark checks and 448
+smoke/generated differential comparisons pass. All 14 allocation observations
+exactly match step 10. The separate thorough completeness gate is not claimed.
+
+Thirty printing, feed, scrolling, chunked-input and memory-capped workloads,
+plus three large-page cases, use 50 samples per direction. None exceeds the
+3% regression threshold in either order. ASCII printing improves 12–13%,
+combining/emoji feed 11–12%, and their scrolling 8–10%. The large-page printing
+case improves 13–15%, while its scrolling cases improve 1–2%.
+
+The selected pooled medians below are microseconds. Forward/reverse ratios
+compare step 11 with step 10. Native values were measured adjacently in this
+stage; they are not derived by multiplying earlier ratios. Full results for
+all 33 cases, frozen sources/binaries, manifests and validation are retained
+in `target/packed-simplify/step11/`.
+
+| Workload | Step 10 µs | Step 11 µs | Forward / reverse | Ghostty µs | Step 11 / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| print/ascii | 12.027 | 10.486 | 0.867× / 0.877× | 5.942 | 1.76× |
+| print/chinese | 23.575 | 21.456 | 0.897× / 0.917× | 11.801 | 1.82× |
+| print/emoji | 38.271 | 33.863 | 0.889× / 0.882× | 14.763 | 2.29× |
+| feed/ascii | 0.642 | 0.572 | 0.888× / 0.900× | 0.484 | 1.18× |
+| feed/combining | 42.325 | 37.405 | 0.883× / 0.887× | 390.679 | 0.10× |
+| feed/emoji | 41.410 | 36.600 | 0.890× / 0.881× | 17.031 | 2.15× |
+| stream/ascii | 8.041 | 7.428 | 0.911× / 0.929× | 5.195 | 1.43× |
+| stream/chinese | 16.077 | 15.391 | 0.958× / 0.954× | 8.543 | 1.80× |
+| stream/combining | 528.923 | 484.053 | 0.913× / 0.917× | 478.887 | 1.01× |
+| stream/emoji | 572.571 | 517.796 | 0.903× / 0.906× | 719.087 | 0.72× |
+| chunked_stream_mixed/7_bytes | 308.272 | 286.544 | 0.925× / 0.938× | — | — |
+| page_spans/print | 37.697 | 32.709 | 0.870× / 0.853× | — | — |
+
+Combining scrolling reaches 1.01× Ghostty, and ASCII feed reaches 1.18×. Ordinary
+printing, Chinese scrolling and emoji overwrites still have material gaps.
+The complete 54-workload table remains the preceding step-10 checkpoint;
+this stage refreshes the affected workloads and their native counterparts.

@@ -98,11 +98,13 @@ impl PageList {
 
     /// Locate a row by its distance from the last row, skipping history pages.
     pub fn locate_from_end(&self, mut distance: usize) -> (usize, usize) {
-        for (index, page) in self.pages.iter().enumerate().rev() {
-            if distance < usize::from(page.rows) {
-                return (index, usize::from(page.rows) - distance - 1);
+        // Keep the logical index instead of recovering it from iterator pointers.
+        for index in (0..self.pages.len()).rev() {
+            let rows = usize::from(self.pages[index].rows);
+            if distance < rows {
+                return (index, rows - distance - 1);
             }
-            distance -= usize::from(page.rows);
+            distance -= rows;
         }
         panic!("row is outside the page list");
     }

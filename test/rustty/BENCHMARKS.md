@@ -6,12 +6,14 @@ window. Criterion is a development dependency only. No application build is
 needed. Timing excludes terminal construction and input generation; the `feed`
 and `stream` workloads include UTF-8 decoding and VT parsing.
 
-The latest [complete Ghostty comparison](#step-19-checkpoint-against-ghostty-2026-09-17)
-covers all 54 workloads after the printing, parsing, reflow and Unicode-table
-changes. Each table identifies its measured source; stage ratios are not
-multiplied.
-The newer [step 26 comparison](#step-26-expose-initialized-rows-without-clearing-them-again)
-covers printing, feed, scrolling and reflow after removing redundant row resets.
+The latest [complete Ghostty comparison](#core-checkpoint-after-step-39)
+covers all 54 workloads with the current core, including the scalar-scan
+controls and remaining gaps. Each table identifies its measured source;
+stage ratios are not multiplied.
+The [step 39 renderer comparison](#step-39-reuse-the-empty-tail-boundary-for-painting)
+measures preparation at standard and Retina sizes. The
+[step 38 parity comparison](#step-38-execute-the-differential-runner-in-rust)
+measures the Rust runner with preserved fixture data.
 The [step 35 renderer comparison](#step-35-index-glyph-anchors-directly-during-frame-preparation)
 uses the supplied scrolling profile to remove per-run glyph-anchor hashing.
 The [step 36 GPU comparison](#step-36-submit-terminal-rectangles-as-gpu-instances)
@@ -4048,3 +4050,107 @@ scheduling with one settling redraw. It uses offscreen capture. The VT/parser
 sources are unchanged, so the 61,587-comparison result at step 38 still applies.
 Source and binary hashes, all samples and validation are retained under
 `target/packed-simplify/step39/`.
+
+
+### Core checkpoint after step 39
+
+This is a fresh serial comparison of all 54 Rust workloads and 36 native
+counterparts: 50 samples in each measurement order, 14,400 samples total.
+The frozen step-19 and step-26c binaries run adjacently with the preserved
+Ghostty executable. The current core and benchmark sources were verified
+identical to `20bf494e9`; subsequent renderer and runner commits do not change
+these kernels. Rust 1.95.0, native CPU flags and harness settings are fixed.
+A detected independent Cargo build caused one unfinished scalar comparison
+to be discarded and rerun. All retained comparisons passed the process guard. All original results and controls are retained under
+`target/packed-simplify/core-checkpoint-39/`.
+
+Times are pooled medians in microseconds. Lower ratios are faster. These
+compare the current core with step 19, rather than attributing core changes
+to the renderer work in step 39.
+
+| Workload | Step 19 µs | Current µs | Ghostty µs | Current / step 19 | Current / Ghostty |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| width/ascii | 0.341 | 0.337 | 0.344 | 0.988× | 0.979× |
+| width/chinese | 0.336 | 0.340 | 0.342 | 1.011× | 0.993× |
+| width/combining | 0.338 | 0.342 | 0.427 | 1.012× | 0.803× |
+| width/emoji | 0.309 | 0.309 | 0.317 | 0.998× | 0.974× |
+| print/ascii | 10.423 | 8.922 | 6.213 | 0.856× | 1.436× |
+| print/chinese | 17.555 | 16.384 | 12.024 | 0.933× | 1.363× |
+| print/combining | 29.744 | 28.831 | 403.427 | 0.969× | 0.071× |
+| print/emoji | 31.200 | 31.296 | 14.949 | 1.003× | 2.093× |
+| scalar/ascii | 1.763 | 2.083 | 1.298 | 1.182× | 1.604× |
+| scalar/chinese | 1.627 | 1.886 | 1.289 | 1.159× | 1.463× |
+| scalar/combining | 1.686 | 1.664 | 1.288 | 0.987× | 1.292× |
+| scalar/emoji | 1.434 | 1.668 | 1.288 | 1.163× | 1.295× |
+| read/ascii | 2.763 | 2.747 | 1.917 | 0.994× | 1.433× |
+| read/chinese | 2.788 | 2.788 | 1.921 | 1.000× | 1.451× |
+| read/combining | 3.263 | 3.306 | 5.813 | 1.013× | 0.569× |
+| read/emoji | 3.191 | 3.191 | 2.409 | 1.000× | 1.324× |
+| clone/ascii | 4.872 | 4.868 | 6.226 | 0.999× | 0.782× |
+| clone/chinese | 4.864 | 4.888 | 6.157 | 1.005× | 0.794× |
+| clone/combining | 6.173 | 6.198 | 17.449 | 1.004× | 0.355× |
+| clone/emoji | 5.542 | 5.575 | 10.140 | 1.006× | 0.550× |
+| reflow/ascii | 19.582 | 18.871 | 28.379 | 0.964× | 0.665× |
+| reflow/chinese | 20.501 | 19.972 | 30.421 | 0.974× | 0.657× |
+| reflow/combining | 48.750 | 48.240 | 55.231 | 0.990× | 0.873× |
+| reflow/emoji | 37.604 | 37.398 | 38.494 | 0.995× | 0.972× |
+| feed/ascii | 0.494 | 0.497 | 0.493 | 1.006× | 1.007× |
+| feed/chinese | 2.252 | 2.243 | 435.887 | 0.996× | 0.005× |
+| feed/combining | 33.013 | 32.251 | 402.462 | 0.977× | 0.080× |
+| feed/emoji | 33.284 | 33.320 | 17.195 | 1.001× | 1.938× |
+| stream/ascii | 7.097 | 6.332 | 5.917 | 0.892× | 1.070× |
+| stream/chinese | 10.832 | 10.044 | 9.211 | 0.927× | 1.090× |
+| stream/combining | 441.421 | 437.707 | 476.454 | 0.992× | 0.919× |
+| stream/emoji | 467.098 | 463.821 | 737.921 | 0.993× | 0.629× |
+| stream_styled/ascii | 10.681 | 9.866 | 8.318 | 0.924× | 1.186× |
+| stream_styled/chinese | 14.696 | 13.760 | 34.866 | 0.936× | 0.395× |
+| stream_styled/combining | 525.532 | 524.822 | 485.475 | 0.999× | 1.081× |
+| stream_styled/emoji | 584.268 | 579.466 | 759.481 | 0.992× | 0.763× |
+| chunked_feed_mixed/whole | 59.540 | 58.739 | — | 0.987× | — |
+| chunked_feed_mixed/7_bytes | 82.784 | 82.146 | — | 0.992× | — |
+| chunked_feed_mixed/4_KiB | 59.051 | 58.937 | — | 0.998× | — |
+| chunked_stream_mixed/whole | 181.595 | 180.882 | — | 0.996× | — |
+| chunked_stream_mixed/7_bytes | 269.157 | 266.780 | — | 0.991× | — |
+| chunked_stream_mixed/4_KiB | 181.056 | 180.704 | — | 0.998× | — |
+| reflow_history/ascii | 493.539 | 474.381 | — | 0.961× | — |
+| reflow_history/chinese | 357.322 | 342.212 | — | 0.958× | — |
+| reflow_history/combining | 4531.458 | 4462.871 | — | 0.985× | — |
+| reflow_history/emoji | 2923.860 | 2934.560 | — | 1.004× | — |
+| stream_memory_capped/ascii | 7.737 | 6.381 | — | 0.825× | — |
+| stream_memory_capped/chinese | 11.303 | 10.054 | — | 0.889× | — |
+| stream_memory_capped/combining | 439.848 | 439.973 | — | 1.000× | — |
+| stream_memory_capped/emoji | 469.309 | 466.106 | — | 0.993× | — |
+| stream_styled_memory_capped/ascii | 11.289 | 10.317 | — | 0.914× | — |
+| stream_styled_memory_capped/chinese | 15.131 | 13.909 | — | 0.919× | — |
+| stream_styled_memory_capped/combining | 525.689 | 525.640 | — | 1.000× | — |
+| stream_styled_memory_capped/emoji | 585.034 | 579.528 | — | 0.991× | — |
+
+ASCII feed remains at parity with Ghostty. Ordinary ASCII and Chinese scrolling
+are within 7–9%, styled ASCII scrolling is 19% slower, and text reading remains
+32–45% slower for the non-combining corpora. Emoji overwrites remain the largest
+complete-feed gap at 1.94×; direct emoji printing is 2.09×. Cloning, width lookup
+and these reflow measurements match or beat the adjacent native measurements.
+Native clone/reflow timings vary between checkpoints, so the newer ratios must
+not be interpreted as improvements caused by the renderer. Chinese feed and
+combining overwrites retain the previously documented native resource-admission
+cliffs; their extreme ratios do not establish general Unicode superiority.
+
+Only the short scalar scans exceed the 3% stage-regression flag. The following
+controls also use 50 samples per direction. Each entry is forward / reverse;
+identical controls launch the exact same executable under both labels.
+
+| Scalar scan | Original current / step 19 | Repeat current / step 19 | Identical step-19 control | Identical current control |
+| --- | ---: | ---: | ---: | ---: |
+| scalar/ascii | 1.127× / 1.184× | 1.181× / 0.979× | 1.184× / 0.871× | 1.072× / 0.854× |
+| scalar/chinese | 1.285× / 0.921× | 1.098× / 1.247× | 1.172× / 0.985× | 1.089× / 1.078× |
+| scalar/combining | 1.003× / 0.893× | 0.801× / 0.904× | 0.938× / 0.926× | 0.957× / 0.984× |
+| scalar/emoji | 0.998× / 1.165× | 1.169× / 1.164× | 1.156× / 0.912× | 1.073× / 0.924× |
+
+Scalar scans remain unresolved. Some adverse ratios repeat, while identical
+binaries also vary by 7–18%. These data do not establish 3% equivalence or rule
+out an underlying slowdown. The original full table is retained rather than
+replaced with favorable repeat values. All other workloads stay within the
+3% regression threshold in both initial directions. The stage-26 allocation
+observations still apply to the unchanged core: all 14 observations match
+step 19, including zero allocations for ordinary writes and row exposure
+within capacity. Renderer allocation reductions are recorded separately above.
